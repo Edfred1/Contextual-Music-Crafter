@@ -1,0 +1,4 @@
+google-generativeai
+midiutil
+PyYAML
+colorama 
