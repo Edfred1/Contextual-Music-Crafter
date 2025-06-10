@@ -390,7 +390,10 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
         f"**--- UNIVERSAL PRINCIPLES OF GOOD MUSIC ---**\n"
         f"1. **Structure & Evolution:** A good musical part tells a story. Structure your composition over the full {length} bars. Avoid mindless, robotic repetition. For example, you could use an A/B structure where the first half establishes a theme (A) and the second half provides a variation or answer (B).\n"
         f"2. **Clarity through Space:** Do not create a constant wall of sound. The musical role of a part determines how it should use space and silence. Your role-specific instructions provide guidance on this.\n"
-        f"3. **Dynamic Phrasing:** Use a wide range of velocity to create accents and shape the energy of the phrase. A static volume is boring.\n\n"
+        f"3. **Dynamic Phrasing:** Use a wide range of velocity to create accents and shape the energy of the phrase. A static volume is boring.\n"
+        f"4. **Tension & Release:** Build musical tension through dynamics, rhythmic complexity, or harmony, and resolve it at key moments (e.g., at the end of 4 or 8 or 16 bar phrases) to create a satisfying arc.\n"
+        f"5. **Ensemble Playing:** Think like a member of a band. Your performance must complement the existing parts. Pay attention to the phrasing of other instruments and find pockets of space to add your musical statement without cluttering the arrangement.\n"
+        f"6. **Micro-timing for Groove:** To add a human feel, you can subtly shift notes off the strict grid. Slightly anticipating a beat can add urgency, while slightly delaying it can create a more relaxed feel. This is especially effective for non-kick/snare elements.\n\n"
         f"**--- OUTPUT FORMAT: JSON ---**\n"
         f"Generate the musical data as a single, valid JSON array of objects. Each object represents a note and MUST have these keys:\n"
         f'- **"pitch"**: MIDI note number (integer 0-127, from the provided scale notes).\n'
