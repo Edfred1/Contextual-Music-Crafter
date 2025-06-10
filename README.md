@@ -12,31 +12,52 @@ The entire creative direction of the music—from genre and tempo to instrumenta
 -   **Iterative Generation:** The script can be configured to generate multiple complete song variations in a single run, perfect for exploring different ideas quickly.
 -   **Simple & Robust:** The script is self-contained and easy to run, with clear feedback during the generation process.
 
-## 🚀 Getting Started
+## 🚀 Installation & Setup
 
-### 1. Prerequisites
+### Step 1: Install Prerequisites (Git & Python)
 
--   Python 3.7+
--   An active Google AI API Key. You can obtain one from [Google AI Studio](https://aistudio.google.com/app/apikey).
+<details>
+<summary>Click here for detailed installation instructions for Git and Python.</summary>
 
-### 2. Installation
+#### **Git**
+This project is managed with Git. You need it to clone the repository.
+-   **Check if Git is installed:** Open your terminal or command prompt and type `git --version`. If it returns a version number, you're all set.
+-   **How to install Git:** If the command is not found, download and install Git from [git-scm.com](https://git-scm.com/).
 
-1.  **Clone the repository:**
+#### **Python & Pip**
+The script runs on Python. `pip` is Python's package manager and is included with modern Python installations.
+-   **Check if Python is installed:** Open your terminal and type `python --version` or `python3 --version`. You need version 3.7 or newer.
+-   **How to install Python:** If you don't have it, download the latest version from [python.org](https://www.python.org/).
+    -   **⭐ Important for Windows Users:** During installation, make sure to check the box that says **"Add Python to PATH"**. This is a very common source of errors if missed.
+
+</details>
+
+### Step 2: Project Setup
+
+1.  **Get the Project Files**
+
+    You can either clone the repository with Git (recommended) or download it as a ZIP file.
+    
+    **Option A (Git):**
     ```bash
     git clone https://github.com/Edfred1/Contextual-Music-Crafter.git
     cd Contextual-Music-Crafter
     ```
+    **Option B (ZIP):**
+    - Download the ZIP from the [main repository page](https://github.com/Edfred1/Contextual-Music-Crafter) by clicking `Code` > `Download ZIP`.
+    - Unzip the file and open a terminal in that directory.
 
 2.  **Install the required Python packages:**
     ```bash
     pip install -r requirements.txt
     ```
 
-### 3. Configuration
+### Step 3: API Key & Configuration
 
 1.  **Open `config.yaml`** in a text editor.
 
 2.  **Set your API Key:**
+    You can get a key from [Google AI Studio](https://aistudio.google.com/app/apikey).
     Find the `api_key` field and replace `"YOUR_GOOGLE_AI_API_KEY"` with your actual key.
     ```yaml
     # API Configuration
