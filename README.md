@@ -47,10 +47,25 @@ The script runs on Python. `pip` is Python's package manager and is included wit
     - Download the ZIP from the [main repository page](https://github.com/Edfred1/Contextual-Music-Crafter) by clicking `Code` > `Download ZIP`.
     - Unzip the file and open a terminal in that directory.
 
-2.  **Install the required Python packages:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+2.  **Run the Installation Script**
+
+    This will install the necessary Python packages.
+
+    -   **On Windows:** Double-click and run the `install.bat` file.
+    -   **On macOS/Linux:** Open a terminal and run the following command:
+        ```bash
+        chmod +x install.sh
+        ./install.sh
+        ```
+
+<details>
+<summary>Manual Installation (if the script fails)</summary>
+
+If you prefer to install manually, run this command in your terminal:
+```bash
+pip install -r requirements.txt
+```
+</details>
 
 ### Step 3: API Key & Configuration
 
