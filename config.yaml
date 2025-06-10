@@ -1,6 +1,6 @@
 # API Configuration
 # Replace with your actual Google AI API key.
-api_key: "AIzaSyB3DMGTz9EFgev_8tOIUTdp8aLvK8opL3M" #YOUR_GOOGLE_AI_API_KEY
+api_key: "YOUR_GOOGLE_AI_API_KEY" #YOUR_GOOGLE_AI_API_KEY
 model_name: "gemini-2.5-flash-preview-05-20" #"gemini-2.5-pro-exp-03-25"  #gemini-2.5-flash-preview-05-20 #gemini-2.5-flash-preview-04-17model_name: "gemini-1.5-flash" # Recommended model
 
 # --- Musical Parameters ---
