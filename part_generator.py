@@ -340,14 +340,42 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
             "Listen to the other instruments. Find a sonic niche and a rhythmic pattern that is currently unoccupied. Your goal is to add a new layer that enhances the overall composition without making it sound cluttered."
         )
 
+    # --- NEW: Add a specific drum map for drum/percussion roles ---
+    drum_map_instructions = ""
+    if role in ["drums", "percussion"]:
+        drum_map_instructions = (
+            "**Drum Map Guidance (Addictive Drums 2 Standard):**\n"
+            "You MUST use the following MIDI notes for the corresponding drum sounds. This is not a suggestion, but a requirement for this track.\n"
+            "- **Kick:** MIDI Note 36\n"
+            "- **Snare (Center Hit):** MIDI Note 38\n"
+            "- **Snare (Rimshot):** MIDI Note 40\n"
+            "- **Hi-Hat (Closed):** MIDI Note 42\n"
+            "- **Hi-Hat (Open):** MIDI Note 46\n"
+            "- **Hi-Hat (Pedal Close):** MIDI Note 44\n"
+            "- **Crash Cymbal 1:** MIDI Note 49\n"
+            "- **Ride Cymbal 1:** MIDI Note 51\n"
+            "- **High Tom:** MIDI Note 50\n"
+            "- **Mid Tom:** MIDI Note 48\n"
+            "- **Low Tom:** MIDI Note 45\n\n"
+        )
+
     # --- The final prompt that puts it all together ---
-    # Define which roles should be allowed to play overlapping notes (polyphony)
+    # Define roles for different polyphony rules
     POLYPHONIC_ROLES = {"harmony", "chords", "pads", "atmosphere", "texture", "guitar"}
+    EXPRESSIVE_MONOPHONIC_ROLES = {"lead", "melody", "vocal"}
     
     if role in POLYPHONIC_ROLES:
         polyphony_rule = "2.  **Polyphonic:** Notes for this track CAN overlap. This is crucial for playing chords and creating rich textures. The JSON array can contain note objects whose start and end times overlap."
-    else:
-        polyphony_rule = "2.  **Monophonic:** The notes in the JSON array must not overlap in time. A new note can only start after the previous one has finished."
+    elif role in EXPRESSIVE_MONOPHONIC_ROLES:
+        polyphony_rule = "2.  **Expressive Monophonic:** Notes should primarily be played one at a time. However, very short, slight overlaps are PERMITTED to create a natural, legato-style performance. Do not create full, sustained chords."
+    else: # Strictly Monophonic roles like bass, arp, drums
+        polyphony_rule = "2.  **Strictly Monophonic:** The notes in the JSON array must NOT overlap in time. A new note can only start after the previous one has finished."
+
+    # --- NEW: Conditional "Stay in Key" rule ---
+    # For drums, this rule is irrelevant and confusing.
+    stay_in_key_rule = f"3.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n"
+    if role in ["drums", "percussion"]:
+        stay_in_key_rule = "3.  **Use Drum Map:** You must adhere to the provided Drum Map for all note pitches.\n"
 
     prompt = (
         f'You are an expert music producer creating a track inspired by: **{config["inspiration"]}**.\n'
@@ -357,6 +385,7 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
         f"{context_prompt_part}"
         f"**--- YOUR TASK ---**\n"
         f"{generation_stage_instructions}\n\n"
+        f"{drum_map_instructions}"
         f"{role_instructions}\n\n"
         f"**--- UNIVERSAL PRINCIPLES OF GOOD MUSIC ---**\n"
         f"1. **Structure & Evolution:** A good musical part tells a story. Structure your composition over the full {length} bars. Avoid mindless, robotic repetition. For example, you could use an A/B structure where the first half establishes a theme (A) and the second half provides a variation or answer (B).\n"
@@ -371,7 +400,7 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
         f"**IMPORTANT RULES:**\n"
         f'1.  **JSON ONLY:** Your entire response MUST be only the raw JSON array. DO NOT include ```json ... ```, explanations, or any other text.\n'
         f"{polyphony_rule}\n"
-        f"3.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n"
+        f"{stay_in_key_rule}"
         f"4.  **Timing is Absolute:** 'start_beat' is the absolute position from the beginning of the {length}-bar clip.\n"
         f"5.  **Be Creative:** Compose a musically interesting and high-quality part that fits the description.\n"
         f'6.  **Valid JSON Syntax:** The output must be a perfectly valid JSON array. Use double quotes for all keys and string values. Ensure no trailing commas.\n\n'
@@ -623,7 +652,7 @@ def generate_filename(config, base_filename: str) -> str:
         base_dir = os.path.dirname(base_filename)
         
         # Construct the new, shorter filename
-        new_name = f"{genre}_{truncated_inspiration}_{key}_{bpm}bpm_{timestamp}.mid"
+        new_name = f"{genre}_{key}_{truncated_inspiration}_{bpm}bpm_{timestamp}.mid"
         
         return os.path.join(base_dir, new_name)
     except Exception as e:
