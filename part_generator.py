@@ -540,12 +540,26 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str) -> bo
         midi_file.addTempo(track=0, time=0, tempo=bpm)
         midi_file.addTimeSignature(track=0, time=0, numerator=time_signature_beats, denominator=4, clocks_per_tick=24)
 
+        # Smart channel assignment
+        # Channel 10 (index 9) is for percussion. Non-drum channels will be assigned from 0, skipping 9.
+        next_melodic_channel = 0
         for i, track_data in enumerate(song_data["tracks"]):
             track_name = track_data["instrument_name"]
             program_num = track_data["program_num"]
-            channel = i % 16  # MIDI channels 0-15
-            if channel == 9: # MIDI channel 10 (index 9) is for percussion
-                channel += 1
+            role = track_data.get("role", "complementary")
+            
+            # Assign MIDI channel
+            if role in ["drums", "percussion"]:
+                channel = 9 # MIDI Channel 10 for drums
+            else:
+                channel = next_melodic_channel
+                if channel == 9: # Skip the drum channel
+                    next_melodic_channel += 1
+                    channel = next_melodic_channel
+                next_melodic_channel += 1
+
+            # Fallback if we somehow run out of channels
+            if channel > 15: channel = 15
             
             midi_file.addTrackName(i, 0, track_name)
             midi_file.addProgramChange(i, channel, 0, program_num)
