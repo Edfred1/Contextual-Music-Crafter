@@ -70,7 +70,7 @@ time_signature:
 # The script will generate a part for each one sequentially.
 instruments:
   - name: "Drums"
-    program_num: 1      # Standard Drum Kit (often ignored by DAWs, but required)
+    program_num: 10      # Standard Drum Kit (often ignored by DAWs, but required)
     role: "drums"
     
   - name: "Funky Bass"
@@ -88,6 +88,41 @@ instruments:
   - name: "Atmospheric Pads"
     program_num: 90 # Pad 2 (warm)
     role: "complementary"
+    
+# --- MIDI Technical Reference ---
+# This section is for information only and does not configure the script.
+#
+# General MIDI Channel Assignments:
+# The script automatically handles channel assignments based on instrument roles.
+#
+# - Channel 10 (internal index 9): Reserved for Drums & Percussion.
+#   Any instrument with the role "drums" or "percussion" will be assigned to this channel
+#   to ensure it plays with a drum kit sound in any standard MIDI player.
+#
+# - Channels 1-9 & 11-16: Used for Melodic & Tonal Instruments.
+#   All other roles (bass, pads, lead, etc.) are assigned to these channels.
+#   The script assigns them sequentially, skipping channel 10.
+#
+# General MIDI Program Numbers (Examples for reference):
+#   1-8: Pianos
+#   9-16: Chromatic Percussion
+#   17-24: Organs
+#   25-32: Guitars
+#   33-40: Basses
+#   41-48: Strings
+#   49-56: Ensemble
+#   57-64: Brass
+#   65-72: Reed
+#   73-80: Pipe
+#   81-88: Synth Lead
+#   89-96: Synth Pad
+#   97-104: Synth Effects
+#   105-112: Ethnic
+#   113-120: Percussive
+#   121-128: Sound Effects
+
+
+
 
 
 
