@@ -48,7 +48,7 @@ The entire creative direction of the music—from genre and tempo to instrumenta
     Adjust the parameters in `config.yaml` to define your desired musical output.
 
     -   `api_key`: Your Google AI API Key.
-    -   `model_name`: The specific generative model to use (e.g., "gemini-1.5-flash").
+    -   `model_name`: The specific generative model to use (e.g., "gemini-2.5-flash-preview-05-20").
     -   `inspiration`: A detailed text prompt describing the style and mood. This is the most important creative input!
     -   `genre`: The primary musical genre.
     -   `bpm`: Tempo in beats per minute.
