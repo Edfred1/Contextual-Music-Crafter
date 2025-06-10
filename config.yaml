@@ -1,45 +1,93 @@
 # API Configuration
-# IMPORTANT: Enter your Google AI API key below.
-# To get a key, visit https://aistudio.google.com/app/apikey
-api_key: "YOUR_API_KEY_HERE"
-model_name: "gemini-2.5-flash-preview-04-17" #"gemini-2.5-pro-exp-03-25"  #gemini-2.5-flash-preview-05-20
-# Recommended model. 
-#Others like "gemini-2.5-pro" also work.
+# Replace with your actual Google AI API key.
+api_key: "AIzaSyB3DMGTz9EFgev_8tOIUTdp8aLvK8opL3M" #YOUR_GOOGLE_AI_API_KEY
+model_name: "gemini-2.5-flash-preview-05-20" #"gemini-2.5-pro-exp-03-25"  #gemini-2.5-flash-preview-05-20 #gemini-2.5-flash-preview-04-17model_name: "gemini-1.5-flash" # Recommended model
 
-# Musical Base Settings
-inspiration: "Vini Vici, Astrix, Liquid Soul" # Artists, songs, albums, etc. for style inspiration
-genre: "psytrance"                          # Music genre
-bpm: 140                                    # Tempo in beats per minute
-key_scale: "E minor"                        # Key and scale (e.g., "C# major", "F phrygian")
+# --- Musical Parameters ---
+# Use these settings to define the core musical direction of your generated track.
 
-# The script automatically calculates technical values like 'root_note' and 'scale_type'
-# from the 'key_scale' setting above. You do not need to set them manually.
+# A detailed description of the musical style you want to create.
+# Be specific about feeling, instrumentation, and rhythm. You can also name
+# artists (e.g. "in the style of Daft Punk"), songs, albums, or other concepts as inspiration.
+# Example: "A high-energy, four-on-the-floor house track in the style of Daft Punk. 
+# Focus on a funky, filtered bassline, a classic house piano chord progression, 
+# and a simple, catchy lead synth melody. The drums should be punchy and groovy."
+inspiration: "A high-energy, four-on-the-floor house track with a funky bassline."
+
+# The primary genre of the track. This helps the AI understand the conventions to follow.
+genre: "House Music"
+
+# Beats Per Minute (Tempo) of the song.
+bpm: 125
+
+# The key and scale of the song (e.g., "C major", "A minor", "F# dorian").
+# The script supports a wide variety of scales and church modes.
+# Available scales: "major", "ionian", "minor", "natural minor", "aeolian", 
+# "harmonic minor", "melodic minor", "dorian", "phrygian", "lydian", 
+# "mixolydian", "locrian", "major pentatonic", "minor pentatonic", "chromatic", 
+# "whole tone", "diminished", "augmented", "byzantine", "hungarian minor", 
+# "persian", "arabic", "jewish", "ahava raba", "blues", "major blues"
+key_scale: "C minor"
+
+# Enables a "call and response" generation mode for melodic instruments.
+# 0 = Disabled: Each track is generated independently based on the full context.
+# 1 = Enabled: Melodic instruments will try to create a dialogue by playing in the gaps left by other melodic parts.
+use_call_and_response: 0
+
+# The number of complete songs to generate in a single run.
+number_of_iterations: 1
+
+# The time signature of the song.
 time_signature:
   beats_per_bar: 4
-  beat_value: 4
+  beat_value: 4 # (4 = quarter note)
 
-# Instrument Configuration
-# Define your instruments. The name (e.g., "lead") is for the AI.
-# The number is the General MIDI program number (1-128).
-# For drums, use a name containing "drum". The program number is ignored
-# as it will be assigned to the standard MIDI drum channel (10).
+# --- Instrument Definitions ---
+# Define the instruments that will make up your arrangement.
+# Each instrument is a list item with a `name`, a `program_num` (General MIDI program number), and a `role`.
+# The `role` tells the AI the musical function of the track. 
+#The order in this list determines the generation order.
+# Available Roles:
+#   - "drums":      The main rhythmic foundation (kick, snare, hats).
+#   - "percussion": Complementary rhythmic elements (bongos, congas, shakers).
+#   - "sub_bass":   Very deep, fundamental bass (often a sine wave).
+#   - "bass":       The main, rhythmic bassline.
+#   - "pads":       Atmospheric pads, long/slow chords.
+#   - "atmosphere": Similar to pads, often more textured or evolving.
+#   - "texture":    Sonic textures, not necessarily melodic or rhythmic.
+#   - "chords":     Defines the chord progression, can be rhythmic stabs or sustained.
+#   - "harmony":    Similar to chords, providing harmonic structure.
+#   - "arp":        An arpeggio; plays chord notes sequentially in a pattern.
+#   - "guitar":     Versatile for riffs, melodies, or rhythmic chords.
+#   - "lead":       The main melody or riff, the focal point.
+#   - "melody":     A secondary or supporting melody line.
+#   - "vocal":      Rhythmic vocal chops or short, catchy phrases.
+#   - "fx":         Sound effects, risers, impacts, sweeps, etc.
+#   - "complementary": A general, complementary role (default if no role is specified).
+
+#The order in this list determines the generation order.
+# You can add as many instruments as you like to the list below.
+# The script will generate a part for each one sequentially.
 instruments:
-  lead: 81    # Synth Lead
-  bass: 38    # Synth Bass
-  pad: 90     # Pad (polysynth)
-  arp: 99     # FX 3 (crystal)
-  drums: 10   # This number is ignored for drums but must be present.
-  acid: 82    # Lead 2 (sawtooth) for 303-style lines
+  - name: "Drums"
+    program_num: 1      # Standard Drum Kit (often ignored by DAWs, but required)
+    role: "drums"
+    
+  - name: "Funky Bass"
+    program_num: 39 # Synth Bass 2
+    role: "bass"
+    
+  - name: "House Piano"
+    program_num: 2  # Acoustic Grand Piano
+    role: "harmony"
+    
+  - name: "Lead Synth"
+    program_num: 82 # Lead 2 (sawtooth)
+    role: "melody"
+    
+  - name: "Atmospheric Pads"
+    program_num: 90 # Pad 2 (warm)
+    role: "complementary"
 
-# --- Advanced Generation Control ---
 
-# Defines the order in which instrument tracks are generated.
-# This is crucial as each track is composed with knowledge of the previous ones.
-# A logical order for the genre is recommended (e.g., rhythm section first).
-generation_order:
-  - "drums"
-  - "bass"
-  - "pad"
-  - "arp"
-  - "acid"
-  - "lead" 
+
