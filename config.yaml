@@ -46,7 +46,6 @@ time_signature:
 # Define the instruments that will make up your arrangement.
 # Each instrument is a list item with a `name`, a `program_num` (General MIDI program number), and a `role`.
 # The `role` tells the AI the musical function of the track. 
-#The order in this list determines the generation order.
 # Available Roles:
 #   - "drums":      The main rhythmic foundation (kick, snare, hats).
 #   - "percussion": Complementary rhythmic elements (bongos, congas, shakers).
