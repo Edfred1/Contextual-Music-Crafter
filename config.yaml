@@ -50,17 +50,17 @@ time_signature:
 #   - "drums":      The main rhythmic foundation (kick, snare, hats).
 #   - "percussion": Complementary rhythmic elements (bongos, congas, shakers).
 #   - "sub_bass":   Very deep, fundamental bass (often a sine wave).
-#   - "bass":       The main, rhythmic bassline.
+#   - "bass":       The main, rhythmic bassline. (Responds to Call/Response)
 #   - "pads":       Atmospheric pads, long/slow chords.
 #   - "atmosphere": Similar to pads, often more textured or evolving.
 #   - "texture":    Sonic textures, not necessarily melodic or rhythmic.
-#   - "chords":     Defines the chord progression, can be rhythmic stabs or sustained.
+#   - "chords":     Defines the chord progression, can be rhythmic stabs or sustained. (Responds to Call/Response)
 #   - "harmony":    Similar to chords, providing harmonic structure.
-#   - "arp":        An arpeggio; plays chord notes sequentially in a pattern.
-#   - "guitar":     Versatile for riffs, melodies, or rhythmic chords.
-#   - "lead":       The main melody or riff, the focal point.
-#   - "melody":     A secondary or supporting melody line.
-#   - "vocal":      Rhythmic vocal chops or short, catchy phrases.
+#   - "arp":        An arpeggio; plays chord notes sequentially in a pattern. (Responds to Call/Response)
+#   - "guitar":     Versatile for riffs, melodies, or rhythmic chords. (Responds to Call/Response)
+#   - "lead":       The main melody or riff, the focal point. (Responds to Call/Response)
+#   - "melody":     A secondary or supporting melody line. (Responds to Call/Response)
+#   - "vocal":      Rhythmic vocal chops or short, catchy phrases. (Responds to Call/Response)
 #   - "fx":         Sound effects, risers, impacts, sweeps, etc.
 #   - "complementary": A general, complementary role (default if no role is specified).
 
