@@ -214,7 +214,7 @@ def get_scale_notes(root_note, scale_type="minor"):
         print(Fore.RED + f"Error generating scale for {scale_type}: {str(e)}" + Style.RESET_ALL)
         return [60, 62, 64, 65, 67, 69, 71] # Return C Major scale on error
 
-def create_single_track_prompt(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int):
+def create_single_track_prompt(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str):
     """
     Creates a universal, music-intelligent prompt that is tailored 
     to the role and position in the arrangement.
@@ -235,12 +235,29 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
     # --- Context for other tracks ---
     context_prompt_part = ""
     if context_tracks:
-        context_prompt_part = "**Listen to the existing tracks for context:**\n"
+        context_prompt_part = "**Listen to the existing tracks for context. Here is the actual note data for each part:**\n"
         for track in context_tracks:
-            context_prompt_part += f"- {track['instrument_name']}: Plays a {track['role']} part.\n"
+            # Convert notes to a compact JSON string for the prompt
+            notes_as_str = json.dumps(track['notes'])
+            context_prompt_part += f"- **{track['instrument_name']}** (Role: {track['role']}):\n```json\n{notes_as_str}\n```\n"
         context_prompt_part += "\n"
 
-    # --- NEW: Instructions based on position in arrangement ---
+    # --- Call and Response Instruction ---
+    call_and_response_instructions = ""
+    if dialogue_role == 'call':
+        call_and_response_instructions = (
+            "**Special Instruction: You are the 'Call' in a Dialogue**\n"
+            "You are the first part in a musical conversation. Your primary goal is to create a clear, catchy musical phrase (a 'call') and then **intentionally leave space (rests)** for another instrument to answer. "
+            "Think of it as asking a musical question. Don't fill all the space. Your phrasing should invite a response.\n\n"
+        )
+    elif dialogue_role == 'response':
+        call_and_response_instructions = (
+            "**Special Instruction: You are the 'Response' in a Dialogue**\n"
+            "You are part of a musical conversation. Another instrument has just played a 'call'. Listen carefully to its phrase and rhythm. Your primary goal is to **play your part in the spaces the other instrument left behind**. "
+            "Think of it as giving a musical answer. Your phrases should complement and respond directly to the 'call'.\n\n"
+        )
+
+    # --- Instructions based on position in arrangement ---
     generation_stage_instructions = ""
     # We define "early" tracks as the first half of the arrangement
     if current_track_index < (total_tracks / 2):
@@ -284,12 +301,26 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
             "2. **Harmonic Foundation:** Outline the harmony. Use root notes, fifths, or simple arpeggios that define the chords.\n"
             "3. **Space Creates Groove:** A great bassline uses rests effectively to create a powerful, groovy rhythm. Do not fill every beat."
         )
-    elif role in ["pads", "atmosphere", "texture"]:
+    elif role == "pads":
         role_instructions = (
-            "**Your Role: The Atmosphere & Space**\n"
-            "1. **Create Texture:** Your purpose is to fill the sonic space and create an emotional atmosphere. Use long, sustained notes (e.g., 4+ beats) that can overlap to create a smooth, continuous soundscape.\n"
-            "2. **Slow Evolution:** Avoid sharp, rhythmic elements. The harmonic changes should be slow and subtle, evolving gradually over the entire section.\n"
-            "3. **The Exception to the 'Rests' Rule:** For this role, continuous sound is often desired. 'Space' is created by evolving textures and slow changes, not by frequent silence."
+            "**Your Role: The Harmonic Glue**\n"
+            "1. **Sustained Harmony:** Your primary function is to provide a lush, sustained harmonic foundation. Use long, overlapping chords that hold the track together.\n"
+            "2. **Slow & Smooth:** Notes should typically be very long (4+ beats). The harmonic changes should be gentle and evolve over many bars.\n"
+            "3. **Fill the Background:** Think of your part as the 'bed' or 'cushion' on which the other instruments sit. You are creating the main emotional tone of the song."
+        )
+    elif role == "atmosphere":
+        role_instructions = (
+            "**Your Role: The Environment & Mood**\n"
+            "1. **Paint a Picture:** Your goal is to create a specific mood or a sense of place (e.g., 'dark', 'dreamy', 'aquatic', 'industrial'). This is more abstract than simple chords.\n"
+            "2. **Evolving Soundscapes:** Use sound that changes and evolves over time. This can be tonal or atonal. Think of long, shifting textures, not a repeating melody or rhythm.\n"
+            "3. **Stay Out of the Way:** Your part should sit in the background and create a context for the other instruments without drawing too much attention to itself. It adds depth and a professional sheen."
+        )
+    elif role == "texture":
+        role_instructions = (
+            "**Your Role: Sonic Detail & 'Ear Candy'**\n"
+            "1. **Add Subtle Details & Interest:** Your purpose is to add subtle sonic details that make the track more interesting. This is not about harmony or melody.\n"
+            "2. **Subtle Rhythms or Atonal Accents:** Consider adding a quiet, high-frequency rhythmic element (like a shaker or light clicks) or subtle, atonal percussive sounds. These are often quiet elements.\n"
+            "3. **Repetitive & Subtle:** Often, textural parts are short, repetitive loops that are low in the mix. They add a professional polish and complexity without cluttering the main arrangement."
         )
     elif role == "chords":
         role_instructions = (
@@ -330,7 +361,7 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
     elif role == "fx":
         role_instructions = (
             "**Your Role: Sound Effects & Ear Candy**\n"
-            "1. **Non-Melodic Focus:** Your goal is to add interest, not melody. Use atonal sounds, pitch sweeps (risers/downlifters), or short, percussive 'blips'.\n"
+            "1. **Non-Melodic Focus:** Your goal is to add interest, not melody. Use atonal sounds, short percussive 'blips', or unique sound effects that can be triggered by a single MIDI note.\n"
             "2. **Rhythmic Accents:** Place these sounds sparingly to accent specific moments, like the beginning of a phrase or a transition between sections.\n"
             "3. **Create Surprise:** Use unpredictable timing. These sounds should catch the listener's ear without disrupting the main groove."
         )
@@ -384,6 +415,7 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
         f"{basic_instructions}\n"
         f"{context_prompt_part}"
         f"**--- YOUR TASK ---**\n"
+        f"{call_and_response_instructions}"
         f"{generation_stage_instructions}\n\n"
         f"{drum_map_instructions}"
         f"{role_instructions}\n\n"
@@ -411,12 +443,12 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
     )
     return prompt
 
-def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int) -> Dict:
+def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str) -> Dict:
     """
     Generates musical data for a single instrument track using the generative AI model.
     It includes a retry mechanism for robustness and expects a JSON response.
     """
-    prompt = create_single_track_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks)
+    prompt = create_single_track_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role)
     
     max_retries = 3
     for attempt in range(max_retries):
@@ -512,27 +544,29 @@ def generate_complete_track(config, length: int) -> Tuple[bool, Dict]:
     
     context_tracks = []
     total_tracks = len(config["instruments"])
+    call_has_been_made = False
+    CALL_AND_RESPONSE_ROLES = {'bass', 'chords', 'arp', 'guitar', 'lead', 'melody', 'vocal'}
 
     for i, instrument in enumerate(config["instruments"]):
         instrument_name = instrument["name"]
         program_num = instrument["program_num"]
         role = instrument.get("role", "complementary") # Default role
+        dialogue_role = 'none'
+
+        # Determine if the track is a 'call', 'response', or neither.
+        if config.get("use_call_and_response") == 1 and role in CALL_AND_RESPONSE_ROLES:
+            if not call_has_been_made:
+                dialogue_role = 'call'
+                call_has_been_made = True
+            else:
+                dialogue_role = 'response'
 
         print(Fore.MAGENTA + f"\n--- Generating Track {i + 1}/{total_tracks}: {instrument_name} ---" + Style.RESET_ALL)
         
-        # Determine which tracks to use for context
-        # For "call and response", only use other melodic tracks for context
-        relevant_context = []
-        if config.get("use_call_and_response") == 1:
-            MELODIC_ROLES = {'pads', 'texture', 'atmosphere', 'chords', 'arp', 'guitar', 'lead', 'melody', 'vocal', 'fx'}
-            if role in MELODIC_ROLES:
-                relevant_context = [t for t in context_tracks if t.get("role") in MELODIC_ROLES]
-            else: # Non-melodic tracks get full context
-                relevant_context = context_tracks
-        else: # If not using C&R, all tracks get full context
-            relevant_context = context_tracks
+        # ALL previous tracks are now passed for context.
+        relevant_context = context_tracks
 
-        track_data = generate_instrument_track_data(config, length, instrument_name, program_num, relevant_context, role, i, total_tracks)
+        track_data = generate_instrument_track_data(config, length, instrument_name, program_num, relevant_context, role, i, total_tracks, dialogue_role)
 
         if track_data:
             song_data["tracks"].append(track_data)
