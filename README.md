@@ -36,7 +36,7 @@ The script runs on Python. `pip` is Python's package manager and is included wit
 
 1.  **Get the Project Files**
 
-    You can either clone the repository with Git (recommended) or download it as a ZIP file.
+    You can either clone the repository with Git or download it as a ZIP file.
     
     **Option A (Git):**
     ```bash
