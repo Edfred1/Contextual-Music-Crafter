@@ -1,5 +1,9 @@
 # Contextual Music Crafter (CMC)
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb)
+
+> **Note:** You can also use Contextual Music Crafter directly in your browser with [Google Colab](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb). No local installation required!
+
 Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music generation tool that leverages the power of Google's Generative AI to compose multi-track musical pieces. Unlike simple random note generators, CMC builds songs iteratively, instrument by instrument. Each new part is intelligently composed in response to the parts that have already been written, creating cohesive and musically interesting results.
 
 The entire creative direction of the music—from genre and tempo to instrumentation and musical complexity—is controlled through a single, easy-to-edit `config.yaml` file, making it accessible to both developers and musicians.
@@ -12,51 +16,41 @@ The entire creative direction of the music—from genre and tempo to instrumenta
 -   **Iterative Generation:** The script can be configured to generate multiple complete song variations in a single run, perfect for exploring different ideas quickly.
 -   **Simple & Robust:** The script is self-contained and easy to run, with clear feedback during the generation process.
 
+---
+
+**You can find several generated example MIDI files in the `MIDI Examples` folder included in this repository.**
+
+---
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb)
+
+> **Note:** You can also use Contextual Music Crafter directly in your browser with [Google Colab](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb). No local installation required!
+
 ## 🚀 Installation & Setup
 
-### Step 1: Install Prerequisites (Git & Python)
+### Step 1: Download & Install Prerequisites
 
-<details>
-<summary>Click here for detailed installation instructions for Git and Python.</summary>
+- **Python & Pip**
+  - Make sure you have Python 3.7 or newer installed. You can check this by opening your terminal or command prompt and typing `python --version` or `python3 --version`.
+  - If you don't have Python, download it from [python.org](https://www.python.org/).
+    - **⭐ Important for Windows Users:** During installation, make sure to check the box that says **"Add Python to PATH"**.
 
-#### **Git**
-This project is managed with Git. You need it to clone the repository.
--   **Check if Git is installed:** Open your terminal or command prompt and type `git --version`. If it returns a version number, you're all set.
--   **How to install Git:** If the command is not found, download and install Git from [git-scm.com](https://git-scm.com/).
+### Step 2: Get the Project Files
 
-#### **Python & Pip**
-The script runs on Python. `pip` is Python's package manager and is included with modern Python installations.
--   **Check if Python is installed:** Open your terminal and type `python --version` or `python3 --version`. You need version 3.7 or newer.
--   **How to install Python:** If you don't have it, download the latest version from [python.org](https://www.python.org/).
-    -   **⭐ Important for Windows Users:** During installation, make sure to check the box that says **"Add Python to PATH"**. This is a very common source of errors if missed.
+1. **Download the ZIP:**
+   - Go to the [main repository page](https://github.com/Edfred1/Contextual-Music-Crafter).
+   - Click `Code` > `Download ZIP`.
+   - Unzip the file to a folder of your choice.
+   - Open a terminal or command prompt in that folder.
 
-</details>
+### Step 3: Install Python Packages
 
-### Step 2: Project Setup
-
-1.  **Get the Project Files**
-
-    You can either clone the repository with Git or download it as a ZIP file.
-    
-    **Option A (Git):**
-    ```bash
-    git clone https://github.com/Edfred1/Contextual-Music-Crafter.git
-    cd Contextual-Music-Crafter
-    ```
-    **Option B (ZIP):**
-    - Download the ZIP from the [main repository page](https://github.com/Edfred1/Contextual-Music-Crafter) by clicking `Code` > `Download ZIP`.
-    - Unzip the file and open a terminal in that directory.
-
-2.  **Run the Installation Script**
-
-    This will install the necessary Python packages.
-
-    -   **On Windows:** Double-click and run the `install.bat` file.
-    -   **On macOS/Linux:** Open a terminal and run the following command:
-        ```bash
-        chmod +x install.sh
-        ./install.sh
-        ```
+- **On Windows:** Double-click and run the `install.bat` file.
+- **On macOS/Linux:** Open a terminal and run:
+  ```bash
+  chmod +x install.sh
+  ./install.sh
+  ```
 
 <details>
 <summary>Manual Installation (if the script fails)</summary>
@@ -67,19 +61,17 @@ pip install -r requirements.txt
 ```
 </details>
 
-### Step 3: API Key & Configuration
+### Step 4: API Key & Configuration
 
 1.  **Open `config.yaml`** in a text editor.
-
 2.  **Set your API Key:**
-    You can get a key from [Google AI Studio](https://aistudio.google.com/app/apikey).
-    Find the `api_key` field and replace `"YOUR_GOOGLE_AI_API_KEY"` with your actual key.
+    - Get a key from [Google AI Studio](https://aistudio.google.com/app/apikey).
+    - Find the `api_key` field and replace `"YOUR_GOOGLE_AI_API_KEY"` with your actual key.
     ```yaml
     # API Configuration
     api_key: "YOUR_GOOGLE_AI_API_KEY"
     ```
     **Security Note:** It's highly recommended to use an environment variable or a secrets management tool rather than hardcoding your API key directly in the configuration file for public repositories.
-
 3.  **Customize Your Music:**
     Adjust the parameters in `config.yaml` to define your desired musical output.
 
@@ -130,4 +122,14 @@ Contributions, issues, and feature requests are welcome! Feel free to check the 
 
 ## 📄 License
 
-This project is licensed under the MIT License. See the `LICENSE.md` file for details. 
+This project is licensed under the MIT License. See the `LICENSE.md` file for details.
+
+---
+
+### Optional: For Advanced Users (Git)
+
+If you are familiar with Git, you can also clone the repository instead of downloading the ZIP:
+```bash
+git clone https://github.com/Edfred1/Contextual-Music-Crafter.git
+cd Contextual-Music-Crafter
+```
