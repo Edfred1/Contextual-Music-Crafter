@@ -22,10 +22,6 @@ The entire creative direction of the music—from genre and tempo to instrumenta
 
 ---
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb)
-
-> **Note:** You can also use Contextual Music Crafter directly in your browser with [Google Colab](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb). No local installation required!
-
 ## 🚀 Installation & Setup
 
 ### Step 1: Download & Install Prerequisites
