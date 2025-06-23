@@ -21,7 +21,7 @@ BEATS_PER_BAR = 4
 TICKS_PER_BEAT = 480
 
 # Add new constants at the beginning of the file
-AVAILABLE_LENGTHS = [8, 16, 32]
+AVAILABLE_LENGTHS = [8, 16, 32, 64, 128]
 DEFAULT_LENGTH = 16
 
 # Initialize Colorama for console color support
@@ -77,6 +77,18 @@ def load_config(config_file):
                 config["number_of_iterations"] = iterations
             except (ValueError, TypeError):
                  raise ValueError("number_of_iterations must be a valid integer.")
+
+        # Add temperature validation
+        if "temperature" not in config:
+            config["temperature"] = 1.0 # Default creativity
+        else:
+            try:
+                temp = float(config["temperature"])
+                if not 0.0 <= temp <= 2.0:
+                    raise ValueError("temperature must be between 0.0 and 2.0.")
+                config["temperature"] = temp
+            except (ValueError, TypeError):
+                raise ValueError("temperature must be a valid number between 0.0 and 2.0.")
 
         # Check for the presence of all required fields.
         for field in required_fields:
@@ -455,12 +467,15 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
         try:
             print(Fore.BLUE + f"Attempt {attempt + 1}/{max_retries}: Generating part for {instrument_name} ({role})..." + Style.RESET_ALL)
             
+            generation_config = {
+                "temperature": config["temperature"],
+                "response_mime_type": "application/json",
+                "max_output_tokens": 65536
+            }
+
             model = genai.GenerativeModel(
                 model_name=config["model_name"],
-                generation_config={
-                    "temperature": 0.9, # A bit of creativity
-                    "response_mime_type": "application/json"
-                }
+                generation_config=generation_config
             )
 
             # Define safety settings to avoid blocking responses unnecessarily
@@ -471,22 +486,39 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
             ]
 
-            response = model.generate_content(prompt, safety_settings=safety_settings)
+            response = model.generate_content(
+                prompt, 
+                safety_settings=safety_settings
+            )
             
-            # --- Enhanced Response Validation ---
-            # 1. Check if the response was stopped due to token limits
-            if response.candidates and response.candidates[0].finish_reason == "MAX_TOKENS":
-                print(Fore.RED + f"Error on attempt {attempt + 1}: Model stopped generating due to reaching the maximum token limit. The returned JSON is likely incomplete." + Style.RESET_ALL)
-                print(Fore.YELLOW + "Consider asking for a shorter length (e.g., 8 or 16 bars) or simplifying the request for this instrument." + Style.RESET_ALL)
+            # --- Robust Response Validation ---
+            # 1. Check if the response was blocked or is otherwise invalid before accessing .text
+            if not response.candidates or response.candidates[0].finish_reason not in [1, "STOP"]: # 1 is the enum for STOP
+                finish_reason_name = "UNKNOWN"
+                # Safely get the finish reason name
+                if response.candidates:
+                    try:
+                        finish_reason_name = response.candidates[0].finish_reason.name
+                    except AttributeError:
+                        finish_reason_name = str(response.candidates[0].finish_reason)
+
+                print(Fore.RED + f"Error on attempt {attempt + 1}: Generation failed or was incomplete." + Style.RESET_ALL)
+                print(Fore.YELLOW + f"Reason: {finish_reason_name}" + Style.RESET_ALL)
+                
+                # Also check for safety blocking information
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                     print(Fore.YELLOW + f"Block Reason: {response.prompt_feedback.block_reason.name}" + Style.RESET_ALL)
+                
                 continue # Skip to the next retry attempt
 
-            # 2. Check for an empty response before parsing
-            if not response.text.strip():
+            # 2. Now that we know the response is valid, safely access the text and parse JSON
+            response_text = response.text
+            if not response_text.strip():
                 print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: Model returned an empty response for {instrument_name}." + Style.RESET_ALL)
                 continue # Skip to the next retry attempt
 
             # 3. Parse the JSON response
-            notes_list = json.loads(response.text)
+            notes_list = json.loads(response_text)
 
             if not isinstance(notes_list, list):
                 raise TypeError("The generated data is not a valid list of notes.")
@@ -507,18 +539,13 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                 "notes": validated_notes
             }
 
-        except (ValueError, json.JSONDecodeError, TypeError) as e:
+        except (json.JSONDecodeError, TypeError) as e:
             print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: Data validation failed for {instrument_name}. Reason: {str(e)}" + Style.RESET_ALL)
-            # Add more context to the error message
-            if "response" in locals():
-                if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                    print(Fore.RED + f"Generation may have been blocked. Reason: {response.prompt_feedback.block_reason.name}")
-                if hasattr(response, 'text'):
-                    print(Fore.YELLOW + "Model response was:\n" + response.text + Style.RESET_ALL)
+            # We already checked for blocking, so we just show the text if parsing fails.
+            if "response_text" in locals():
+                print(Fore.YELLOW + "Model response was:\n" + response_text + Style.RESET_ALL)
         except Exception as e:
-            print(Fore.RED + f"Error on attempt {attempt + 1} for {instrument_name}: {str(e)}" + Style.RESET_ALL)
-            if "response" in locals() and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                print(Fore.RED + f"Generation blocked. Reason: {response.prompt_feedback.block_reason.name}")
+            print(Fore.RED + f"An unexpected error occurred on attempt {attempt + 1} for {instrument_name}: {str(e)}" + Style.RESET_ALL)
 
         # If we are not on the last attempt, wait before retrying
         if attempt < max_retries - 1:
