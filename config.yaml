@@ -2,6 +2,8 @@
 # Replace with your actual Google AI API key.
 api_key: "YOUR_GOOGLE_AI_API_KEY" #YOUR_GOOGLE_AI_API_KEY
 model_name: "gemini-2.5-flash" #"gemini-2.5-pro-exp-03-25"  #gemini-2.5-flash-preview-05-20 #gemini-2.5-flash-preview-04-17model_name: "gemini-1.5-flash" # Recommended model
+# Temperature for the model (0.0 = deterministic, 2.0 = very creative). Default is 1.0.
+temperature: 0.1
 
 # --- Musical Parameters ---
 # Use these settings to define the core musical direction of your generated track.
