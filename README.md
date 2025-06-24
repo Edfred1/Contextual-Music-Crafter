@@ -103,14 +103,44 @@ pip install -r requirements.txt
 
 ## 🎹 How to Use
 
+CMC comes with three main scripts, each for a different creative purpose:
+
+### 1. `part_generator.py` - Create from Scratch
+
+This is the original script. It generates a complete musical piece from zero based entirely on the settings in your `config.yaml`.
+
 1.  **Configure your desired sound** in `config.yaml`.
 2.  **Run the script** from your terminal:
     ```bash
     python part_generator.py
     ```
 3.  **Enter the desired length** for the composition when prompted.
-4.  The script will generate the track, instrument by instrument, showing its progress in the console.
-5.  The final MIDI file(s) will be saved in the project directory with a descriptive name based on your configuration (e.g., `House_Music_Funky_Bassline_Cminor_125bpm_20231027-123456.mid`).
+4.  The script will generate a brand new MIDI file in the project directory.
+
+### 2. `part_extender.py` - Extend an Existing MIDI File
+
+This script loads an existing MIDI file and adds new instrument parts to it, using the original tracks as musical context. It's perfect for taking a simple loop and building a full arrangement around it.
+
+1.  **Run the script** from your terminal:
+    ```bash
+    python part_extender.py
+    ```
+2.  **Select the MIDI file** you want to extend from the list of found files.
+3.  The script will use the instruments defined in your `config.yaml` to add new layers to your selected MIDI file.
+4.  A new file with the `_ext` suffix will be saved (e.g., `MyOriginalFile_ext_1.mid`).
+
+### 3. `part_variator.py` - Create Variations of Existing Parts
+
+This script loads a MIDI file and lets you create new variations of specific tracks within it. It's ideal for creating alternative melodies, basslines, or drum patterns without changing the rest of the song.
+
+1.  **Run the script** from your terminal:
+    ```bash
+    python part_variator.py
+    ```
+2.  **Select the MIDI file** you want to vary.
+3.  **Choose which track(s)** you want to create a variation for.
+4.  The script will use the `inspiration` prompt from your `config.yaml` as creative direction to generate a new version of the selected parts.
+5.  A new file with the `_var` suffix will be saved (e.g., `MyOriginalFile_var_1.mid`).
 
 ## 🤝 Contributing
 
