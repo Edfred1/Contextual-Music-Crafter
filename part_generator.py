@@ -269,19 +269,8 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
             "Think of it as giving a musical answer. Your phrases should complement and respond directly to the 'call'.\n\n"
         )
 
-    # --- Instructions based on position in arrangement ---
-    generation_stage_instructions = ""
-    # We define "early" tracks as the first half of the arrangement
-    if current_track_index < (total_tracks / 2):
-        generation_stage_instructions = (
-            "**Generation Stage: Early (Foundation)**\n"
-            "You are one of the first instruments. Your part should be foundational, establishing the core harmony, rhythm, or melody. Keep it compelling but leave space for others. Don't be too busy."
-        )
-    else:
-        generation_stage_instructions = (
-            "**Generation Stage: Late (Details & Overdubs)**\n"
-            "The foundation is laid. Your role is to add detail, texture, or counter-melodies. Listen carefully to what's already there and find the gaps to fill. You can be more complex or sparse, as long as you complement the existing parts."
-        )
+    # --- NEW: Simple positional context ---
+    positional_context_instruction = f"**Your Position:** You are creating track {current_track_index + 1} of {total_tracks} in this arrangement.\n"
 
     # --- Role-specific instructions ---
     role_instructions = ""
@@ -427,8 +416,8 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
         f"{basic_instructions}\n"
         f"{context_prompt_part}"
         f"**--- YOUR TASK ---**\n"
+        f"{positional_context_instruction}"
         f"{call_and_response_instructions}"
-        f"{generation_stage_instructions}\n\n"
         f"{drum_map_instructions}"
         f"{role_instructions}\n\n"
         f"**--- UNIVERSAL PRINCIPLES OF GOOD MUSIC ---**\n"
