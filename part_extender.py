@@ -9,6 +9,9 @@ import time
 from typing import List, Tuple, Dict
 import math
 import json
+import mido
+import glob
+import sys
 
 # --- ROBUST CONFIG FILE PATH ---
 # Get the absolute path to the directory where the script is located
@@ -29,6 +32,134 @@ init(autoreset=True)
 
 # Constants
 GENERATED_CODE_FILE = os.path.join(script_dir, "generated_code.py")
+
+def select_midi_file() -> str:
+    """
+    Scans for MIDI files in the current directory and subdirectories,
+    and prompts the user to select one.
+    """
+    print(Fore.CYAN + "Searching for MIDI files..." + Style.RESET_ALL)
+    
+    # Scan for .mid and .midi files in the current directory and all subdirectories
+    midi_files = glob.glob('**/*.mid', recursive=True) + glob.glob('**/*.midi', recursive=True)
+    
+    if not midi_files:
+        print(Fore.RED + "No MIDI files found in the current directory or subdirectories. Please add a MIDI file to continue." + Style.RESET_ALL)
+        sys.exit()
+
+    print(Fore.GREEN + "Found the following MIDI files:" + Style.RESET_ALL)
+    for i, file_path in enumerate(midi_files):
+        print(f"  {i + 1}: {file_path}")
+
+    while True:
+        try:
+            selection = input("Enter the number of the MIDI file you want to extend: ").strip()
+            selection_index = int(selection) - 1
+            if 0 <= selection_index < len(midi_files):
+                selected_file = midi_files[selection_index]
+                print(Fore.CYAN + f"You selected: {selected_file}" + Style.RESET_ALL)
+                return selected_file
+            else:
+                print(Fore.YELLOW + "Invalid number. Please try again." + Style.RESET_ALL)
+        except ValueError:
+            print(Fore.YELLOW + "Invalid input. Please enter a number." + Style.RESET_ALL)
+        except (KeyboardInterrupt, EOFError):
+            print(Fore.RED + "\nSelection cancelled. Exiting." + Style.RESET_ALL)
+            sys.exit()
+
+def analyze_midi_file(file_path: str) -> Tuple[List[Dict], int, int, Dict]:
+    """
+    Analyzes a MIDI file to extract tracks, notes, tempo, and length.
+    Returns a tuple of: (tracks_data, bpm, total_bars, time_signature)
+    """
+    try:
+        midi_file = mido.MidiFile(file_path)
+        ticks_per_beat = midi_file.ticks_per_beat or 480
+        
+        # --- Default values ---
+        bpm = 120
+        time_signature = {"beats_per_bar": 4, "beat_value": 4}
+
+        # --- Find initial BPM and Time Signature ---
+        for msg in midi_file.tracks[0]:
+            if msg.is_meta and msg.type == 'set_tempo':
+                bpm = mido.tempo2bpm(msg.tempo)
+            if msg.is_meta and msg.type == 'time_signature':
+                time_signature["beats_per_bar"] = msg.numerator
+                time_signature["beat_value"] = msg.denominator
+                # We assume the time signature stays constant for simplicity
+
+        print(Fore.CYAN + f"Analyzed MIDI: BPM={bpm:.2f}, Time Signature={time_signature['beats_per_bar']}/{time_signature['beat_value']}" + Style.RESET_ALL)
+
+        tracks_data = []
+        total_ticks = 0
+        
+        for i, track in enumerate(midi_file.tracks):
+            notes_on = {}
+            current_time_ticks = 0
+            track_notes = []
+            track_name = f"Track {i + 1}"
+            is_drum_track = False
+            program = 0 # Default to Acoustic Grand Piano
+
+            for msg in track:
+                current_time_ticks += msg.time
+                
+                # Get Track Name
+                if msg.is_meta and msg.type == 'track_name':
+                    track_name = msg.name
+                
+                # Get program number (instrument)
+                if msg.type == 'program_change':
+                    program = msg.program
+
+                # Check if it's a drum track (usually channel 9)
+                if hasattr(msg, 'channel') and msg.channel == 9:
+                    is_drum_track = True
+
+                is_note_on = msg.type == 'note_on' and msg.velocity > 0
+                is_note_off = msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0)
+
+                if is_note_on:
+                    notes_on[msg.note] = (current_time_ticks, msg.velocity)
+                
+                elif is_note_off and msg.note in notes_on:
+                    start_ticks, velocity = notes_on.pop(msg.note)
+                    duration_ticks = current_time_ticks - start_ticks
+                    
+                    track_notes.append({
+                        "pitch": msg.note,
+                        "start_beat": start_ticks / ticks_per_beat,
+                        "duration_beats": duration_ticks / ticks_per_beat,
+                        "velocity": velocity
+                    })
+            
+            if track_notes:
+                # Assign a role to help with MIDI channel assignment later
+                role = "drums" if is_drum_track else "context"
+                tracks_data.append({
+                    "instrument_name": track_name,
+                    "program_num": program,
+                    "role": role,
+                    "notes": track_notes
+                })
+            
+            # Update total length of the piece
+            if current_time_ticks > total_ticks:
+                total_ticks = current_time_ticks
+
+        if total_ticks == 0:
+            print(Fore.YELLOW + "Warning: MIDI file seems to be empty or contains no note events." + Style.RESET_ALL)
+            return [], 120, 0, time_signature
+
+        total_beats = total_ticks / ticks_per_beat
+        total_bars = math.ceil(total_beats / time_signature["beats_per_bar"])
+
+        return tracks_data, bpm, total_bars, time_signature
+
+    except Exception as e:
+        print(Fore.RED + f"Error analyzing MIDI file: {str(e)}" + Style.RESET_ALL)
+        return [], 120, 0, {"beats_per_bar": 4, "beat_value": 4}
 
 def load_config(config_file):
     """Loads and validates the configuration from a YAML file."""
@@ -544,32 +675,33 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
     print(Fore.RED + f"Failed to generate a valid part for {instrument_name} after {max_retries} attempts." + Style.RESET_ALL)
     return None
 
-def generate_complete_track(config, length: int) -> Tuple[bool, Dict]:
+def extend_track(config: Dict, length_bars: int, base_tracks: List[Dict]) -> Tuple[bool, Dict]:
     """
-    Generates a complete multi-track song by iteratively creating parts for each instrument.
+    Extends an existing set of tracks by generating new parts for the instruments defined in the config.
     Returns a tuple of (success_status, song_data).
     """
-    print(Fore.CYAN + "\n--- Starting New Song Generation ---" + Style.RESET_ALL)
+    print(Fore.CYAN + "\n--- Starting Track Extension ---" + Style.RESET_ALL)
     
+    # The initial song data includes the tracks from the original MIDI file.
     song_data = {
         "bpm": config["bpm"],
         "time_signature": config["time_signature"],
         "key_scale": config["key_scale"],
-        "tracks": []
+        "tracks": list(base_tracks) # Start with a copy of the base tracks
     }
     
-    context_tracks = []
-    total_tracks = len(config["instruments"])
+    # The context for the AI is also the original tracks.
+    context_tracks = list(base_tracks)
+    total_new_tracks = len(config["instruments"])
     call_has_been_made = False
     CALL_AND_RESPONSE_ROLES = {'bass', 'chords', 'arp', 'guitar', 'lead', 'melody', 'vocal'}
 
     for i, instrument in enumerate(config["instruments"]):
         instrument_name = instrument["name"]
         program_num = instrument["program_num"]
-        role = instrument.get("role", "complementary") # Default role
+        role = instrument.get("role", "complementary")
         dialogue_role = 'none'
 
-        # Determine if the track is a 'call', 'response', or neither.
         if config.get("use_call_and_response") == 1 and role in CALL_AND_RESPONSE_ROLES:
             if not call_has_been_made:
                 dialogue_role = 'call'
@@ -577,23 +709,15 @@ def generate_complete_track(config, length: int) -> Tuple[bool, Dict]:
             else:
                 dialogue_role = 'response'
 
-        print(Fore.MAGENTA + f"\n--- Generating Track {i + 1}/{total_tracks}: {instrument_name} ---" + Style.RESET_ALL)
+        print(Fore.MAGENTA + f"\n--- Generating New Track {i + 1}/{total_new_tracks}: {instrument_name} ---" + Style.RESET_ALL)
         
-        # ALL previous tracks are now passed for context.
-        relevant_context = context_tracks
-
-        track_data = generate_instrument_track_data(config, length, instrument_name, program_num, relevant_context, role, i, total_tracks, dialogue_role)
+        # The AI gets context from all previously existing AND newly generated tracks.
+        track_data = generate_instrument_track_data(config, length_bars, instrument_name, program_num, context_tracks, role, len(context_tracks), len(context_tracks) + total_new_tracks - i, dialogue_role)
 
         if track_data:
             song_data["tracks"].append(track_data)
-            # Add only essential info to context for next prompt
-            context_tracks.append({
-                "instrument_name": instrument_name,
-                "role": role,
-                "program_num": program_num,
-                "notes": track_data["notes"] # Pass the actual notes for context
-            })
-            # Add a cool-down period to avoid hitting API rate limits too quickly
+            # Add the newly created track to the context for the next generation.
+            context_tracks.append(track_data)
             time.sleep(2)
         else:
             print(Fore.RED + f"Failed to generate track for {instrument_name}. Stopping generation." + Style.RESET_ALL)
@@ -603,7 +727,7 @@ def generate_complete_track(config, length: int) -> Tuple[bool, Dict]:
         print(Fore.RED + "No tracks were generated successfully. Aborting." + Style.RESET_ALL)
         return False, None
 
-    print(Fore.GREEN + "\n--- All tracks generated successfully! ---" + Style.RESET_ALL)
+    print(Fore.GREEN + "\n--- All new tracks generated successfully! ---" + Style.RESET_ALL)
     return True, song_data
 
 def create_midi_from_json(song_data: Dict, config: Dict, output_file: str) -> bool:
@@ -677,68 +801,61 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str) -> bo
         print(Fore.RED + f"Error creating MIDI file: {str(e)}" + Style.RESET_ALL)
         return False
 
-def generate_filename(config: Dict, base_filename: str, length_bars: int) -> str:
+def generate_filename(input_midi_path: str, iteration: int) -> str:
     """
-    Generates a descriptive and valid filename based on the configuration.
+    Generates a clear filename for an extended MIDI file based on the original name.
     """
     try:
-        genre = config.get("genre", "audio").replace(" ", "_")
-        key = config.get("key_scale", "").replace(" ", "").replace("/", "")
-        bpm = round(float(config.get("bpm", 120)))
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        original_base_name = os.path.splitext(os.path.basename(input_midi_path))[0]
+        sanitized_base_name = re.sub(r'[\\/*?:"<>|]', "", original_base_name)
 
-        # Sanitize parts for filename
-        genre = re.sub(r'[\\/*?:"<>|]', "", genre)
-        key = re.sub(r'[\\/*?:"<>|]', "", key)
+        new_name = f"{sanitized_base_name}_ext_{iteration}.mid"
 
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        
-        base_dir = os.path.dirname(base_filename)
-        
-        # Construct the new, shorter filename
-        new_name = f"{genre}_{key}_{length_bars}bars_{bpm}bpm_{timestamp}.mid"
-        
-        return os.path.join(base_dir, new_name)
+        return os.path.join(script_dir, new_name)
     except Exception as e:
         print(Fore.YELLOW + f"Could not generate dynamic filename. Using default. Reason: {e}" + Style.RESET_ALL)
-        return base_filename
+        return os.path.join(script_dir, f"extended_{iteration}.mid") # Fallback
 
 def main():
     """
-    Main function to run the music generation process.
+    Main function to run the music extension process.
     """
     try:
         config = load_config(CONFIG_FILE)
         
-        # Configure the generative AI model
         genai.configure(api_key=config["api_key"])
         
-        # --- Length Selection ---
-        length_input = input(f"Enter the desired length in bars ({'/'.join(map(str, AVAILABLE_LENGTHS))}) or press Enter for default ({DEFAULT_LENGTH}): ").strip()
-        if not length_input:
-            length = DEFAULT_LENGTH
-        else:
-            try:
-                length = int(length_input)
-                if length not in AVAILABLE_LENGTHS:
-                    print(Fore.YELLOW + f"Invalid length. Must be one of {AVAILABLE_LENGTHS}. Using default {DEFAULT_LENGTH}." + Style.RESET_ALL)
-                    length = DEFAULT_LENGTH
-            except ValueError:
-                print(Fore.YELLOW + f"Invalid input. Using default length {DEFAULT_LENGTH}." + Style.RESET_ALL)
-                length = DEFAULT_LENGTH
+        # --- Initial MIDI File Selection ---
+        input_midi_file = select_midi_file()
+        if not input_midi_file:
+            return
+
+        # --- Analyze the original MIDI file once ---
+        original_tracks, original_bpm, length_in_bars, original_ts = analyze_midi_file(input_midi_file)
+        
+        if not original_tracks:
+            print(Fore.RED + f"Could not process MIDI file '{input_midi_file}'. Exiting." + Style.RESET_ALL)
+            return
+            
+        # --- Override config with original MIDI data ---
+        config["bpm"] = original_bpm
+        config["time_signature"] = original_ts
+        print(Fore.CYAN + f"Using BPM and Time Signature from MIDI. Generating {length_in_bars} bars." + Style.RESET_ALL)
 
         # --- Generation Loop ---
         num_iterations = config.get("number_of_iterations", 1)
         for i in range(num_iterations):
             print(Fore.CYAN + f"\n--- Starting Generation Cycle {i + 1}/{num_iterations} ---" + Style.RESET_ALL)
             
-            success, song_data = generate_complete_track(config, length)
+            # --- Extend the track (always based on the original) ---
+            success, song_data = extend_track(config, length_in_bars, original_tracks)
             
             if success:
-                # Generate a unique, descriptive filename for the MIDI output
-                output_filename_base = os.path.join(script_dir, "generated_midi.mid")
-                output_filename = generate_filename(config, output_filename_base, length)
+                # Generate a unique filename for each extension
+                output_filename = generate_filename(input_midi_file, i + 1)
                 
-                # Create the MIDI file from the song data
+                # Create the MIDI file
                 create_midi_from_json(song_data, config, output_filename)
 
     except (ValueError, FileNotFoundError) as e:
