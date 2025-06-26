@@ -848,7 +848,7 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str) -> bo
         print(Fore.RED + f"Error creating MIDI file: {str(e)}" + Style.RESET_ALL)
         return False
 
-def create_variation_prompt(config: Dict, length: int, context_tracks: List[Dict], track_to_vary: Dict, role: str, position_info: str) -> str:
+def create_variation_prompt(config: Dict, length: int, context_tracks: List[Dict], track_to_vary: Dict, role: str, position_info: str, dialogue_role: str) -> str:
     """
     Creates a prompt specifically for varying an existing musical part.
     """
@@ -883,6 +883,21 @@ def create_variation_prompt(config: Dict, length: int, context_tracks: List[Dict
         "Take the core ideas, rhythms, and melodies of the original part and reinterpret them. You can make it simpler, more complex, change the rhythm, or add new melodic flourishes, but it should still feel related to the original and fit with the provided context tracks."
     )
     
+    # --- Call and Response Instruction ---
+    call_and_response_instructions = ""
+    if dialogue_role == 'call':
+        call_and_response_instructions = (
+            "**Special Instruction: You are the 'Call' in a Dialogue**\n"
+            "You are the first part in a musical conversation. Your primary goal is to create a clear, catchy musical phrase (a 'call') and then **intentionally leave space (rests)** for another instrument to answer. "
+            "Think of it as asking a musical question. Don't fill all the space. Your phrasing should invite a response.\n\n"
+        )
+    elif dialogue_role == 'response':
+        call_and_response_instructions = (
+            "**Special Instruction: You are the 'Response' in a Dialogue**\n"
+            "You are part of a musical conversation. Another instrument has just played a 'call'. Listen carefully to its phrase and rhythm. Your primary goal is to **play your part in the spaces the other instrument left behind**. "
+            "Think of it as giving a musical answer. Your phrases should complement and respond directly to the 'call'.\n\n"
+        )
+
     # We can reuse the polyphony and key rules from the original prompt generator
     polyphony_rule = "2. **Strictly Monophonic:** The notes in the JSON array must NOT overlap in time."
     if role in {"harmony", "chords", "pads", "atmosphere", "texture", "guitar"}:
@@ -902,6 +917,7 @@ def create_variation_prompt(config: Dict, length: int, context_tracks: List[Dict
         f"**--- YOUR TASK ---**\n"
         f"{original_part_prompt}"
         f"{variation_instruction}\n"
+        f"{call_and_response_instructions}"
         f"**--- OUTPUT FORMAT: JSON ---**\n"
         f"Generate the musical data as a single, valid JSON array of objects. Each object represents a note and MUST have these keys:\n"
         f'- **"pitch"**: MIDI note number (integer 0-127).\n'
@@ -918,11 +934,11 @@ def create_variation_prompt(config: Dict, length: int, context_tracks: List[Dict
     )
     return prompt
 
-def generate_variation_data(config: Dict, length: int, context_tracks: List[Dict], track_to_vary: Dict, role: str, position_info: str) -> Dict:
+def generate_variation_data(config: Dict, length: int, context_tracks: List[Dict], track_to_vary: Dict, role: str, position_info: str, dialogue_role: str) -> Dict:
     """
     Generates a variation for a single instrument track.
     """
-    prompt = create_variation_prompt(config, length, context_tracks, track_to_vary, role, position_info)
+    prompt = create_variation_prompt(config, length, context_tracks, track_to_vary, role, position_info, dialogue_role)
     
     max_retries = 3
     for attempt in range(max_retries):
@@ -988,6 +1004,9 @@ def create_track_variation(config: Dict, length_bars: int, base_tracks: List[Dic
     # Start with a fresh copy of the original tracks for this variation run
     varied_tracks = list(base_tracks)
     
+    call_has_been_made = False
+    CALL_AND_RESPONSE_ROLES = {'bass', 'chords', 'arp', 'guitar', 'lead', 'melody', 'vocal'} # Kept for role mapping, but logic changes
+
     for track_index in track_indices_to_vary:
         track_to_vary = base_tracks[track_index]
         
@@ -996,10 +1015,19 @@ def create_track_variation(config: Dict, length_bars: int, base_tracks: List[Dic
         
         position_info = f"Varying track {track_index + 1} of {len(base_tracks)}"
         role = track_to_vary.get("role", "complementary")
+        dialogue_role = 'none'
 
-        print(Fore.MAGENTA + f"\n--- Varying Track: {track_to_vary['instrument_name']} ---" + Style.RESET_ALL)
+        # Simplified logic for variator: first non-drum is call, others are response
+        if config.get("use_call_and_response") == 1 and role != "drums":
+            if not call_has_been_made:
+                dialogue_role = 'call'
+                call_has_been_made = True
+            else:
+                dialogue_role = 'response'
+
+        print(Fore.MAGENTA + f"\n--- Varying Track: {track_to_vary['instrument_name']} ({dialogue_role}) ---" + Style.RESET_ALL)
         
-        new_track_data = generate_variation_data(config, length_bars, context_tracks, track_to_vary, role, position_info)
+        new_track_data = generate_variation_data(config, length_bars, context_tracks, track_to_vary, role, position_info, dialogue_role)
 
         if new_track_data:
             # Replace the original track with its new variation in our list
