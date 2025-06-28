@@ -459,6 +459,13 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
             "2. **Add Complexity:** Use hi-hats or other percussion for faster subdivisions (e.g., 16th notes) to create energy and drive.\n"
             "3. **Groove is Key:** Use subtle shifts in timing (micro-timing), velocity, and strategic rests to make the pattern feel human and groovy, not robotic."
         )
+    elif role == "kick_and_snare":
+        role_instructions = (
+            "**Your Role: The Core Beat (Kick & Snare)**\n"
+            "1. **Focus on Kick and Snare:** Your ONLY job is to create the main rhythmic backbone using ONLY kick and snare sounds. The specific pattern should be determined by the overall genre.\n"
+            f"2. **Genre is Key:** Analyze the specified genre ('{config['genre']}') and create a kick and snare pattern that is characteristic for it. For example, a 'four-on-the-floor' for House, a 'two-step' for Drum & Bass, or a rolling pattern for Psytrance.\n"
+            "3. **No Extra Percussion:** Do NOT add hi-hats, cymbals, toms, or any other percussive elements. This track is exclusively for the foundational kick and snare groove."
+        )
     elif role == "percussion":
         role_instructions = (
             "**Your Role: Rhythmic Spice & Texture**\n"
@@ -552,7 +559,7 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
 
     # --- NEW: Add a specific drum map for drum/percussion roles ---
     drum_map_instructions = ""
-    if role in ["drums", "percussion"]:
+    if role in ["drums", "percussion", "kick_and_snare"]:
         drum_map_instructions = (
             "**Drum Map Guidance (Addictive Drums 2 Standard):**\n"
             "You MUST use the following MIDI notes for the corresponding drum sounds. This is not a suggestion, but a requirement for this track.\n"
@@ -584,7 +591,7 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
     # --- NEW: Conditional "Stay in Key" rule ---
     # For drums, this rule is irrelevant and confusing.
     stay_in_key_rule = f"3.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n"
-    if role in ["drums", "percussion"]:
+    if role in ["drums", "percussion", "kick_and_snare"]:
         stay_in_key_rule = "3.  **Use Drum Map:** You must adhere to the provided Drum Map for all note pitches.\n"
 
     prompt = (
@@ -802,7 +809,7 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str) -> bo
             role = track_data.get("role", "complementary")
             
             # Assign MIDI channel
-            if role in ["drums", "percussion"]:
+            if role in ["drums", "percussion", "kick_and_snare"]:
                 channel = 9 # MIDI Channel 10 for drums
             else:
                 channel = next_melodic_channel
@@ -883,6 +890,132 @@ def create_variation_prompt(config: Dict, length: int, context_tracks: List[Dict
         "Take the core ideas, rhythms, and melodies of the original part and reinterpret them. You can make it simpler, more complex, change the rhythm, or add new melodic flourishes, but it should still feel related to the original and fit with the provided context tracks."
     )
     
+    # --- Role-specific instructions ---
+    role_instructions = ""
+    if role == "drums":
+        role_instructions = (
+            "**Your Role: The Rhythmic Foundation**\n"
+            "1. **Foundation First:** Establish a strong, clear rhythmic backbone. The kick provides the main pulse, the snare defines the backbeat.\n"
+            "2. **Add Complexity:** Use hi-hats or other percussion for faster subdivisions (e.g., 16th notes) to create energy and drive.\n"
+            "3. **Groove is Key:** Use subtle shifts in timing (micro-timing), velocity, and strategic rests to make the pattern feel human and groovy, not robotic."
+        )
+    elif role == "kick_and_snare":
+        role_instructions = (
+            "**Your Role: The Core Beat (Kick & Snare)**\n"
+            "1. **Focus on Kick and Snare:** Your ONLY job is to create the main rhythmic backbone using ONLY kick and snare sounds. The specific pattern should be determined by the overall genre.\n"
+            f"2. **Genre is Key:** Analyze the specified genre ('{config['genre']}') and create a kick and snare pattern that is characteristic for it. For example, a 'four-on-the-floor' for House, a 'two-step' for Drum & Bass, or a rolling pattern for Psytrance.\n"
+            "3. **No Extra Percussion:** Do NOT add hi-hats, cymbals, toms, or any other percussive elements. This track is exclusively for the foundational kick and snare groove."
+        )
+    elif role == "percussion":
+        role_instructions = (
+            "**Your Role: Rhythmic Spice & Texture**\n"
+            "1. **No Kick/Snare:** This part is for secondary percussion (e.g., bongos, congas, shakers, tambourines). Do not use typical kick and snare sounds.\n"
+            "2. **Complement the Groove:** Create a syncopated, often looping pattern that weaves in and out of the main drum beat. Your goal is to add complexity and groove.\n"
+            "3. **Fill the Gaps:** Listen for empty spaces in the main drum pattern and place your percussive hits there."
+        )
+    elif role == "sub_bass":
+        role_instructions = (
+            "**Your Role: The Low-End Foundation**\n"
+            "1. **Pure Weight:** Your only job is to provide deep, low-end frequency support. Use very low notes (e.g., below MIDI note 40).\n"
+            "2. **Keep it Simple:** The rhythm must be extremely simple, often just following the root note of the chord on each downbeat. This part is meant to be felt more than heard.\n"
+            "3. **No Melody:** Avoid any complex melodic movement. Your part must not interfere with the main bassline."
+        )
+    elif role == "bass":
+        role_instructions = (
+            "**Your Role: The Rhythmic & Harmonic Anchor**\n"
+            "1. **Lock with the Kick:** Your primary goal is to create a rhythmic and harmonic lock with the kick drum. Either reinforce the kick's rhythm or create a complementary syncopated pattern that plays off of it.\n"
+            "2. **Harmonic Foundation:** Outline the harmony. Use root notes, fifths, or simple arpeggios that define the chords.\n"
+            "3. **Space Creates Groove:** A great bassline uses rests effectively to create a powerful, groovy rhythm. Do not fill every beat."
+        )
+    elif role == "pads":
+        role_instructions = (
+            "**Your Role: The Harmonic Glue**\n"
+            "1. **Sustained Harmony:** Your primary function is to provide a lush, sustained harmonic foundation. Use long, overlapping chords that hold the track together.\n"
+            "2. **Slow & Smooth:** Notes should typically be very long (4+ beats). The harmonic changes should be gentle and evolve over many bars.\n"
+            "3. **Fill the Background:** Think of your part as the 'bed' or 'cushion' on which the other instruments sit. You are creating the main emotional tone of the song."
+        )
+    elif role == "atmosphere":
+        role_instructions = (
+            "**Your Role: The Environment & Mood**\n"
+            "1. **Paint a Picture:** Your goal is to create a specific mood or a sense of place (e.g., 'dark', 'dreamy', 'aquatic', 'industrial'). This is more abstract than simple chords.\n"
+            "2. **Evolving Soundscapes:** Use sound that changes and evolves over time. This can be tonal or atonal. Think of long, shifting textures, not a repeating melody or rhythm.\n"
+            "3. **Stay Out of the Way:** Your part should sit in the background and create a context for the other instruments without drawing too much attention to itself. It adds depth and a professional sheen."
+        )
+    elif role == "texture":
+        role_instructions = (
+            "**Your Role: Sonic Detail & 'Ear Candy'**\n"
+            "1. **Add Subtle Details & Interest:** Your purpose is to add subtle sonic details that make the track more interesting. This is not about harmony or melody.\n"
+            "2. **Subtle Rhythms or Atonal Accents:** Consider adding a quiet, high-frequency rhythmic element (like a shaker or light clicks) or subtle, atonal percussive sounds. These are often quiet elements.\n"
+            "3. **Repetitive & Subtle:** Often, textural parts are short, repetitive loops that are low in the mix. They add a professional polish and complexity without cluttering the main arrangement."
+        )
+    elif role == "chords":
+        role_instructions = (
+            "**Your Role: The Harmonic Core**\n"
+            "1. **Provide Harmony:** Your main purpose is to establish the song's chord progression. Use full, rich chords that clearly define the harmony.\n"
+            "2. **Rhythmic Pulse vs. Sustained Pads:** Decide on your function. You can either create a rhythmic pulse with short, stabbed chords (like in House or Funk) or provide a sustained, atmospheric layer with long, evolving chords (like in Trance or Ambient).\n"
+            "3. **Voice Leading:** Pay attention to how the notes within the chords move from one chord to the next. Smooth transitions (good voice leading) make the progression sound more natural and professional."
+        )
+    elif role == "arp":
+        role_instructions = (
+            "**Your Role: The Hypnotic Arpeggio**\n"
+            "1. **Chord Notes Only:** Create a sequence by playing the notes of the underlying chords one after another.\n"
+            "2. **Rhythmic & Repetitive:** Establish a clear, driving, and repetitive rhythmic pattern (e.g., using straight 16th notes). This pattern should create a hypnotic effect.\n"
+            "3. **Evolve Slowly:** You can subtly vary the pattern over time by changing the order of notes or adding/removing a note, but the core rhythm should remain consistent."
+        )
+    elif role == "guitar":
+        role_instructions = (
+            "**Your Role: The Versatile Riff-Machine**\n"
+            "A guitar can have many functions. Choose one that fits the track:\n"
+            "1. **Rhythmic Strumming:** Create a strummed chord pattern that provides rhythmic and harmonic texture. This works well to complement the drums.\n"
+            "2. **Melodic Riff/Lick:** Compose a short, catchy guitar riff that acts like a secondary melody or a response to the main lead.\n"
+            "3. **Power Chords:** For heavier genres, use simple, powerful two-note chords (root and fifth) to create a wall of energy."
+        )
+    elif role in ["lead", "melody"]:
+        role_instructions = (
+            "**Your Role: The Main Hook / Storyteller**\n"
+            "1. **Create a Memorable Motif:** Compose a short, catchy melodic phrase (a 'hook' or 'motif'). This is the central idea of the part.\n"
+            "2. **Develop the Idea:** Don't just repeat the motif. Develop it over the section by changing its rhythm, transposing it, or adding small variations.\n"
+            "3. **Clear Phrasing with Rests:** Structure your melody with clear beginnings and endings. Rests between phrases are essential to make the melody understandable and memorable."
+        )
+    elif role == "vocal":
+        role_instructions = (
+            "**Your Role: The Vocal Element**\n"
+            "A vocal part can serve different functions. Choose one that best fits the existing music:\n"
+            "1. **Lead Vocal Melody:** Create a clear, memorable, and singable melody, like a main vocal line. This should function like a 'lead' instrument, with clear phrasing, emotional contour, and rests between phrases.\n"
+            "2. **Rhythmic Vocal Chops:** Create short, catchy, rhythmic phrases, like sampled vocal chops. Here, the focus is on syncopation and using short, often repetitive notes to create a percussive, groovy texture."
+        )
+    elif role == "fx":
+        role_instructions = (
+            "**Your Role: Sound Effects & Ear Candy**\n"
+            "1. **Non-Melodic Focus:** Your goal is to add interest, not melody. Use atonal sounds, short percussive 'blips', or unique sound effects that can be triggered by a single MIDI note.\n"
+            "2. **Rhythmic Accents:** Place these sounds sparingly to accent specific moments, like the beginning of a phrase or a transition between sections.\n"
+            "3. **Create Surprise:** Use unpredictable timing. These sounds should catch the listener's ear without disrupting the main groove."
+        )
+    else: # Fallback for "complementary" or unknown roles
+        role_instructions = (
+            "**Your Role: A Complementary Part**\n"
+            "Listen to the other instruments. Find a sonic niche and a rhythmic pattern that is currently unoccupied. Your goal is to add a new layer that enhances the overall composition without making it sound cluttered."
+        )
+
+    # --- Drum map instructions ---
+    drum_map_instructions = ""
+    if role in ["drums", "percussion", "kick_and_snare"]:
+        drum_map_instructions = (
+            "**Drum Map Guidance (Addictive Drums 2 Standard):**\n"
+            "You MUST use the following MIDI notes for the corresponding drum sounds. This is not a suggestion, but a requirement for this track.\n"
+            "- **Kick:** MIDI Note 36\n"
+            "- **Snare (Center Hit):** MIDI Note 38\n"
+            "- **Snare (Rimshot):** MIDI Note 40\n"
+            "- **Hi-Hat (Closed):** MIDI Note 42\n"
+            "- **Hi-Hat (Open):** MIDI Note 46\n"
+            "- **Hi-Hat (Pedal Close):** MIDI Note 44\n"
+            "- **Crash Cymbal 1:** MIDI Note 49\n"
+            "- **Ride Cymbal 1:** MIDI Note 51\n"
+            "- **High Tom:** MIDI Note 50\n"
+            "- **Mid Tom:** MIDI Note 48\n"
+            "- **Low Tom:** MIDI Note 45\n\n"
+        )
+
     # --- Call and Response Instruction ---
     call_and_response_instructions = ""
     if dialogue_role == 'call':
@@ -899,14 +1032,10 @@ def create_variation_prompt(config: Dict, length: int, context_tracks: List[Dict
         )
 
     # We can reuse the polyphony and key rules from the original prompt generator
-    polyphony_rule = "2. **Strictly Monophonic:** The notes in the JSON array must NOT overlap in time."
-    if role in {"harmony", "chords", "pads", "atmosphere", "texture", "guitar"}:
-        polyphony_rule = "2. **Polyphonic:** Notes for this track CAN overlap."
-    elif role in {"lead", "melody", "vocal"}:
-        polyphony_rule = "2. **Expressive Monophonic:** Notes should primarily be played one at a time, but short overlaps are permitted."
+    polyphony_rule = "2. **Expressive Monophonic:** Notes should primarily be played one at a time, but short overlaps are permitted."
 
     stay_in_key_rule = f"3. **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n"
-    if role in ["drums", "percussion"]:
+    if role in ["drums", "percussion", "kick_and_snare"]:
         stay_in_key_rule = "3. **Use Drum Map:** You must adhere to the provided Drum Map for all note pitches.\n"
 
     prompt = (
@@ -917,7 +1046,16 @@ def create_variation_prompt(config: Dict, length: int, context_tracks: List[Dict
         f"**--- YOUR TASK ---**\n"
         f"{original_part_prompt}"
         f"{variation_instruction}\n"
+        f"{role_instructions}\n"
+        f"{drum_map_instructions}"
         f"{call_and_response_instructions}"
+        f"**--- UNIVERSAL PRINCIPLES OF GOOD MUSIC ---**\n"
+        f"1. **Structure & Evolution:** Your composition should have a clear structure. A good musical part tells a story over the full {length} bars by introducing a core idea (a 'motif') and then developing it through variation, repetition, and contrast. Avoid mindless, robotic repetition.\n"
+        f"2. **Clarity through Space:** Do not create a constant wall of sound. Use rests effectively. The musical role of a part determines how it should use space. Your role-specific instructions provide guidance on this.\n"
+        f"3. **Dynamic Phrasing:** Use a wide range of velocity to create accents and shape the energy of the phrase. A static volume is boring and unnatural.\n"
+        f"4. **Tension & Release:** Build musical tension through dynamics, rhythmic complexity, or harmony, and resolve it at key moments (e.g., at the end of 4, 8, or 16 bar phrases) to create a satisfying arc.\n"
+        f"5. **Ensemble Playing:** Think like a member of a band. Your performance must complement the other parts. Pay attention to the phrasing of other instruments and find pockets of space to add your musical statement without cluttering the arrangement.\n"
+        f"6. **Micro-timing for Groove:** To add a human feel, you can subtly shift notes off the strict grid. Slightly anticipating a beat (pushing) can add urgency, while slightly delaying it (pulling) can create a more relaxed feel. This is especially effective for non-kick/snare elements.\n\n"
         f"**--- OUTPUT FORMAT: JSON ---**\n"
         f"Generate the musical data as a single, valid JSON array of objects. Each object represents a note and MUST have these keys:\n"
         f'- **"pitch"**: MIDI note number (integer 0-127).\n'

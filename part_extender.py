@@ -412,6 +412,13 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
             "2. **Add Complexity:** Use hi-hats or other percussion for faster subdivisions (e.g., 16th notes) to create energy and drive.\n"
             "3. **Groove is Key:** Use subtle shifts in timing (micro-timing), velocity, and strategic rests to make the pattern feel human and groovy, not robotic."
         )
+    elif role == "kick_and_snare":
+        role_instructions = (
+            "**Your Role: The Core Beat (Kick & Snare)**\n"
+            "1. **Focus on Kick and Snare:** Your ONLY job is to create the main rhythmic backbone using ONLY kick and snare sounds. The specific pattern should be determined by the overall genre.\n"
+            f"2. **Genre is Key:** Analyze the specified genre ('{config['genre']}') and create a kick and snare pattern that is characteristic for it. For example, a 'four-on-the-floor' for House, a 'two-step' for Drum & Bass, or a rolling pattern for Psytrance.\n"
+            "3. **No Extra Percussion:** Do NOT add hi-hats, cymbals, toms, or any other percussive elements. This track is exclusively for the foundational kick and snare groove."
+        )
     elif role == "percussion":
         role_instructions = (
             "**Your Role: Rhythmic Spice & Texture**\n"
@@ -505,7 +512,7 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
 
     # --- NEW: Add a specific drum map for drum/percussion roles ---
     drum_map_instructions = ""
-    if role in ["drums", "percussion"]:
+    if role in ["drums", "percussion", "kick_and_snare"]:
         drum_map_instructions = (
             "**Drum Map Guidance (Addictive Drums 2 Standard):**\n"
             "You MUST use the following MIDI notes for the corresponding drum sounds. This is not a suggestion, but a requirement for this track.\n"
@@ -537,7 +544,7 @@ def create_single_track_prompt(config: Dict, length: int, instrument_name: str, 
     # --- NEW: Conditional "Stay in Key" rule ---
     # For drums, this rule is irrelevant and confusing.
     stay_in_key_rule = f"3.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n"
-    if role in ["drums", "percussion"]:
+    if role in ["drums", "percussion", "kick_and_snare"]:
         stay_in_key_rule = "3.  **Use Drum Map:** You must adhere to the provided Drum Map for all note pitches.\n"
 
     prompt = (
@@ -755,7 +762,7 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str) -> bo
             role = track_data.get("role", "complementary")
             
             # Assign MIDI channel
-            if role in ["drums", "percussion"]:
+            if role in ["drums", "percussion", "kick_and_snare"]:
                 channel = 9 # MIDI Channel 10 for drums
             else:
                 channel = next_melodic_channel
