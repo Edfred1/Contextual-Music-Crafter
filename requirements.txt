@@ -2,3 +2,4 @@ google-generativeai
 midiutil
 PyYAML
 colorama 
+mido
