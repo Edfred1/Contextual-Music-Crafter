@@ -85,6 +85,7 @@ pip install -r requirements.txt
     **Instrument Roles:**
     The `role` parameter guides the AI's composition for that instrument. Available roles are:
     -   `drums`: The main rhythmic foundation (kick, snare, hats).
+    -   `kick_and_snare`: The foundational kick and snare pattern, adapted to the specified genre.
     -   `percussion`: Complementary rhythmic elements (bongos, congas, shakers).
     -   `sub_bass`: Very deep, fundamental bass (often a sine wave).
     -   `bass`: The main, rhythmic bassline.
