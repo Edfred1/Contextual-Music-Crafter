@@ -50,6 +50,7 @@ time_signature:
 # The `role` tells the AI the musical function of the track. 
 # Available Roles:
 #   - "drums":      The main rhythmic foundation (kick, snare, hats).
+#   - "kick_and_snare": The foundational kick and snare pattern, adapted to the specified genre.
 #   - "percussion": Complementary rhythmic elements (bongos, congas, shakers).
 #   - "sub_bass":   Very deep, fundamental bass (often a sine wave).
 #   - "bass":       The main, rhythmic bassline. (Responds to Call/Response)
