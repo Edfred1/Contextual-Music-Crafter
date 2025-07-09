@@ -1,5 +1,6 @@
 google-generativeai
 midiutil
 PyYAML
-colorama 
+colorama
+ruamel.yaml
 mido
