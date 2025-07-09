@@ -75,6 +75,8 @@ pip install -r requirements.txt
 
     -   `api_key`: Your Google AI API Key.
     -   `model_name`: The specific generative model to use (e.g., "gemini-2.5-flash-preview-05-20").
+    -   `temperature`: (0.0 to 2.0) Controls creativity. Lower values are more deterministic, higher values are more experimental. Default is 1.0.
+    -   `context_window_size`: Defines how many previous musical parts are sent as context for the next generation. `-1` (dynamic) is recommended for quality, `0` disables context, and a positive number (e.g., `4`) sends a fixed amount of recent parts.
     -   `inspiration`: A detailed text prompt describing the style and mood. This is the most important creative input!
     -   `genre`: The primary musical genre.
     -   `bpm`: Tempo in beats per minute.
@@ -143,23 +145,47 @@ These are the original, direct scripts. They are perfect for developing individu
         ```
     2.  Choose which track(s) you want to create a variation for. A new file with the `_var` suffix will be saved.
 
-### 2. Advanced Tool: The Song Architect (`song_generator.py`)
+### 2. Full Song Generation: The Creative Duo
 
-For advanced users who are ready to compose a full song, `song_generator.py` is the next step. This powerful script generates complete, multi-part songs (e.g., intro, verse, chorus) with different musical directions for each section.
+For creating complete, multi-part songs, CMC uses two powerful scripts that work hand-in-hand: `music_crafter.py` (the planner) and `song_generator.py` (the builder).
 
-It uses not only `config.yaml` but also `song_settings.json` to define the structure of the entire song.
+#### **Step 1 (Recommended): Plan Your Song with the Creative Assistant (`music_crafter.py`)**
 
-> **⚠️ Important Note on Token Usage:**
-> Generating a full song with multiple complex parts is a powerful feature that can consume a significant amount of API tokens. **If you are using a free API key, it is possible to exhaust your daily limit during the generation of a single song.**
->
-> **Don't worry, your progress will be saved!** The script is designed for this. If generation stops, you can simply resume it the next day by running the script with the `--resume` flag and the saved progress file. It will pick up exactly where it left off.
->
-> **💡 A Note on Quality:** While the token usage is high, the results from generating a complete, multi-part song can be strikingly good, especially for well-defined musical concepts and genres that the AI model is familiar with. The contextual generation process truly shines when it has a full song structure to work with, often producing surprisingly cohesive and creative pieces.
+This interactive wizard is the best starting point for a new song. It acts as your AI co-producer to translate a simple idea into a detailed musical blueprint.
 
-### 3. Advanced Tool: The Creative Assistant (`music_crafter.py`)
+**How it works:**
+1.  You provide a high-level idea (e.g., genre, style, a feeling).
+2.  The script asks you a few questions.
+3.  It then uses the AI to generate a complete plan, including:
+    - A detailed, MIDI-focused `inspiration` prompt.
+    - A full list of suggested `instruments` with appropriate roles.
+    - A complete song structure in `song_settings.json`, with descriptive labels and creative direction for each part (e.g., Intro, Verse, Chorus).
+4.  After you confirm the plan, it automatically calls `song_generator.py` to create the music.
 
-This script is an interactive wizard that guides you through the entire creative process, from defining your idea to generating a complete song. While it uses the token-intensive `song_generator.py` for full song creation, it's the most powerful way to unlock CMC's full potential and produce impressive, structured musical pieces.
-
-**To start, simply run the script:**
+**To start the wizard, run:**
+```bash
+python music_crafter.py
 ```
+
+#### **Step 2: Build Your Song with the Song Architect (`song_generator.py`)**
+
+This is the core engine that reads the song plan and generates the final MIDI file. While `music_crafter.py` calls this script for you, you can also run it directly. This is useful if you want to:
+
+-   Manually create or edit your `config.yaml` and `song_settings.json` files.
+-   Re-generate a song using existing settings.
+-   Run an optimization pass on a previously generated song.
+-   Resume an interrupted generation.
+
+`song_generator.py` has its own interactive menu for these tasks.
+
+**To run the song engine directly, use:**
+```bash
+python song_generator.py
 ```
+
+> **⚠️ Important Note on Token Usage & Generation Time:**
+> Generating a full song is a powerful feature that can consume a significant amount of API tokens and may take a considerable amount of time to complete, depending on complexity. **If you are using a free API key, it is possible to exhaust your daily limit during the generation of a single song.**
+>
+> **Don't worry, your progress will be saved!** The `song_generator.py` script is designed for this. If generation stops, you can simply resume it from its interactive menu. It will pick up exactly where it left off.
+>
+> **💡 A Note on Quality:** While the process can be resource-intensive, the results from this two-step workflow can be strikingly good. The detailed plan created by `music_crafter.py` gives `song_generator.py` the context it needs to produce surprisingly cohesive and creative pieces.
