@@ -29,7 +29,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(script_dir, "config.yaml")
 # --- END ROBUST PATH ---
 
-MAX_CONTEXT_CHARS = 500000  # A safe buffer below the 1M token limit for Gemini
+MAX_CONTEXT_CHARS = 100000  # A safe buffer below the 1M token limit for Gemini
 BEATS_PER_BAR = 4
 TICKS_PER_BEAT = 480
 
@@ -177,7 +177,7 @@ def load_config(config_file):
         print(Fore.RED + f"Error loading configuration: {str(e)}" + Style.RESET_ALL)
         exit()
 
-def get_dynamic_context(all_past_themes: List[Dict]) -> Tuple[List[Dict], int]:
+def get_dynamic_context(all_past_themes: List[Dict], character_budget: int = MAX_CONTEXT_CHARS) -> Tuple[List[Dict], int]:
     """
     Selects the most recent themes that fit within a character limit for the context.
     Returns the selected themes and the starting index from the original list.
@@ -192,8 +192,8 @@ def get_dynamic_context(all_past_themes: List[Dict]) -> Tuple[List[Dict], int]:
     for i in range(len(all_past_themes) - 1, -1, -1):
         theme = all_past_themes[i]
         try:
-            theme_str = json.dumps(theme)
-            if current_chars + len(theme_str) > MAX_CONTEXT_CHARS:
+            theme_str = json.dumps(theme, separators=(',', ':'))
+            if current_chars + len(theme_str) > character_budget:
                 # The window starts at the next index
                 return list(reversed(context_themes)), i + 1
             
@@ -279,14 +279,16 @@ def get_scale_notes(root_note, scale_type="minor"):
         print(Fore.RED + f"Error generating scale for {scale_type}: {str(e)}" + Style.RESET_ALL)
         return [60, 62, 64, 65, 67, 69, 71] # Return C Major scale on error
 
-def create_theme_prompt(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes: List[Dict], current_theme_index: int):
+def create_theme_prompt(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes_full_history: List[Dict], current_theme_index: int):
     """
     Creates a universal, music-intelligent prompt that is tailored to generating a new theme based on previous ones.
+    This version dynamically manages the context size to stay within limits.
     """
     total_beats_per_theme = length * config["time_signature"]["beats_per_bar"]
     scale_notes = get_scale_notes(config["root_note"], config["scale_type"])
     
-    # Basic music theory instructions remain the same
+    # --- Part 1: Assemble the NON-NEGOTIABLE parts of the prompt first ---
+    
     basic_instructions = (
         f"**Genre:** {config['genre']}\n"
         f"**Tempo:** {config['bpm']} BPM\n"
@@ -296,30 +298,16 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         f"**Instrument:** {instrument_name} (MIDI Program: {program_num})\n"
     )
 
-    # --- NEW: Context from previous themes ---
-    previous_themes_prompt_part = ""
-    if previous_themes:
-        previous_themes_prompt_part = "**You have already composed the following themes. Use them as the primary context for what comes next:**\n"
-        for i, theme in enumerate(previous_themes):
-            theme_name = theme.get("description", f"Theme {chr(65 + i)}")
-            previous_themes_prompt_part += f"- **{theme_name}**:\n"
-            # Include the full note data for each track in the theme.
-            for track in theme['tracks']:
-                notes_as_str = json.dumps(track['notes'])
-                previous_themes_prompt_part += f"  - **{track['instrument_name']}** (Role: {track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
-        previous_themes_prompt_part += "\n"
-
-
     # Context for other tracks *within the current theme*
     context_prompt_part = ""
     if context_tracks:
         context_prompt_part = "**Inside the current theme, you have already written these parts. Compose a new part that fits with them:**\n"
         for track in context_tracks:
-            notes_as_str = json.dumps(track['notes'])
+            notes_as_str = json.dumps(track['notes'], separators=(',', ':'))
             context_prompt_part += f"- **{track['instrument_name']}** (Role: {track['role']}):\n```json\n{notes_as_str}\n```\n"
         context_prompt_part += "\n"
-    
-    # --- NEW: Main Task based on theme ---
+
+    # Main Task description based on theme
     theme_task_instruction = ""
     timing_rule = f"4.  **Timing is Absolute:** 'start_beat' is the absolute position from the beginning of the {length}-bar clip.\n"
 
@@ -341,7 +329,7 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         )
         timing_rule = f"4.  **Timing is Absolute:** 'start_beat' is the absolute position from the beginning of the *entire song composition so far*.\n"
 
-    # --- Call and Response Instruction ---
+    # Dialogue instructions
     call_and_response_instructions = ""
     if dialogue_role == 'call':
         call_and_response_instructions = (
@@ -356,9 +344,8 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
             "Think of it as giving a musical answer. Your phrases should complement and respond directly to the 'call'.\n\n"
         )
 
-    # Use simplified role instructions for generation
+    # Role-specific instructions and rules
     role_instructions = get_role_instructions_for_generation(role, config)
-
     drum_map_instructions = ""
     if role in ["drums", "percussion", "kick_and_snare"]:
         drum_map_instructions = (
@@ -377,6 +364,7 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
             "- **Low Tom:** MIDI Note 45\n\n"
         )
     
+    # Polyphony and Key rules
     POLYPHONIC_ROLES = {"harmony", "chords", "pads", "atmosphere", "texture", "guitar"}
     EXPRESSIVE_MONOPHONIC_ROLES = {"lead", "melody", "vocal"}
     if role in POLYPHONIC_ROLES:
@@ -389,6 +377,68 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     stay_in_key_rule = f"3.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n"
     if role in ["drums", "percussion", "kick_and_snare"]:
         stay_in_key_rule = "3.  **Use Drum Map:** You must adhere to the provided Drum Map for all note pitches.\n"
+
+    # General boilerplate and formatting instructions
+    boilerplate_instructions = (
+        f'You are an expert music producer composing different sections of a song inspired by: **{config["inspiration"]}**.\n\n'
+        f"**--- OVERALL MUSICAL CONTEXT ---**\n"
+        f"{basic_instructions}\n"
+        f"{context_prompt_part}"
+        f"**--- YOUR CURRENT TASK ---**\n"
+        f"{theme_task_instruction}\n"
+        f"You are composing the part for the **{instrument_name}**.\n"
+        f"{call_and_response_instructions}"
+        f"{drum_map_instructions}"
+        f"{role_instructions}\n\n"
+        f"**--- UNIVERSAL PRINCIPLES OF GOOD MUSIC ---**\n"
+        f"1. **Structure & Evolution:** Your composition should have a clear structure. A good musical part tells a story over the full {length} bars by introducing a core idea ('motif') and then developing it through variation, repetition, and contrast. Avoid mindless, robotic repetition.\n"
+        f"2. **Clarity through Space:** Do not create a constant wall of sound. Use rests effectively. The musical role of a part determines how it should use space. Your role-specific instructions provide guidance on this.\n"
+        f"3. **Dynamic Phrasing:** Use a wide range of velocity to create accents and shape the energy of the phrase. A static volume is boring and unnatural.\n"
+        f"4. **Tension & Release:** Build musical tension through dynamics, rhythmic complexity, or harmony, and resolve it at key moments (e.g., at the end of 4, 8, or 16 bar phrases) to create a satisfying arc.\n"
+        f"5. **Ensemble Playing:** Think like a member of a band. Your performance must complement the other parts. Pay attention to the phrasing of other instruments and find pockets of space to add your musical statement without cluttering the arrangement.\n"
+        f"6. **Micro-timing for Groove:** To add a human feel, you can subtly shift notes off the strict grid. Slightly anticipating a beat (pushing) can add urgency, while slightly delaying it (pulling) can create a more relaxed feel. This is especially effective for non-kick/snare elements.\n\n"
+        f"**--- OUTPUT FORMAT: JSON ---**\n"
+        f"Generate the musical data as a single, valid JSON array of objects. Each object represents a note and MUST have these keys:\n"
+        f'- **"pitch"**: MIDI note number (integer 0-127).\n'
+        f'- **"start_beat"**: The beat on which the note begins (float).\n'
+        f'- **"duration_beats"**: The note\'s length in beats (float).\n'
+        f'- **"velocity"**: MIDI velocity (integer 1-127).\n\n'
+        f"**IMPORTANT RULES:**\n"
+        f'1.  **JSON ONLY:** Your entire response MUST be only the raw JSON array.\n'
+        f"{polyphony_rule}\n"
+        f"{stay_in_key_rule}"
+        f"{timing_rule}"
+        f'5.  **Valid JSON Syntax:** The output must be a perfectly valid JSON array.\n'
+        f'6.  **Handling Silence:** If the creative direction explicitly requires this instrument to be silent for the entire section, output this specific JSON array to signify intentional silence: `[{{"pitch": 0, "start_beat": 0, "duration_beats": 0, "velocity": 0}}]`. Do not output an empty array for silence.\n\n'
+        f"Now, generate the JSON array for the **{instrument_name}** track for the theme described as '{theme_description}'.\n"
+    )
+
+    # --- Part 2: Smart Context Calculation ---
+    # Calculate the size of the prompt without the historical context
+    base_prompt_size = len(
+        boilerplate_instructions + basic_instructions + theme_task_instruction +
+        context_prompt_part + call_and_response_instructions + drum_map_instructions +
+        role_instructions + polyphony_rule + stay_in_key_rule + timing_rule
+    )
+
+    # Determine the remaining character budget for previous themes
+    history_budget = MAX_CONTEXT_CHARS - base_prompt_size
+    
+    # Get only the themes that fit in the remaining budget
+    safe_previous_themes, _ = get_dynamic_context(previous_themes_full_history, character_budget=history_budget)
+
+    # --- Part 3: Assemble the FINAL prompt ---
+    previous_themes_prompt_part = ""
+    if safe_previous_themes:
+        previous_themes_prompt_part = "**You have already composed the following themes. Use them as the primary context for what comes next:**\n"
+        for i, theme in enumerate(safe_previous_themes):
+            theme_name = theme.get("description", f"Theme {chr(65 + i)}")
+            previous_themes_prompt_part += f"- **{theme_name}**:\n"
+            # Include the full note data for each track in the theme.
+            for track in theme['tracks']:
+                notes_as_str = json.dumps(track['notes'], separators=(',', ':'))
+                previous_themes_prompt_part += f"  - **{track['instrument_name']}** (Role: {track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
+        previous_themes_prompt_part += "\n"
 
     # The final prompt putting it all together
     prompt = (
@@ -425,13 +475,15 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         f'6.  **Handling Silence:** If the creative direction explicitly requires this instrument to be silent for the entire section, output this specific JSON array to signify intentional silence: `[{{"pitch": 0, "start_beat": 0, "duration_beats": 0, "velocity": 0}}]`. Do not output an empty array for silence.\n\n'
         f"Now, generate the JSON array for the **{instrument_name}** track for the theme described as '{theme_description}'.\n"
     )
+    # Debug print to check prompt length
+    # print(f"DEBUG: Prompt length: {len(prompt)} characters.")
     return prompt
 
-def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes: List[Dict], current_theme_index: int) -> Dict:
+def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes_full_history: List[Dict], current_theme_index: int) -> Dict:
     """
     Generates musical data for a single instrument track using the generative AI model, adapted for themes.
     """
-    prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes, current_theme_index)
+    prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history, current_theme_index)
     
     while True: # Loop to allow retrying after complete failure
         max_retries = 3
@@ -751,7 +803,7 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
                     new_note['start_beat'] = max(0, round(new_note['start_beat'], 4))
                     normalized_notes.append(new_note)
 
-                notes_as_str = json.dumps(normalized_notes)
+                notes_as_str = json.dumps(normalized_notes, separators=(',', ':'))
                 previous_themes_prompt_part += f"  - **{track['instrument_name']}** (Role: {track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
         previous_themes_prompt_part += "\n"
 
@@ -760,13 +812,13 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     if inner_context_tracks:
         inner_context_prompt_part = "**Context from the Current Song Section:**\nWithin this section, you have already optimized these parts. Make your new part fit perfectly with them.\n"
         for track in inner_context_tracks:
-            notes_as_str = json.dumps(track['notes'])
+            notes_as_str = json.dumps(track['notes'], separators=(',', ':'))
             inner_context_prompt_part += f"- **{track['instrument_name']}** (Role: {track['role']}):\n```json\n{notes_as_str}\n```\n"
         inner_context_prompt_part += "\n"
 
     original_part_prompt = (
         "**This is the original part you need to optimize:**\n"
-        f"```json\n{json.dumps(track_to_optimize['notes'])}\n```\n"
+        f"```json\n{json.dumps(track_to_optimize['notes'], separators=(',', ':'))}\n```\n"
     )
 
     optimization_instruction = (
