@@ -1304,6 +1304,12 @@ def main(resume_file_path=None):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     settings_file = os.path.join(script_dir, "song_settings.json")
 
+    # --- State variables for the interactive session ---
+    last_generated_themes = []
+    last_generated_song_data = None
+    final_song_basename = None
+    # --- End State variables ---
+
     # --- NEW: Argument Parsing for run modes ---
     run_automatically = '--run' in sys.argv
     optimize_automatically = '--optimize' in sys.argv
@@ -1334,9 +1340,6 @@ def main(resume_file_path=None):
             print(Fore.RED + "Cannot run automatically: 'song_settings.json' not found or is invalid." + Style.RESET_ALL)
             return
     
-    last_generated_song_data = None
-    last_generated_themes = []
-    
     try:
         config = load_config(CONFIG_FILE)
         genai.configure(api_key=config["api_key"])
@@ -1362,13 +1365,22 @@ def main(resume_file_path=None):
             generated_themes = generate_all_themes_and_save_parts(config, length, defs, script_dir, run_timestamp, progress_data)
             if generated_themes:
                 time.sleep(2)
-                final_song_data, final_song_basename = combine_and_save_final_song(config, generated_themes, script_dir, run_timestamp)
+                final_song_data, final_song_basename_val = combine_and_save_final_song(config, generated_themes, script_dir, run_timestamp)
                 if final_song_data:
                     try:
                         os.remove(resume_file_path)
                         print(Fore.GREEN + "Resumed generation finished. Progress file removed." + Style.RESET_ALL)
                     except Exception as e:
                         print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
+                    
+                    # --- NEW: Populate state for the interactive session ---
+                    last_generated_themes = generated_themes
+                    last_generated_song_data = final_song_data
+                    final_song_basename = final_song_basename_val
+                    previous_settings = {
+                        "length": progress_data.get('length'),
+                        "theme_definitions": progress_data.get('theme_definitions')
+                    }
         
         elif 'optimization' in progress_data.get('type', ''):
             theme_len, themes_opt, opt_iter = progress_data['theme_length'], progress_data['themes_to_optimize'], progress_data['opt_iteration_num']
@@ -1397,7 +1409,7 @@ def main(resume_file_path=None):
                     print(Fore.GREEN + "Resumed optimization finished. Progress file removed." + Style.RESET_ALL)
                 except Exception as e:
                     print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
-        return # Exit after resume
+        # --- NEW: Do NOT exit after resume. Fall through to the interactive menu. ---
 
     if run_automatically:
         if not previous_settings:
@@ -1410,7 +1422,7 @@ def main(resume_file_path=None):
         generated_themes = generate_all_themes_and_save_parts(config, length, defs, script_dir, run_timestamp)
         if generated_themes:
             time.sleep(2)
-            final_song_data, final_song_basename = combine_and_save_final_song(config, generated_themes, script_dir, run_timestamp)
+            final_song_data, final_song_basename_val = combine_and_save_final_song(config, generated_themes, script_dir, run_timestamp)
             if final_song_data:
                 # This state is needed for a potential 'optimize' run later
                 last_generated_song_data, last_generated_themes = final_song_data, generated_themes
@@ -1418,7 +1430,7 @@ def main(resume_file_path=None):
                 # NEW: Save details for optimization
                 details_for_optimizer = {
                     "generated_themes": generated_themes,
-                    "final_song_basename": final_song_basename,
+                    "final_song_basename": final_song_basename_val,
                     "previous_settings": previous_settings,
                     "run_timestamp": run_timestamp,
                 }
@@ -1554,10 +1566,6 @@ def main(resume_file_path=None):
     
     print(f"{Fore.YELLOW}Note: The 'Generate New Song' option will overwrite 'song_settings.json'.{Style.RESET_ALL}\n")
     
-    last_generated_themes = []
-    last_generated_song_data = None
-    final_song_basename = None
-
     while True:
         print_header("Song Generator Menu")
         
