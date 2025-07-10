@@ -279,11 +279,11 @@ def get_scale_notes(root_note, scale_type="minor"):
         print(Fore.RED + f"Error generating scale for {scale_type}: {str(e)}" + Style.RESET_ALL)
         return [60, 62, 64, 65, 67, 69, 71] # Return C Major scale on error
 
-def create_theme_prompt(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes: List[Dict]):
+def create_theme_prompt(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes: List[Dict], current_theme_index: int):
     """
     Creates a universal, music-intelligent prompt that is tailored to generating a new theme based on previous ones.
     """
-    total_beats = length * config["time_signature"]["beats_per_bar"]
+    total_beats_per_theme = length * config["time_signature"]["beats_per_bar"]
     scale_notes = get_scale_notes(config["root_note"], config["scale_type"])
     
     # Basic music theory instructions remain the same
@@ -292,7 +292,7 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         f"**Tempo:** {config['bpm']} BPM\n"
         f"**Time Signature:** {config['time_signature']['beats_per_bar']}/{config['time_signature']['beat_value']}\n"
         f"**Key/Scale:** {config['key_scale'].title()} (Available notes: {scale_notes})\n"
-        f"**Track Length:** {length} bars ({total_beats} beats total)\n"
+        f"**Track Length:** {length} bars ({total_beats_per_theme} beats total)\n"
         f"**Instrument:** {instrument_name} (MIDI Program: {program_num})\n"
     )
 
@@ -323,7 +323,7 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     theme_task_instruction = ""
     timing_rule = f"4.  **Timing is Absolute:** 'start_beat' is the absolute position from the beginning of the {length}-bar clip.\n"
 
-    if not previous_themes:
+    if current_theme_index == 0:
         theme_task_instruction = (
             f"**Your Task: Compose the First Musical Theme**\n"
             f"This is the very first section of the song. Your goal is to establish the main musical ideas.\n"
@@ -331,8 +331,7 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
             f"**Creative Direction for this Theme:** {theme_description}\n"
         )
     else:
-        total_beats = length * config["time_signature"]["beats_per_bar"]
-        total_previous_beats = len(previous_themes) * total_beats
+        total_previous_beats = current_theme_index * total_beats_per_theme
         theme_task_instruction = (
             f"**Your Task: Compose a New, Contrasting Theme starting from beat {total_previous_beats}**\n"
             f"You must create a new musical section that logically follows the previous themes, but has a distinct character. It should feel like a new part of the song (e.g., a chorus following a verse, or a bridge).\n"
@@ -428,11 +427,11 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     )
     return prompt
 
-def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes: List[Dict]) -> Dict:
+def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes: List[Dict], current_theme_index: int) -> Dict:
     """
     Generates musical data for a single instrument track using the generative AI model, adapted for themes.
     """
-    prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes)
+    prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes, current_theme_index)
     
     while True: # Loop to allow retrying after complete failure
         max_retries = 3
@@ -1023,7 +1022,8 @@ def generate_one_theme(config, length: int, theme_def: dict, previous_themes: Li
         track_data = generate_instrument_track_data(
             config, length, instrument_name, program_num, 
             context_tracks, role, i, total_tracks, dialogue_role, 
-            theme_def.get('label', ''), theme_def.get('description', ''), previous_themes
+            theme_def.get('label', ''), theme_def.get('description', ''), previous_themes,
+            current_theme_index=i
         )
 
         if track_data:
@@ -1835,7 +1835,8 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
                 track_data = generate_instrument_track_data(
                     config, length, instrument_name, program_num, 
                     context_tracks_for_current_theme, role, j, len(config['instruments']), dialogue_role,
-                    theme_def['label'], theme_def['description'], previous_themes_context
+                    theme_def['label'], theme_def['description'], previous_themes_context,
+                    current_theme_index=i
                 )
 
                 if track_data:
