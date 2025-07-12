@@ -1437,16 +1437,28 @@ def main(resume_file_path=None):
              print(Fore.RED + f"Failed to load progress data from {resume_file_path}" + Style.RESET_ALL)
              return
         
-        # --- NEW: Use the config from the progress file to ensure consistency ---
+        # --- REVISED: Use a mix of saved and current config for flexibility ---
         original_run_config = progress_data.get('config')
         if original_run_config:
-            print(Fore.YELLOW + "Using configuration from the saved session to ensure consistency." + Style.RESET_ALL)
-            config = original_run_config # This is the key fix
-            # Re-configure the API key in case it was loaded from the old config
+            # Preserve the current API key and model name from the already loaded config
+            current_api_key = config.get("api_key")
+            current_model_name = config.get("model_name")
+
+            # The config for the run is primarily the one from the save file
+            config = original_run_config
+            
+            # But we explicitly overwrite with the current key and model name
+            config['api_key'] = current_api_key
+            config['model_name'] = current_model_name
+            
+            print(Fore.YELLOW + "Using musical parameters from the saved session to ensure consistency." + Style.RESET_ALL)
+            print(Fore.CYAN + f"Using current API key and model: '{current_model_name}'." + Style.RESET_ALL)
+
+            # Re-configure the API just in case, as the object has been swapped
             try:
                 genai.configure(api_key=config["api_key"])
             except Exception as e:
-                print(Fore.RED + f"API Key error in resumed config: {e}. Aborting.")
+                print(Fore.RED + f"API Key error using current key: {e}. Aborting.")
                 return
         else:
             print(Fore.YELLOW + "Warning: Could not find config in progress file. Using current config.yaml, which may cause inconsistencies." + Style.RESET_ALL)
@@ -1458,11 +1470,13 @@ def main(resume_file_path=None):
         
         if 'generation' in progress_data.get('type', ''):
             length, defs = progress_data['length'], progress_data['theme_definitions']
-            generated_themes = generate_all_themes_and_save_parts(config, length, defs, script_dir, run_timestamp, progress_data)
+            generated_themes, total_tokens = generate_all_themes_and_save_parts(config, length, defs, script_dir, run_timestamp, progress_data)
             if generated_themes:
                 time.sleep(2)
                 final_song_data, final_song_basename_val = combine_and_save_final_song(config, generated_themes, script_dir, run_timestamp)
                 if final_song_data:
+                    print(Fore.GREEN + f"\n--- Resumed Generation Complete! ---" + Style.RESET_ALL)
+                    print(Fore.CYAN + f"Total tokens used for this run: {total_tokens:,}" + Style.RESET_ALL)
                     try:
                         os.remove(resume_file_path)
                         print(Fore.GREEN + "Resumed generation finished. Progress file removed." + Style.RESET_ALL)
@@ -1515,7 +1529,7 @@ def main(resume_file_path=None):
         print(Fore.CYAN + "\n--- Running in automatic mode ---" + Style.RESET_ALL)
         length, defs = previous_settings['length'], previous_settings['theme_definitions']
         run_timestamp = time.strftime("%Y%m%d-%H%M%S")
-        generated_themes = generate_all_themes_and_save_parts(config, length, defs, script_dir, run_timestamp)
+        generated_themes, total_tokens = generate_all_themes_and_save_parts(config, length, defs, script_dir, run_timestamp)
         if generated_themes:
             time.sleep(2)
             final_song_data, final_song_basename_val = combine_and_save_final_song(config, generated_themes, script_dir, run_timestamp)
@@ -1523,6 +1537,9 @@ def main(resume_file_path=None):
                 # This state is needed for a potential 'optimize' run later
                 last_generated_song_data, last_generated_themes = final_song_data, generated_themes
                 
+                print(Fore.GREEN + "\n--- Automatic Generation Complete! ---" + Style.RESET_ALL)
+                print(Fore.CYAN + f"Total tokens used for this run: {total_tokens:,}" + Style.RESET_ALL)
+
                 # NEW: Save details for optimization
                 details_for_optimizer = {
                     "generated_themes": generated_themes,
@@ -1774,19 +1791,18 @@ def main(resume_file_path=None):
                 length, defs = previous_settings['length'], previous_settings['theme_definitions']
                 run_timestamp = time.strftime("%Y%m%d-%H%M%S")
                 
-                generated_themes = generate_all_themes_and_save_parts(config, length, defs, script_dir, run_timestamp)
+                generated_themes, total_tokens = generate_all_themes_and_save_parts(config, length, defs, script_dir, run_timestamp)
                 if generated_themes:
-                    time.sleep(2)
-                    final_song_data, final_song_basename_val = combine_and_save_final_song(config, generated_themes, script_dir, run_timestamp)
-                    if final_song_data:
-                        last_generated_song_data = final_song_data
-                        last_generated_themes = generated_themes
-                        final_song_basename = final_song_basename_val
-                        try:
-                            prog_file = os.path.join(script_dir, get_progress_filename(config, run_timestamp))
-                            if os.path.exists(prog_file): os.remove(prog_file)
-                            print(Fore.GREEN + "Generation finished. Progress file removed." + Style.RESET_ALL)
-                        except Exception as e: print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
+                    print(Fore.GREEN + "\n--- Generation Complete! ---" + Style.RESET_ALL)
+                    print(Fore.CYAN + f"Total tokens used for this run: {total_tokens:,}" + Style.RESET_ALL)
+                    last_generated_song_data = final_song_data
+                    last_generated_themes = generated_themes
+                    final_song_basename = final_song_basename_val
+                    try:
+                        prog_file = os.path.join(script_dir, get_progress_filename(config, run_timestamp))
+                        if os.path.exists(prog_file): os.remove(prog_file)
+                        print(Fore.GREEN + "Generation finished. Progress file removed." + Style.RESET_ALL)
+                    except Exception as e: print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
 
             elif action == 'optimize':
                 if not last_generated_song_data:
@@ -1925,7 +1941,7 @@ def merge_themes_to_song_data(themes: List[Dict], config: Dict, theme_length_bar
         "tracks": final_tracks_sorted
     }
 
-def generate_all_themes_and_save_parts(config, length, theme_definitions, script_dir, timestamp, resume_data=None):
+def generate_all_themes_and_save_parts(config, length, theme_definitions, script_dir, timestamp, resume_data=None) -> Tuple[List[Dict], int]:
     """Generates all themes, saves progress track-by-track, and saves a MIDI file for each completed theme."""
     print(Fore.CYAN + "\n--- Stage 1: Generating all individual song parts... ---" + Style.RESET_ALL)
     
@@ -2023,7 +2039,7 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
                     save_progress(progress_data, script_dir, timestamp)
                 else:
                     print(Fore.RED + f"Failed to generate track for {instrument_name}. Stopping generation." + Style.RESET_ALL)
-                    return None
+                    return None, total_tokens_used
             
             # --- After a theme's tracks are all generated, create its MIDI file ---
             print(Fore.GREEN + f"\n--- Theme '{theme_def['label']}' generated successfully! Saving part file... ---" + Style.RESET_ALL)
@@ -2042,14 +2058,14 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
 
     except KeyboardInterrupt:
         print(Fore.YELLOW + "\n--- Generation interrupted by user. Progress has been saved. ---" + Style.RESET_ALL)
-        return None
+        return None, total_tokens_used
     except Exception as e:
         print(Fore.RED + f"An unexpected error occurred during generation: {e}" + Style.RESET_ALL)
         import traceback
         traceback.print_exc()
-        return None
+        return None, 0
 
-    return all_themes_data
+    return all_themes_data, total_tokens_used
 
 def combine_and_save_final_song(config, generated_themes, script_dir, timestamp):
     """Merges generated themes into a final song and saves it to a MIDI file."""
