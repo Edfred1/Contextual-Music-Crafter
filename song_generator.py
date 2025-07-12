@@ -1437,6 +1437,20 @@ def main(resume_file_path=None):
              print(Fore.RED + f"Failed to load progress data from {resume_file_path}" + Style.RESET_ALL)
              return
         
+        # --- NEW: Use the config from the progress file to ensure consistency ---
+        original_run_config = progress_data.get('config')
+        if original_run_config:
+            print(Fore.YELLOW + "Using configuration from the saved session to ensure consistency." + Style.RESET_ALL)
+            config = original_run_config # This is the key fix
+            # Re-configure the API key in case it was loaded from the old config
+            try:
+                genai.configure(api_key=config["api_key"])
+            except Exception as e:
+                print(Fore.RED + f"API Key error in resumed config: {e}. Aborting.")
+                return
+        else:
+            print(Fore.YELLOW + "Warning: Could not find config in progress file. Using current config.yaml, which may cause inconsistencies." + Style.RESET_ALL)
+        
         run_timestamp = progress_data.get('timestamp')
         if not run_timestamp:
             print(Fore.RED + "Timestamp missing in progress file. Cannot resume." + Style.RESET_ALL)
