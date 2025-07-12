@@ -29,7 +29,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(script_dir, "config.yaml")
 # --- END ROBUST PATH ---
 
-MAX_CONTEXT_CHARS = 100000  # A safe buffer below the 1M token limit for Gemini
+MAX_CONTEXT_CHARS = 500000  # A safe buffer below the 1M token limit for Gemini
 BEATS_PER_BAR = 4
 TICKS_PER_BEAT = 480
 
@@ -425,10 +425,29 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     history_budget = MAX_CONTEXT_CHARS - base_prompt_size
     
     # Get only the themes that fit in the remaining budget
-    safe_previous_themes, _ = get_dynamic_context(previous_themes_full_history, character_budget=history_budget)
+    safe_previous_themes, context_start_index = get_dynamic_context(previous_themes_full_history, character_budget=history_budget)
 
     # --- Part 3: Assemble the FINAL prompt ---
     previous_themes_prompt_part = ""
+    if previous_themes_full_history: # Check if there was any history to begin with
+        total_previous_themes = len(previous_themes_full_history)
+        used_themes_count = len(safe_previous_themes)
+        
+        # Determine the source of limitation
+        limit_source = ""
+        if config.get("context_window_size", -1) > 0:
+             limit_source = f"due to 'context_window_size={config['context_window_size']}'"
+        elif config.get("context_window_size", -1) == -1:
+             if used_themes_count < total_previous_themes:
+                 limit_source = "due to character limit"
+             else:
+                 limit_source = "using full available history"
+
+        start_theme_num = context_start_index + (current_theme_index - total_previous_themes) + 1
+        end_theme_num = current_theme_index
+        if used_themes_count > 0:
+            print(Fore.CYAN + f"Context Info: Using {used_themes_count}/{total_previous_themes} previous themes (themes {start_theme_num}-{end_theme_num}) for context ({limit_source})." + Style.RESET_ALL)
+
     if safe_previous_themes:
         previous_themes_prompt_part = "**You have already composed the following themes. Use them as the primary context for what comes next:**\n"
         for i, theme in enumerate(safe_previous_themes):
@@ -479,9 +498,10 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     # print(f"DEBUG: Prompt length: {len(prompt)} characters.")
     return prompt
 
-def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes_full_history: List[Dict], current_theme_index: int) -> Dict:
+def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes_full_history: List[Dict], current_theme_index: int) -> Tuple[Dict, int]:
     """
     Generates musical data for a single instrument track using the generative AI model, adapted for themes.
+    Returns a tuple of (track_data, token_count).
     """
     prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history, current_theme_index)
     
@@ -537,6 +557,17 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
 
                 # 2. Now that we know the response is valid, safely access the text and parse JSON
                 response_text = response.text
+
+                # --- NEW: Token Usage Reporting ---
+                total_token_count = 0
+                if hasattr(response, 'usage_metadata'):
+                    prompt_tokens = response.usage_metadata.prompt_token_count
+                    output_tokens = response.usage_metadata.candidates_token_count
+                    total_token_count = response.usage_metadata.total_token_count
+                    char_per_token = len(prompt) / prompt_tokens if prompt_tokens > 0 else 0
+                    print(Fore.CYAN + f"Token Usage: Prompt: {prompt_tokens:,} | Output: {output_tokens:,} | Total: {total_token_count:,} "
+                                      f"(Prompt: {len(prompt):,} chars, ~{char_per_token:.2f} chars/token)" + Style.RESET_ALL)
+                
                 if not response_text.strip():
                     print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: Model returned an empty response for {instrument_name}." + Style.RESET_ALL)
                     continue # Skip to the next retry attempt
@@ -554,7 +585,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                             "program_num": program_num,
                             "role": role,
                             "notes": [] # Return a valid track with no notes
-                        }
+                        }, total_token_count
 
                 if not isinstance(notes_list, list):
                     raise TypeError("The generated data is not a valid list of notes.")
@@ -573,7 +604,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     "program_num": program_num,
                     "role": role,
                     "notes": validated_notes
-                }
+                }, total_token_count
 
             except (json.JSONDecodeError, TypeError) as e:
                 print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: Data validation failed for {instrument_name}. Reason: {str(e)}" + Style.RESET_ALL)
@@ -617,7 +648,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
         # Case 2: User pressed 'n'
         elif user_action == 'n':
             print(Fore.RED + f"Aborting generation for '{instrument_name}'." + Style.RESET_ALL)
-            return None # Exit function
+            return None, 0 # Exit function
             
         # Case 3: User pressed 'w' to wait
         elif user_action == 'w':
@@ -629,7 +660,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     break 
                 elif manual_choice in ['n', 'no']:
                     print(Fore.RED + f"Aborting generation for '{instrument_name}'." + Style.RESET_ALL)
-                    return None
+                    return None, 0
                 else:
                     print(Fore.YELLOW + "Invalid input. Please enter 'y' or 'n'." + Style.RESET_ALL)
 
@@ -643,6 +674,7 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
     print(Fore.CYAN + "\n--- Creating and Saving New Song Optimization by Part ---" + Style.RESET_ALL)
     
     final_optimized_themes = []
+    total_optimization_tokens = 0
     
     # Determine the effective user prompt. For new runs, it's the argument. For resumed runs, it's from the saved data.
     prompt_for_this_run = user_optimization_prompt
@@ -653,25 +685,18 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
         final_optimized_themes = resume_data.get('final_optimized_themes', [])
         start_theme_index = resume_data.get('current_theme_index', 0)
         start_track_index = resume_data.get('current_track_index', 0)
+        total_optimization_tokens = resume_data.get('total_optimization_tokens', 0)
         prompt_for_this_run = resume_data.get('user_optimization_prompt', "") # Use saved prompt
-        print(Fore.CYAN + f"Resuming optimization from theme {start_theme_index + 1}, track {start_track_index + 1}" + Style.RESET_ALL)
+        print(Fore.CYAN + f"Resuming optimization from theme {Style.BRIGHT}{Fore.YELLOW}{start_theme_index + 1}{Style.RESET_ALL}{Fore.CYAN}, track {Style.BRIGHT}{Fore.YELLOW}{start_track_index + 1}{Style.RESET_ALL}")
         if prompt_for_this_run:
-            print(Fore.CYAN + f"Using saved optimization prompt: '{prompt_for_this_run}'" + Style.RESET_ALL)
+            print(Fore.CYAN + f"Using saved optimization prompt: {Style.BRIGHT}{Fore.WHITE}'{prompt_for_this_run}'{Style.RESET_ALL}")
     
     try:
         for i in range(start_theme_index, len(themes_to_optimize)):
             theme_to_optimize = themes_to_optimize[i]
-            theme_description = theme_to_optimize.get('description', f"Theme {chr(65+i)}")
-            print(Fore.CYAN + f"\n--- Optimizing Theme {i+1}/{len(themes_to_optimize)}: '{theme_description}' ---" + Style.RESET_ALL)
+            theme_label = theme_to_optimize.get('label', f"Theme {chr(65+i)}")
+            print(Fore.BLUE + f"\n--- Optimizing Theme {Style.BRIGHT}{Fore.YELLOW}{i+1}/{len(themes_to_optimize)}{Style.RESET_ALL}{Fore.BLUE}: '{Style.BRIGHT}{theme_label}{Style.NORMAL}' ---" + Style.RESET_ALL)
             
-            # Use a dynamic sliding window for context based on config
-            if config.get("context_window_size", -1) == -1:
-                context_themes, context_start_index = get_dynamic_context(final_optimized_themes[:i])
-            else:
-                window_size = config["context_window_size"]
-                context_start_index = max(0, i - window_size)
-                context_themes = final_optimized_themes[context_start_index:i]
-
             optimized_theme_tracks = []
             current_section_context_tracks = [dict(t) for t in theme_to_optimize['tracks']]
             
@@ -686,18 +711,24 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
             for track_index in range(track_start_index, len(theme_to_optimize['tracks'])):
                 track_to_optimize = theme_to_optimize['tracks'][track_index]
                 role = track_to_optimize.get("role", "complementary")
-                print(Fore.MAGENTA + f"\n--- Optimizing Track: {track_to_optimize['instrument_name']} (Role: {role}) ---" + Style.RESET_ALL)
-                print(f"{Fore.CYAN}Goal:{Style.RESET_ALL} {get_optimization_goal_for_role(role)}")
+                print(f"\n{Fore.MAGENTA}--- Optimizing Track: {Style.BRIGHT}{Fore.GREEN}{track_to_optimize['instrument_name']}{Style.NORMAL} (Role: {Fore.YELLOW}{role}{Fore.MAGENTA}) ---{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}Goal:{Style.RESET_ALL} {Fore.WHITE}{get_optimization_goal_for_role(role)}{Style.RESET_ALL}")
                 
                 inner_context_for_ai = [t for j, t in enumerate(current_section_context_tracks) if j != track_index]
 
-                new_track_data = generate_optimization_data(
+                # Pass the full history of *completed* optimized themes
+                historical_themes_context = final_optimized_themes[:i]
+
+                new_track_data, tokens_used = generate_optimization_data(
                     config, theme_length, track_to_optimize, role,
-                    theme_description, context_themes, inner_context_for_ai, context_start_index,
+                    theme_label, theme_to_optimize['description'], # Pass both label and detailed description
+                    historical_themes_context, inner_context_for_ai, i,
                     prompt_for_this_run
                 )
                 
                 if new_track_data:
+                    total_optimization_tokens += tokens_used
+                    print(Fore.CYAN + f"Cumulative optimization tokens so far: {total_optimization_tokens:,}" + Style.RESET_ALL)
                     if track_index < len(optimized_theme_tracks):
                         optimized_theme_tracks[track_index] = new_track_data
                     else:
@@ -711,7 +742,8 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
                         'current_track_index': track_index + 1, 'partial_theme_tracks': optimized_theme_tracks,
                         'completed_tracks': len(optimized_theme_tracks), 'total_tracks_in_theme': len(theme_to_optimize['tracks']),
                         'timestamp': run_timestamp,
-                        'user_optimization_prompt': prompt_for_this_run
+                        'user_optimization_prompt': prompt_for_this_run,
+                        'total_optimization_tokens': total_optimization_tokens
                     }
                     save_progress(progress_data, script_dir, run_timestamp)
                 else:
@@ -733,7 +765,8 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
             time.sleep(1)
 
             final_optimized_themes.append({
-                "description": theme_description, "tracks": optimized_theme_tracks,
+                "description": theme_to_optimize.get('description', f"Theme {chr(65+i)}"),
+                "tracks": optimized_theme_tracks,
                 "original_filename": original_part_filename
             })
             start_track_index = 0
@@ -746,7 +779,8 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
             'final_optimized_themes': final_optimized_themes, 'current_theme_index': len(final_optimized_themes),
             'current_track_index': 0, 'completed_themes': len(final_optimized_themes),
             'total_themes': len(themes_to_optimize), 'timestamp': run_timestamp,
-            'user_optimization_prompt': prompt_for_this_run
+            'user_optimization_prompt': prompt_for_this_run,
+            'total_optimization_tokens': total_optimization_tokens
         }
         save_progress(progress_data, script_dir, run_timestamp)
         return None
@@ -758,15 +792,17 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
             'final_optimized_themes': final_optimized_themes, 'current_theme_index': len(final_optimized_themes),
             'current_track_index': 0, 'completed_themes': len(final_optimized_themes),
             'total_themes': len(themes_to_optimize), 'error': str(e), 'timestamp': run_timestamp,
-            'user_optimization_prompt': prompt_for_this_run
+            'user_optimization_prompt': prompt_for_this_run,
+            'total_optimization_tokens': total_optimization_tokens
         }
         save_progress(progress_data, script_dir, run_timestamp)
         return None
 
     print(Fore.GREEN + "\n--- Successfully created and saved all optimized parts! ---" + Style.RESET_ALL)
+    print(Fore.CYAN + f"Total tokens used for this optimization pass: {total_optimization_tokens:,}" + Style.RESET_ALL)
     return final_optimized_themes
 
-def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dict, role: str, theme_description: str, context_themes: List[Dict], inner_context_tracks: List[Dict], context_start_index: int, user_optimization_prompt: str) -> str:
+def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dict, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict], current_theme_index: int, user_optimization_prompt: str) -> str:
     """
     Creates a prompt for optimizing a single track within a themed song structure.
     It now normalizes the context themes' timestamps to be relative.
@@ -780,32 +816,6 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"**Key/Scale:** {config['key_scale'].title()} (Available notes: {scale_notes})\n"
         f"**Instrument:** {track_to_optimize['instrument_name']} (MIDI Program: {track_to_optimize['program_num']})\n"
     )
-
-    # --- Context from PREVIOUS themes (with normalized timestamps) ---
-    previous_themes_prompt_part = ""
-    theme_length_beats = length * config["time_signature"]["beats_per_bar"]
-    if context_themes:
-        previous_themes_prompt_part = "**Context from Previous Song Sections:**\nThe song begins with the following part(s). Their timings are relative to the start of their own section. Use them as a reference for your optimization.\n"
-        for i, theme in enumerate(context_themes):
-            theme_name = theme.get("description", f"Theme {chr(65 + i)}")
-            # Calculate the absolute time offset for this specific context theme
-            context_theme_index = context_start_index + i
-            time_offset_beats = context_theme_index * theme_length_beats
-            
-            previous_themes_prompt_part += f"- **{theme_name}**:\n"
-            for track in theme['tracks']:
-                # Normalize notes to be relative to the start of their own theme
-                normalized_notes = []
-                for note in track['notes']:
-                    new_note = note.copy()
-                    new_note['start_beat'] = float(new_note['start_beat']) - time_offset_beats
-                    # Clip at 0 to prevent negative start times from floating point errors
-                    new_note['start_beat'] = max(0, round(new_note['start_beat'], 4))
-                    normalized_notes.append(new_note)
-
-                notes_as_str = json.dumps(normalized_notes, separators=(',', ':'))
-                previous_themes_prompt_part += f"  - **{track['instrument_name']}** (Role: {track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
-        previous_themes_prompt_part += "\n"
 
     # --- Context from tracks WITHIN the CURRENT theme ---
     inner_context_prompt_part = ""
@@ -823,11 +833,16 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
 
     optimization_instruction = (
         "**Your Task: Optimize The Provided Part**\n"
-        f"You are currently working on a section described as: **'{theme_description}'**. Your main goal is to **improve and refine** the original part provided below. Keep its core identity and instrumentation, but enhance it to better fit the creative direction of this specific section and the overall song.\n"
+        f"You are currently working on a section labeled: **'{theme_label}'**. Your main goal is to **improve and refine** the original part provided below, keeping its core identity while enhancing it to better fit the creative directions.\n"
         f"**IMPORTANT DURATION REQUIREMENT:** You MUST generate a complete musical phrase that spans the entire **{length} bars**. Do not just create a short 4-bar loop. The musical ideas must evolve and be present throughout the full {length}-bar duration. The composition must actively fill the entire **{length} bars**. Intentional silence for musical effect (like rests between phrases or a build-up) is encouraged, but avoid leaving the end of the track empty simply because the generation was incomplete.\n"
-        f"**Creative Direction:** {config['inspiration']}\n"
     )
     
+    original_direction_prompt = (
+        f"**--- Original Creative Direction for this Part ---**\n"
+        f"This was the original plan. Use it to understand the intended mood and function of this section. Your optimization should respect this original intent.\n"
+        f"'{theme_detailed_description}'\n\n"
+    )
+
     # --- NEW: Add user's specific prompt if provided ---
     user_prompt_section = ""
     if user_optimization_prompt:
@@ -871,6 +886,61 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     if role in ["drums", "percussion", "kick_and_snare"]:
         stay_in_key_rule = "3.  **Use Drum Map:** You must adhere to the provided Drum Map for all note pitches.\n"
 
+    # --- Smart Context Calculation ---
+    base_prompt_size = len(
+        basic_instructions + inner_context_prompt_part + original_part_prompt +
+        optimization_instruction + original_direction_prompt + user_prompt_section + role_instructions +
+        drum_map_instructions + polyphony_rule + stay_in_key_rule
+    )
+    
+    history_budget = MAX_CONTEXT_CHARS - base_prompt_size
+    safe_context_themes, context_start_index = get_dynamic_context(historical_themes_context, character_budget=history_budget)
+    
+    # --- Context Info Printout ---
+    total_previous_themes = len(historical_themes_context)
+    used_themes_count = len(safe_context_themes)
+    if total_previous_themes > 0:
+        limit_source = ""
+        # Check if context was limited by window size setting
+        if config.get("context_window_size", -1) > 0:
+             limit_source = f"due to 'context_window_size={config['context_window_size']}'"
+        # Check if context was limited by character count in dynamic mode
+        elif config.get("context_window_size", -1) == -1:
+             if used_themes_count < total_previous_themes:
+                 limit_source = "due to character limit"
+             else:
+                 limit_source = "using full available history"
+        
+        start_theme_num = context_start_index + 1
+        end_theme_num = context_start_index + used_themes_count
+        print(Fore.CYAN + f"Context Info: Using {used_themes_count}/{total_previous_themes} previous themes (themes {start_theme_num} to {end_theme_num}) for optimization context ({limit_source})." + Style.RESET_ALL)
+    
+    # --- Context from PREVIOUS themes (with normalized timestamps) ---
+    previous_themes_prompt_part = ""
+    theme_length_beats = length * config["time_signature"]["beats_per_bar"]
+    if safe_context_themes:
+        previous_themes_prompt_part = "**Context from Previous Song Sections:**\nThe song begins with the following part(s). Their timings are relative to the start of their own section. Use them as a reference for your optimization.\n"
+        for i, theme in enumerate(safe_context_themes):
+            theme_name = theme.get("description", f"Theme {chr(65 + context_start_index + i)}")
+            # Calculate the absolute time offset for this specific context theme
+            context_theme_index_for_offset = context_start_index + i
+            time_offset_beats = context_theme_index_for_offset * theme_length_beats
+            
+            previous_themes_prompt_part += f"- **{theme_name}**:\n"
+            for track in theme['tracks']:
+                # Normalize notes to be relative to the start of their own theme
+                normalized_notes = []
+                for note in track['notes']:
+                    new_note = note.copy()
+                    new_note['start_beat'] = float(new_note['start_beat']) - time_offset_beats
+                    # Clip at 0 to prevent negative start times from floating point errors
+                    new_note['start_beat'] = max(0, round(new_note['start_beat'], 4))
+                    normalized_notes.append(new_note)
+
+                notes_as_str = json.dumps(normalized_notes, separators=(',', ':'))
+                previous_themes_prompt_part += f"  - **{track['instrument_name']}** (Role: {track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
+        previous_themes_prompt_part += "\n"
+
     # The final prompt putting it all together
     prompt = (
         f"You are an expert music producer optimizing a single track within a larger song.\n"
@@ -881,6 +951,7 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"{inner_context_prompt_part}"
         f"{original_part_prompt}"
         f"{optimization_instruction}\n"
+        f"{original_direction_prompt}"
         f"{user_prompt_section}"
         f"{role_instructions}\n"
         f"{drum_map_instructions}"
@@ -906,15 +977,16 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"5.  **Be Creative:** Compose a high-quality, optimized part that is musically interesting and follows the creative direction.\n"
         f'6.  **Valid JSON Syntax:** The output must be a perfectly valid JSON array.\n'
         f'7.  **Handling Silence:** If your optimization goal is to make the instrument completely silent, output this specific JSON array: `[{{"pitch": 0, "start_beat": 0, "duration_beats": 0, "velocity": 0}}]`.\n\n'
-        f"Now, generate the JSON array for the new, optimized version of the **{track_to_optimize['instrument_name']}** track for the section '{theme_description}'. Remember, the generated part MUST cover the full {length} bars.\n"
+        f"Now, generate the JSON array for the new, optimized version of the **{track_to_optimize['instrument_name']}** track for the section '{theme_label}'. Remember, the generated part MUST cover the full {length} bars.\n"
     )
     return prompt
 
-def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dict, role: str, theme_description: str, context_themes: List[Dict], inner_context_tracks: List[Dict], context_start_index: int, user_optimization_prompt: str) -> Dict:
+def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dict, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict], current_theme_index: int, user_optimization_prompt: str) -> Tuple[Dict, int]:
     """
     Generates an optimization for a single instrument track.
+    Returns a tuple of (track_data, token_count).
     """
-    prompt = create_optimization_prompt(config, length, track_to_optimize, role, theme_description, context_themes, inner_context_tracks, context_start_index, user_optimization_prompt)
+    prompt = create_optimization_prompt(config, length, track_to_optimize, role, theme_label, theme_detailed_description, historical_themes_context, inner_context_tracks, current_theme_index, user_optimization_prompt)
     
     while True: # Loop to allow retrying after complete failure
         max_retries = 3
@@ -942,6 +1014,16 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                     print(Fore.RED + f"Error on attempt {attempt + 1}: Generation failed." + Style.RESET_ALL)
                     continue
 
+                # --- NEW: Token Usage Reporting ---
+                total_token_count = 0
+                if hasattr(response, 'usage_metadata'):
+                    prompt_tokens = response.usage_metadata.prompt_token_count
+                    output_tokens = response.usage_metadata.candidates_token_count
+                    total_token_count = response.usage_metadata.total_token_count
+                    char_per_token = len(prompt) / prompt_tokens if prompt_tokens > 0 else 0
+                    print(Fore.CYAN + f"Token Usage: Prompt: {prompt_tokens:,} | Output: {output_tokens:,} | Total: {total_token_count:,} "
+                                      f"(Prompt: {len(prompt):,} chars, ~{char_per_token:.2f} chars/token)" + Style.RESET_ALL)
+
                 notes_list = json.loads(response.text)
 
                 # --- NEW: Check for special silence signal ---
@@ -954,7 +1036,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                             "program_num": track_to_optimize.get("program_num", 0),
                             "role": role,
                             "notes": []
-                        }
+                        }, total_token_count
 
                 if not isinstance(notes_list, list):
                     raise TypeError("The generated data is not a valid list of notes.")
@@ -970,7 +1052,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                     "program_num": track_to_optimize.get("program_num", 0),
                     "role": role,
                     "notes": validated_notes
-                }
+                }, total_token_count
 
             except (json.JSONDecodeError, TypeError) as e:
                 print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: Data validation failed for {track_to_optimize['instrument_name']}. Reason: {str(e)}" + Style.RESET_ALL)
@@ -1010,7 +1092,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
         # Case 2: User pressed 'n'
         elif user_action == 'n':
             print(Fore.RED + f"Aborting optimization for '{instrument_name}'." + Style.RESET_ALL)
-            return None # Exit function
+            return None, 0 # Exit function
             
         # Case 3: User pressed 'w' to wait
         elif user_action == 'w':
@@ -1022,7 +1104,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                     break 
                 elif manual_choice in ['n', 'no']:
                     print(Fore.RED + f"Aborting optimization for '{instrument_name}'." + Style.RESET_ALL)
-                    return None
+                    return None, 0
                 else:
                     print(Fore.YELLOW + "Invalid input. Please enter 'y' or 'n'." + Style.RESET_ALL)
 
@@ -1071,7 +1153,7 @@ def generate_one_theme(config, length: int, theme_def: dict, previous_themes: Li
         )
         
         # Pass the growing list of *all previously generated themes* to the track generator
-        track_data = generate_instrument_track_data(
+        track_data, _ = generate_instrument_track_data( # Discard token count for this deprecated function
             config, length, instrument_name, program_num, 
             context_tracks, role, i, total_tracks, dialogue_role, 
             theme_def.get('label', ''), theme_def.get('description', ''), previous_themes,
@@ -1837,12 +1919,14 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
     all_themes_data = []
     start_theme_index = 0
     start_track_index = 0
+    total_tokens_used = 0
     used_labels = {}
 
     if resume_data:
         all_themes_data = resume_data.get('all_themes_data', [])
         start_theme_index = resume_data.get('current_theme_index', 0)
         start_track_index = resume_data.get('current_track_index', 0)
+        total_tokens_used = resume_data.get('total_tokens_used', 0)
         used_labels = resume_data.get('used_labels', {})
         print(Fore.CYAN + f"Resuming generation from Theme {start_theme_index + 1}, Track {start_track_index + 1}" + Style.RESET_ALL)
 
@@ -1862,13 +1946,19 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
             current_theme_data = all_themes_data[i]
             context_tracks_for_current_theme = current_theme_data['tracks']
             
-            # Use a dynamic sliding window to get the maximum safe context.
-            if config.get("context_window_size", -1) == -1:
-                previous_themes_context, _ = get_dynamic_context(all_themes_data[:i])
-            else:
-                window_size = config["context_window_size"]
-                start_index = max(0, i - window_size)
+            # Pass the correct set of previous themes to the prompt generator based on the config.
+            # The prompt generator will then handle dynamic sizing if needed.
+            previous_themes_context = []
+            context_window_config = config.get("context_window_size", -1)
+
+            if context_window_config == -1:
+                # Dynamic mode: pass the full history, prompt generator will shrink it
+                previous_themes_context = all_themes_data[:i]
+            elif context_window_config > 0:
+                # Fixed window mode: pass a slice of the history
+                start_index = max(0, i - context_window_config)
                 previous_themes_context = all_themes_data[start_index:i]
+            # If context_window_config is 0, previous_themes_context remains empty, which is correct.
 
             print(Fore.BLUE + f"\n--- Generating Theme {Style.BRIGHT}{Fore.YELLOW}{i+1}/{len(theme_definitions)}{Style.RESET_ALL}{Fore.BLUE}: '{Style.BRIGHT}{theme_def['label']}{Style.NORMAL}' ---" + Style.RESET_ALL)
             print(f"{Style.DIM}{Fore.WHITE}Blueprint: {theme_def['description']}{Style.RESET_ALL}")
@@ -1892,7 +1982,7 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
                 
                 print(f"\n{Fore.MAGENTA}--- Track {Style.BRIGHT}{Fore.YELLOW}{j + 1}/{len(config['instruments'])}{Style.RESET_ALL}{Fore.MAGENTA}: {Style.BRIGHT}{Fore.GREEN}{instrument_name}{Style.RESET_ALL}")
                 
-                track_data = generate_instrument_track_data(
+                track_data, tokens_used = generate_instrument_track_data(
                     config, length, instrument_name, program_num, 
                     context_tracks_for_current_theme, role, j, len(config['instruments']), dialogue_role,
                     theme_def['label'], theme_def['description'], previous_themes_context,
@@ -1900,6 +1990,8 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
                 )
 
                 if track_data:
+                    total_tokens_used += tokens_used
+                    print(Fore.CYAN + f"Cumulative song tokens so far: {total_tokens_used:,}" + Style.RESET_ALL)
                     # Append new track data to the current theme's track list
                     context_tracks_for_current_theme.append(track_data)
                     time.sleep(2)
@@ -1911,7 +2003,8 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
                         'all_themes_data': all_themes_data, 'used_labels': used_labels,
                         'current_theme_index': i,
                         'current_track_index': j + 1, # The next track to be generated
-                        'total_themes': len(theme_definitions)
+                        'total_themes': len(theme_definitions),
+                        'total_tokens_used': total_tokens_used
                     }
                     save_progress(progress_data, script_dir, timestamp)
                 else:

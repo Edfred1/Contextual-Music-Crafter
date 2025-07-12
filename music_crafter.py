@@ -324,25 +324,30 @@ def expand_inspiration_with_ai(genre, inspiration, config):
 def confirm_and_execute(target_script, config, settings=None):
     """Shows a summary and asks for confirmation before saving and executing."""
     print_header("Configuration Summary")
-    print(f"{Fore.CYAN}Genre:{Style.RESET_ALL} {config.get('genre', 'N/A')}")
-    print(f"{Fore.CYAN}Inspiration:{Style.RESET_ALL} {config.get('inspiration', 'N/A')}")
-    print(f"{Fore.CYAN}BPM:{Style.RESET_ALL} {config.get('bpm', 'N/A')}")
-    print(f"{Fore.CYAN}Key:{Style.RESET_ALL} {config.get('key_scale', 'N/A')}")
+    
+    # Use brighter colors for key values
+    print(f"{Fore.CYAN}Genre:{Style.RESET_ALL} {Style.BRIGHT}{config.get('genre', 'N/A')}{Style.RESET_ALL}")
+    # Use dim for the long inspiration string
+    inspiration_text = config.get('inspiration', 'N/A')
+    inspiration_preview = (inspiration_text[:120] + '...') if len(inspiration_text) > 123 else inspiration_text
+    print(f"{Fore.CYAN}Inspiration:{Style.RESET_ALL} {Style.DIM}{inspiration_preview}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}BPM:{Style.RESET_ALL} {Style.BRIGHT}{config.get('bpm', 'N/A')}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Key:{Style.RESET_ALL} {Style.BRIGHT}{config.get('key_scale', 'N/A')}{Style.RESET_ALL}")
     
     print(f"\n{Fore.YELLOW}The settings above will be saved to 'config.yaml'.{Style.RESET_ALL}")
 
     print(f"\n{Fore.CYAN}Instruments ({len(config.get('instruments', []))}):{Style.RESET_ALL}")
     for i, inst in enumerate(config.get('instruments', [])):
-        print(f"  {i+1}. {inst['name']} (Role: {inst['role']}, MIDI Program: {inst['program_num']})")
+        print(f"  {i+1}. {Fore.GREEN}{inst['name']}{Style.RESET_ALL} (Role: {Fore.YELLOW}{inst['role']}{Style.RESET_ALL}, MIDI Program: {Style.BRIGHT}{inst['program_num']}{Style.RESET_ALL})")
 
     if settings:
         print(f"\n{Fore.CYAN}Song Structure ({len(settings.get('theme_definitions', []))} Parts):{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}Length per Part:{Style.RESET_ALL} {settings.get('length', 'N/A')} bars")
+        print(f"{Fore.CYAN}Length per Part:{Style.RESET_ALL} {Style.BRIGHT}{settings.get('length', 'N/A')}{Style.RESET_ALL} bars")
         for i, theme in enumerate(settings.get('theme_definitions', [])):
             description_preview = theme['description']
             if len(description_preview) > 75:
                 description_preview = description_preview[:72] + "..."
-            print(f"  Part {i+1}: {theme['label']} - {Style.DIM}{description_preview}{Style.RESET_ALL}")
+            print(f"  Part {i+1}: {Fore.GREEN}{theme['label']}{Style.RESET_ALL} - {Style.DIM}{description_preview}{Style.RESET_ALL}")
         print(f"\n{Fore.YELLOW}The detailed descriptions for each part will be saved to 'song_settings.json'.{Style.RESET_ALL}")
 
     confirmation = get_user_input("\nProceed to save these settings and start generation? (y/n):", "y").lower()
