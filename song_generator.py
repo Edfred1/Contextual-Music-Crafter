@@ -710,6 +710,24 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
             
             for track_index in range(track_start_index, len(theme_to_optimize['tracks'])):
                 track_to_optimize = theme_to_optimize['tracks'][track_index]
+
+                # --- NEW: Check for and preserve intentional silence ---
+                if not track_to_optimize.get('notes'): # Check if notes list is empty or None
+                    print(f"\n{Fore.YELLOW}--- Skipping Track: {Style.BRIGHT}{Fore.GREEN}{track_to_optimize['instrument_name']}{Style.NORMAL} (Preserving intentional silence) ---{Style.RESET_ALL}")
+                    
+                    # Add the original silent track to the list of optimized tracks
+                    if track_index < len(optimized_theme_tracks):
+                        optimized_theme_tracks[track_index] = track_to_optimize
+                    else:
+                        optimized_theme_tracks.append(track_to_optimize)
+                    
+                    # Also update the context for the current section
+                    current_section_context_tracks[track_index] = track_to_optimize
+                    
+                    # Continue to the next track in the loop
+                    continue
+                # --- END NEW ---
+
                 role = track_to_optimize.get("role", "complementary")
                 print(f"\n{Fore.MAGENTA}--- Optimizing Track: {Style.BRIGHT}{Fore.GREEN}{track_to_optimize['instrument_name']}{Style.NORMAL} (Role: {Fore.YELLOW}{role}{Fore.MAGENTA}) ---{Style.RESET_ALL}")
                 print(f"{Fore.CYAN}Goal:{Style.RESET_ALL} {Fore.WHITE}{get_optimization_goal_for_role(role)}{Style.RESET_ALL}")
@@ -1626,34 +1644,31 @@ def main(resume_file_path=None):
         # --- End Normalization ---
 
         start_opt_num = get_next_available_file_number(os.path.join(script_dir, final_song_basename + ".mid"))
-        all_ok = True
-        for i in range(config.get("number_of_iterations", 1)):
-            opt_iter = start_opt_num + i
-            print(Fore.CYAN + f"\n--- Opt Cycle {i + 1}/{config.get('number_of_iterations', 1)} (Version {opt_iter}) ---" + Style.RESET_ALL)
-                    
-            optimized_themes = create_song_optimization(config, theme_len, themes_to_opt, script_dir, opt_iter, run_timestamp, user_optimization_prompt=user_opt_prompt)
-            if optimized_themes:
-                time.sleep(2)
-                base_name = re.sub(r'_opt_\d+$', '', final_song_basename)
-                opt_fname = os.path.join(script_dir, f"{base_name}_opt_{opt_iter}.mid")
-                
-                # Merge the newly optimized themes correctly for the final MIDI file
-                final_song_data = merge_themes_to_song_data(optimized_themes, config, theme_len)
-                create_midi_from_json(final_song_data, config, opt_fname)
-                
-                # The newly optimized themes become the basis for the next optimization
-                themes_to_opt = optimized_themes 
-                last_generated_themes = optimized_themes
-            else:
-                print(Fore.RED + "Optimization failed. Stopping." + Style.RESET_ALL)
-                all_ok = False
-                break
+        
+        print(Fore.CYAN + f"\n--- Starting Optimization (Version {start_opt_num}) ---" + Style.RESET_ALL)
+        
+        optimized_themes = create_song_optimization(config, theme_len, themes_to_opt, script_dir, start_opt_num, run_timestamp, user_optimization_prompt=user_opt_prompt)
+        
+        if optimized_themes:
+            time.sleep(2)
+            base_name = re.sub(r'_opt_\d+$', '', final_song_basename)
+            opt_fname = os.path.join(script_dir, f"{base_name}_opt_{start_opt_num}.mid")
+            
+            # Merge the newly optimized themes correctly for the final MIDI file
+            final_song_data = merge_themes_to_song_data(optimized_themes, config, theme_len)
+            create_midi_from_json(final_song_data, config, opt_fname)
+            
+            # The newly optimized themes become the basis for the next optimization
+            last_generated_themes = optimized_themes 
+        else:
+            print(Fore.RED + "Optimization failed. Stopping." + Style.RESET_ALL)
+            all_ok = False
         
         if all_ok:
             try:
                 prog_file = os.path.join(script_dir, get_progress_filename(config, run_timestamp))
                 if os.path.exists(prog_file): os.remove(prog_file)
-                print(Fore.GREEN + "All optimizations finished. Progress file removed." + Style.RESET_ALL)
+                print(Fore.GREEN + "Optimization finished. Progress file removed." + Style.RESET_ALL)
             except Exception as e: print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
 
         # Clean up the details file
@@ -1825,35 +1840,35 @@ def main(resume_file_path=None):
                 themes_to_opt = normalized_themes
                 # --- End Normalization ---
 
-                start_opt_num = get_next_available_file_number(os.path.join(script_dir, final_song_basename + ".mid"))
-                all_ok = True
-                for i in range(num_opts):
-                    opt_iter = start_opt_num + i
-                    print(Fore.CYAN + f"\n--- Opt Cycle {i + 1}/{num_opts} (Version {opt_iter}) ---" + Style.RESET_ALL)
-                    
-                    optimized_themes = create_song_optimization(config, theme_len, themes_to_opt, script_dir, opt_iter, run_timestamp, user_optimization_prompt=user_opt_prompt)
-                    if optimized_themes:
-                        time.sleep(2)
-                        base_name = re.sub(r'_opt_\d+$', '', final_song_basename)
-                        opt_fname = os.path.join(script_dir, f"{base_name}_opt_{opt_iter}.mid")
-                        
-                        # Merge the newly optimized themes correctly for the final MIDI file
-                        final_song_data = merge_themes_to_song_data(optimized_themes, config, theme_len)
-                        create_midi_from_json(final_song_data, config, opt_fname)
-                        
-                        # The newly optimized themes become the basis for the next optimization
-                        themes_to_opt = optimized_themes 
-                        last_generated_themes = optimized_themes
-                        last_generated_song_data = final_song_data
-                    else:
-                        print(Fore.RED + "Optimization failed. Stopping." + Style.RESET_ALL); all_ok = False; break
+                opt_iter = get_next_available_file_number(os.path.join(script_dir, final_song_basename + ".mid"))
                 
-                if all_ok:
+                print(Fore.CYAN + f"\n--- Starting Optimization (Version {opt_iter}) ---" + Style.RESET_ALL)
+                
+                optimized_themes = create_song_optimization(config, theme_len, themes_to_opt, script_dir, opt_iter, run_timestamp, user_optimization_prompt=user_opt_prompt)
+                
+                if optimized_themes:
+                    time.sleep(2)
+                    base_name = re.sub(r'_opt_\d+$', '', final_song_basename)
+                    opt_fname = os.path.join(script_dir, f"{base_name}_opt_{opt_iter}.mid")
+                    
+                    # Merge the newly optimized themes correctly for the final MIDI file
+                    final_song_data = merge_themes_to_song_data(optimized_themes, config, theme_len)
+                    create_midi_from_json(final_song_data, config, opt_fname)
+                    
+                    # The newly optimized themes become the basis for the next optimization
+                    last_generated_themes = optimized_themes
+                    last_generated_song_data = final_song_data
+                    
+                    # Remove progress file on success
                     try:
                         prog_file = os.path.join(script_dir, get_progress_filename(config, run_timestamp))
-                        if os.path.exists(prog_file): os.remove(prog_file)
-                        print(Fore.GREEN + "All optimizations finished. Progress file removed." + Style.RESET_ALL)
-                    except Exception as e: print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
+                        if os.path.exists(prog_file):
+                            os.remove(prog_file)
+                        print(Fore.GREEN + "\nOptimization cycle complete. Returning to menu." + Style.RESET_ALL)
+                    except Exception as e:
+                        print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
+                else:
+                    print(Fore.RED + "Optimization failed. Returning to menu." + Style.RESET_ALL)
             
             else:
                 print(Fore.YELLOW + "Invalid choice." + Style.RESET_ALL)
