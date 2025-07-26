@@ -69,7 +69,7 @@ pip install -r requirements.txt
     # API Configuration
     api_key: "YOUR_GOOGLE_AI_API_KEY"
     ```
-    **Security Note:** It's highly recommended to use an environment variable or a secrets management tool rather than hardcoding your API key directly in the configuration file for public repositories.
+    
 3.  **Customize Your Music:**
     Adjust the parameters in `config.yaml` to define your desired musical output.
 
