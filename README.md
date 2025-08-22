@@ -148,7 +148,6 @@ This is the core engine that reads the song plan and generates the final MIDI fi
 
 -   Manually create or edit your `config.yaml` and `song_settings.json` files.
 -   Re-generate a song using existing settings.
--   Run an optimization pass on a previously generated song.
 -   Resume an interrupted generation.
 
 `song_generator.py` has its own interactive menu for these tasks.
