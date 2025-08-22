@@ -110,40 +110,15 @@ pip install -r requirements.txt
 
 CMC provides a suite of tools for different creative needs, from low-cost loop creation to full-scale song composition. **We strongly recommend starting with the 'Core Generators'** to understand the process and conserve your API tokens before moving to the more advanced tools.
 
-### 1. The Core Generators: The Recommended Starting Point
+### 1. Optional Legacy Tools (single parts & quick edits)
 
-These are the original, direct scripts. They are perfect for developing individual musical ideas, creating loops, or editing existing MIDI files with minimal API usage. Their entire creative direction is controlled via the `config.yaml` file.
+If you prefer low-cost experiments or quick edits, you can use the original scripts controlled by `config.yaml`:
 
--   **`part_generator.py` - Create from Scratch**
+- `part_generator.py`: generate a single, complete musical part from scratch
+- `part_extender.py`: add new parts to an existing MIDI file
+- `part_variator.py`: create variations of selected tracks in a MIDI file
 
-    This is the simplest and most token-efficient entry point. The script generates a single, complete musical piece from scratch based on the settings in your `config.yaml`.
-
-    1.  **Configure your desired sound** in `config.yaml`.
-    2.  **Run the script** from your terminal:
-        ```bash
-        python part_generator.py
-        ```
-    3.  Enter the desired length for the composition when prompted. The script will create a brand new MIDI file in the project directory.
-
--   **`part_extender.py` - Extend an Existing MIDI File**
-
-    This script loads an existing MIDI file and adds new instrument parts to it, using the original tracks as musical context. It's perfect for building a full arrangement around a simple loop.
-
-    1.  Run the script and select the MIDI file you want to extend.
-        ```bash
-        python part_extender.py
-        ```
-    2.  The script will use the instruments defined in your `config.yaml` to add new layers. A new file with the `_ext` suffix will be saved.
-
--   **`part_variator.py` - Create Variations of Existing Parts**
-
-    This script loads a MIDI file and lets you create new variations of specific tracks within it. It's ideal for creating alternative melodies, basslines, or drum patterns without changing the rest of the song.
-
-    1.  Run the script and select the MIDI file you want to vary.
-        ```bash
-        python part_variator.py
-        ```
-    2.  Choose which track(s) you want to create a variation for. A new file with the `_var` suffix will be saved.
+Each script reads your `config.yaml` and writes a new `.mid`. For most users, we recommend the full song workflow below.
 
 ### 2. Full Song Generation: The Creative Duo
 
