@@ -2570,14 +2570,16 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     
                     last_generated_themes = optimized_themes
                     last_generated_song_data = final_song_data
-                
-                try:
-                    prog_file = os.path.join(script_dir, get_progress_filename(config, run_timestamp))
-                    if os.path.exists(prog_file):
-                        os.remove(prog_file)
+
+                    # Cleanup progress file (best-effort)
+                    try:
+                        prog_file = os.path.join(script_dir, get_progress_filename(config, run_timestamp))
+                        if os.path.exists(prog_file):
+                            os.remove(prog_file)
+                    except Exception as e:
+                        print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
+
                     print(Fore.GREEN + "\nOptimization cycle complete. Returning to menu." + Style.RESET_ALL)
-                except Exception as e:
-                    print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
                 else:
                     print(Fore.RED + "Optimization failed. Returning to menu." + Style.RESET_ALL)
             
