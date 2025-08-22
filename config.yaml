@@ -100,10 +100,6 @@ time_signature:
 # Order defines generation order. Each entry needs name, program_num, and role.
 # MIDI channel policy: drums/percussion use Channel 10 (index 9). Melodic parts
 # are assigned sequentially across remaining channels, skipping 10.
-# Available roles (selection): drums, kick_and_snare, percussion, sub_bass, bass,
-# pads, atmosphere, texture, chords, harmony, arp, guitar, lead, melody, vocal,
-# fx, complementary
-
 # Available Roles:
 #   - "drums"
 #   - "kick_and_snare"
@@ -316,3 +312,4 @@ instruments:
 # 126. Helicopter
 # 127. Applause
 # 128. Gunshot
+
