@@ -9,6 +9,7 @@ import sys
 import time
 import glob
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap, CommentedSeq
 if sys.platform == "win32":
     import msvcrt
 
@@ -19,6 +20,10 @@ CONFIG_FILE = os.path.join(script_dir, "config.yaml")
 SONG_SETTINGS_FILE = os.path.join(script_dir, "song_settings.json")
 PART_GENERATOR_SCRIPT = os.path.join(script_dir, "part_generator.py")
 SONG_GENERATOR_SCRIPT = os.path.join(script_dir, "song_generator.py")
+
+# --- NEW: Global state for API key rotation ---
+API_KEYS = []
+CURRENT_KEY_INDEX = 0
 
 # --- HELPER FUNCTIONS ---
 
@@ -36,7 +41,8 @@ def get_user_input(prompt, default=None):
 def load_config():
     """Loads the base config file while preserving comments."""
     try:
-        yaml = YAML()
+        yaml = YAML(typ='rt')  # round-trip to preserve comments
+        yaml.preserve_quotes = True
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             return yaml.load(f)
     except FileNotFoundError:
@@ -46,12 +52,258 @@ def load_config():
         print(Fore.RED + f"Error loading configuration: {str(e)}")
         sys.exit(1)
 
+def _sanitize_instruments_for_yaml(inst_list):
+    """Ensure instruments is a proper sequence of mappings for YAML dump."""
+    seq = CommentedSeq()
+    if isinstance(inst_list, list):
+        for inst in inst_list:
+            if not isinstance(inst, dict):
+                continue
+            m = CommentedMap()
+            # preserve order: name, program_num, role
+            m["name"] = inst.get("name", "Instrument")
+            try:
+                m["program_num"] = int(inst.get("program_num", 1))
+            except Exception:
+                m["program_num"] = 1
+            m["role"] = inst.get("role", "complementary")
+            seq.append(m)
+    return seq
+
+def _merge_config_values(doc: "CommentedMap", new_values: dict) -> "CommentedMap":
+    """Merge selected keys from plain dict into the round-trip doc to preserve comments."""
+    if not isinstance(doc, CommentedMap):
+        return doc
+    # Simple scalars/structures we allow updating
+    keys_to_update = [
+        "genre", "inspiration", "bpm", "key_scale", "model_name", "temperature",
+        "automation_settings", "max_output_tokens", "context_window_size",
+        "use_call_and_response", "number_of_iterations", "time_signature"
+    ]
+    for k in keys_to_update:
+        if k in new_values:
+            doc[k] = new_values[k]
+    # Instruments handled with sanitized sequence
+    if isinstance(new_values.get("instruments"), list):
+        doc["instruments"] = _sanitize_instruments_for_yaml(new_values["instruments"])
+    return doc
+
 def save_config(config_data):
     """Saves the updated config data to the YAML file while preserving comments."""
     try:
-        yaml = YAML()
+        yaml = YAML(typ='rt')  # round-trip to preserve comments
+        yaml.preserve_quotes = True
+        yaml.indent(mapping=2, sequence=4, offset=2)
+
+        # Load existing doc to keep all comments and only merge updated fields
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as rf:
+            existing_doc = yaml.load(rf)
+            if existing_doc is None:
+                existing_doc = CommentedMap()
+        merged_doc = _merge_config_values(existing_doc, config_data if isinstance(config_data, dict) else {})
+
+        # Ensure trailing reference comments persist after the last key (usually 'instruments')
+        def _ensure_trailing_reference_comments(doc: "CommentedMap") -> "CommentedMap":
+            try:
+                if not isinstance(doc, CommentedMap):
+                    return doc
+                keys = list(doc.keys())
+                if not keys:
+                    return doc
+                last_key = keys[-1]
+                ca = getattr(doc, 'ca', None)
+                existing_after = ""
+                if ca and isinstance(ca.items, dict) and last_key in ca.items:
+                    entry = ca.items[last_key]
+                    # entry: [pre, eol, post, ...], 'post' at index 1 holds after-comment lines
+                    if entry and len(entry) > 1 and entry[1]:
+                        existing_after = "\n".join([t.value if hasattr(t, 'value') else str(t) for t in entry[1]])
+                if "Troubleshooting (quick reference)" not in existing_after:
+                    block = """
+----------------------------------------------------------------------------- 
+Troubleshooting (quick reference)
+----------------------------------------------------------------------------- 
+- 429 / quota exceeded: rotate API keys or pause and resume later.
+- 5xx internal errors/timeouts: retry later; switching model (e.g., gemini-2.5-flash) can help.
+- Empty/invalid response: usually transient under load; try again or lower temperature.
+
+--- MIDI Technical Reference (informational) ---
+General MIDI Channel Assignments:
+- Channel 10 (index 9): Drums & Percussion.
+- Channels 1-9 & 11-16: Melodic & Tonal Instruments. Assigned sequentially, skipping channel 10.
+
+ALL MIDI Program Numbers
+
+1-8: Pianos
+1. Acoustic Grand Piano
+2. Bright Acoustic Piano
+3. Electric Grand Piano
+4. Honky-Tonk Piano
+5. Electric Piano 1
+6. Electric Piano 2
+7. Harpsichord
+8. Clavinet
+
+9-16: Chromatic Percussion
+9. Celesta
+10. Glockenspiel
+11. Music Box
+12. Vibraphone
+13. Marimba
+14. Xylophone
+15. Tubular Bells
+16. Dulcimer
+
+17-24: Organs
+17. Drawbar Organ
+18. Percussive Organ
+19. Rock Organ
+20. Church Organ
+21. Reed Organ
+22. Accordion
+23. Harmonica
+24. Tango Accordion
+
+25-32: Guitars
+25. Acoustic Guitar (nylon)
+26. Acoustic Guitar (steel)
+27. Electric Guitar (jazz)
+28. Electric Guitar (clean)
+29. Electric Guitar (muted)
+30. Overdriven Guitar
+31. Distortion Guitar
+32. Guitar Harmonics
+
+33-40: Basses
+33. Acoustic Bass
+34. Electric Bass (finger)
+35. Electric Bass (pick)
+36. Fretless Bass
+37. Slap Bass 1
+38. Slap Bass 2
+39. Synth Bass 1
+40. Synth Bass 2
+
+41-48: Strings
+41. Violin
+42. Viola
+43. Cello
+44. Contrabass
+45. Tremolo Strings
+46. Pizzicato Strings
+47. Orchestral Harp
+48. Timpani
+
+49-56: Ensemble
+49. String Ensemble 1
+50. String Ensemble 2
+51. SynthStrings 1
+52. SynthStrings 2
+53. Choir Aahs
+54. Voice Oohs
+55. Synth Voice
+56. Orchestra Hit
+
+57-64: Brass
+57. Trumpet
+58. Trombone
+59. Tuba
+60. Muted Trumpet
+61. French Horn
+62. Brass Section
+63. Synth Brass 1
+64. Synth Brass 2
+
+65-72: Reed
+65. Soprano Sax
+66. Alto Sax
+67. Tenor Sax
+68. Baritone Sax
+69. Oboe
+70. English Horn
+71. Bassoon
+72. Clarinet
+
+73-80: Pipe
+73. Piccolo
+74. Flute
+75. Recorder
+76. Pan Flute
+77. Blown Bottle
+78. Shakuhachi
+79. Whistle
+80. Ocarina
+
+81-88: Synth Lead
+81. Lead 1 (square)
+82. Lead 2 (sawtooth)
+83. Lead 3 (calliope)
+84. Lead 4 (chiff)
+85. Lead 5 (charang)
+86. Lead 6 (voice)
+87. Lead 7 (fifths)
+88. Lead 8 (bass + lead)
+
+89-96: Synth Pad
+89. Pad 1 (new age)
+90. Pad 2 (warm)
+91. Pad 3 (polysynth)
+92. Pad 4 (choir)
+93. Pad 5 (bowed)
+94. Pad 6 (metallic)
+95. Pad 7 (halo)
+96. Pad 8 (sweep)
+
+97-104: Synth Effects
+97. FX 1 (rain)
+98. FX 2 (soundtrack)
+99. FX 3 (crystal)
+100. FX 4 (atmosphere)
+101. FX 5 (brightness)
+102. FX 6 (goblins)
+103. FX 7 (echoes)
+104. FX 8 (sci-fi)
+
+105-112: Ethnic
+105. Sitar
+106. Banjo
+107. Shamisen
+108. Koto
+109. Kalimba
+110. Bagpipe
+111. Fiddle
+112. Shanai
+
+113-120: Percussive
+113. Tinkle Bell
+114. Agogo
+115. Steel Drums
+116. Woodblock
+117. Taiko Drum
+118. Melodic Tom
+119. Synth Drum
+120. Reverse Cymbal
+
+121-128: Sound Effects
+121. Guitar Fret Noise
+122. Breath Noise
+123. Seashore
+124. Bird Tweet
+125. Telephone Ring
+126. Helicopter
+127. Applause
+128. Gunshot
+"""
+                    # Attach as after-comment to the last key
+                    doc.yaml_set_comment_before_after_key(last_key, after=block, indent=2)
+            except Exception:
+                pass
+            return doc
+
+        merged_doc = _ensure_trailing_reference_comments(merged_doc)
+
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            yaml.dump(config_data, f)
+            yaml.dump(merged_doc, f)
         print(Fore.GREEN + "Configuration file updated successfully.")
     except Exception as e:
         print(Fore.RED + f"Error saving configuration: {str(e)}")
@@ -78,11 +330,14 @@ def extract_config_details(file_path):
             roles_text = roles_section_match.group(1)
             details["roles"] = re.findall(r'#   - "(.*?)"', roles_text)
 
-        # Extract Scales
-        scales_match = re.search(r'# Available scales: (.*)', content)
-        if scales_match:
-            scales_text = scales_match.group(1)
-            details["scales"] = [s.strip().replace('"', '') for s in scales_text.split(',')]
+        # Extract Scales (multi-line aware)
+        scales_section_match = re.search(r"# Available scales:(.*?)(?=\n\w)", content, re.DOTALL)
+        if scales_section_match:
+            scales_text = scales_section_match.group(1)
+            # Clean up the text: remove newlines and comment characters
+            cleaned_text = scales_text.replace('\n', ' ').replace('#', '')
+            # Split by comma and clean up each item, removing empty strings
+            details["scales"] = [s.strip().strip('"') for s in cleaned_text.split(',') if s.strip()]
 
         # Extract MIDI Programs
         midi_section_match = re.search(r"# ALL MIDI Program Numbers\n(.*)", content, re.DOTALL)
@@ -95,8 +350,221 @@ def extract_config_details(file_path):
     
     return details
 
+def normalize_automation_settings(config):
+    """Ensures automation settings are sane; fills defaults and guardrails.
+    - If use_cc_automation == 1 and allowed_cc_numbers is missing/empty, set defaults and warn.
+    - Ensures boolean-like flags are 0/1 integers.
+    """
+    try:
+        if "automation_settings" not in config or not isinstance(config.get("automation_settings"), dict):
+            config["automation_settings"] = {}
+        a = config["automation_settings"]
+        # Normalize flags to 0/1
+        for key in ["use_pitch_bend", "use_cc_automation", "use_sustain_pedal"]:
+            val = a.get(key, 0)
+            try:
+                a[key] = 1 if int(val) == 1 else 0
+            except Exception:
+                a[key] = 0
+        # Ensure allowed_cc_numbers exists
+        if "allowed_cc_numbers" not in a or not isinstance(a.get("allowed_cc_numbers"), list):
+            a["allowed_cc_numbers"] = []
+        # Guardrail: if CC automation on but no CCs, set sensible defaults
+        if a.get("use_cc_automation", 0) == 1 and not a.get("allowed_cc_numbers"):
+            a["allowed_cc_numbers"] = [11, 74, 1]  # Expression, Filter Cutoff, Mod Wheel
+            print(Fore.YELLOW + "Automation guardrail: 'allowed_cc_numbers' was empty while CC automation was enabled. Using defaults: [11, 74, 1]." + Style.RESET_ALL)
+    except Exception as e:
+        print(Fore.YELLOW + f"Warning: Could not normalize automation settings: {e}" + Style.RESET_ALL)
+
+def validate_instruments(instruments, config_details):
+    """Validates and fixes a list of instrument dicts in-place.
+    Rules:
+    - Ensure keys: name (non-empty str), program_num in [1,128], role in allowed roles (or fallback 'complementary')
+    - Convert types where possible; clamp program numbers; warn on fixes
+    Returns the validated list.
+    """
+    try:
+        if not isinstance(instruments, list):
+            print(Fore.YELLOW + "Warning: Instruments is not a list. Using empty list." + Style.RESET_ALL)
+            return []
+        allowed_roles = config_details.get("roles", []) or []
+
+        # Canonical set as fallback when no allowed list is present
+        canonical_roles = {
+            "drums", "kick_and_snare", "percussion", "sub_bass", "bass",
+            "pads", "atmosphere", "texture", "chords", "harmony", "arp",
+            "guitar", "lead", "melody", "vocal", "fx", "complementary"
+        }
+
+        # Direct synonyms mapping (extendable)
+        role_synonyms = {
+            "main_drums": "drums",
+            "drumkit": "drums",
+            "drum_kit": "drums",
+            "drum-set": "drums",
+            "drum set": "drums",
+            "kit": "drums",
+            "kick": "kick_and_snare",
+            "kick_snare": "kick_and_snare",
+            "kick+snare": "kick_and_snare",
+            "kick/snare": "kick_and_snare",
+            "kicksnare": "kick_and_snare",
+            "snare": "kick_and_snare",
+            "percussion_shaker": "percussion",
+            "shaker": "percussion",
+            "perc": "percussion",
+            "hi-hat": "percussion",
+            "hihat": "percussion",
+            "hat": "percussion",
+            "cowbell": "percussion",
+            "clap": "percussion",
+            "claps": "percussion",
+            "bassline": "bass",
+            "bass_line": "bass",
+            "synth_bass": "bass",
+            "bass_synth": "bass",
+            "bass-guitar": "bass",
+            "subbass": "sub_bass",
+            "sub-bass": "sub_bass",
+            "sub": "sub_bass",
+            "low_bass": "sub_bass",
+            "pad": "pads",
+            "chords_pad": "pads",
+            "harmony_pad": "pads",
+            "string_pad": "pads",
+            "harmonic_accent": "texture",
+            "texture_fx": "texture",
+            "ear_candy": "texture",
+            "details": "texture",
+            "lead_melody": "lead",
+            "lead_synth": "lead",
+            "main_lead": "lead",
+            "hook": "lead",
+            "melodic_lead": "melody",
+            "melodic_line": "melody",
+            "theme": "melody",
+            "vox": "vocal",
+            "vocal_chops": "vocal",
+            "chops": "vocal",
+            "sfx": "fx",
+            "riser": "fx",
+            "impact": "fx",
+            "sweep": "fx",
+            "uplifter": "fx",
+            "downlifter": "fx",
+            "transition": "fx",
+            "whoosh": "fx",
+            "noise_fx": "fx"
+        }
+
+        def keyword_map(raw_role: str) -> str:
+            r = raw_role.lower().replace(" ", "_")
+            if any(k in r for k in ["kick_and_snare", "kick+snare", "kick_snare", "kick", "snare"]):
+                return "kick_and_snare"
+            if any(k in r for k in ["drum", "drums", "drumkit", "kit"]):
+                return "drums"
+            if any(k in r for k in ["perc", "shaker", "tamb", "conga", "bongo", "clap", "hat", "hihat", "hi-hat", "cowbell"]):
+                return "percussion"
+            if "sub" in r and "bass" in r:
+                return "sub_bass"
+            if "bass" in r:
+                return "bass"
+            if any(k in r for k in ["pad", "pads"]):
+                return "pads"
+            if any(k in r for k in ["atmo", "atmosphere", "ambient", "soundscape", "drone"]):
+                return "atmosphere"
+            if "texture" in r:
+                return "texture"
+            if any(k in r for k in ["chord", "stabs"]):
+                return "chords"
+            if "harm" in r:
+                return "harmony"
+            if "arp" in r:
+                return "arp"
+            if "guitar" in r:
+                return "guitar"
+            if "lead" in r:
+                return "lead"
+            if "melody" in r or "melod" in r:
+                return "melody"
+            if any(k in r for k in ["vocal", "vox", "chops"]):
+                return "vocal"
+            if "fx" in r or any(k in r for k in ["riser", "impact", "sweep", "uplifter", "downlifter", "transition", "whoosh", "noise"]):
+                return "fx"
+            return "complementary"
+
+        for idx, inst in enumerate(instruments):
+            if not isinstance(inst, dict):
+                instruments[idx] = {"name": f"Instrument_{idx+1}", "program_num": 1, "role": "complementary"}
+                print(Fore.YELLOW + f"Warning: Replacing invalid instrument at index {idx} with a default." + Style.RESET_ALL)
+                continue
+            # Name
+            name = inst.get("name")
+            if not isinstance(name, str) or not name.strip():
+                inst["name"] = f"Instrument_{idx+1}"
+                print(Fore.YELLOW + f"Warning: Missing/invalid instrument name at index {idx}. Using '{inst['name']}'." + Style.RESET_ALL)
+            # Program number
+            prog = inst.get("program_num", 1)
+            try:
+                prog_int = int(prog)
+            except Exception:
+                prog_int = 1
+            if prog_int < 1 or prog_int > 128:
+                clamped = min(128, max(1, prog_int))
+                print(Fore.YELLOW + f"Warning: program_num {prog} out of range at index {idx}. Clamped to {clamped}." + Style.RESET_ALL)
+                prog_int = clamped
+            inst["program_num"] = prog_int
+            # Role
+            role = inst.get("role", "complementary")
+            if not isinstance(role, str) or not role:
+                role = "complementary"
+            # 1) direct synonyms
+            mapped = role_synonyms.get(role.strip().lower(), role.strip().lower())
+            # 2) keyword heuristics if still not standard
+            if mapped not in (allowed_roles or canonical_roles):
+                mapped = keyword_map(mapped)
+            # 3) enforce allowed list if present, else canonical set
+            valid_set = set(allowed_roles) if allowed_roles else canonical_roles
+            if mapped not in valid_set:
+                print(Fore.YELLOW + f"Warning: role '{role}' not allowed/mappable. Using 'complementary'." + Style.RESET_ALL)
+                mapped = "complementary"
+            role = mapped
+            inst["role"] = role
+        return instruments
+    except Exception as e:
+        print(Fore.YELLOW + f"Warning: Could not validate instruments: {e}" + Style.RESET_ALL)
+        return instruments
+
+def initialize_api_keys(config):
+    """Loads API keys from config and prepares them for rotation."""
+    global API_KEYS, CURRENT_KEY_INDEX
+    
+    api_key_config = config.get("api_key")
+    if isinstance(api_key_config, list):
+        API_KEYS = [key for key in api_key_config if key and "YOUR_" not in key]
+    elif isinstance(api_key_config, str) and "YOUR_" not in api_key_config:
+        API_KEYS = [api_key_config]
+    else:
+        API_KEYS = []
+
+    CURRENT_KEY_INDEX = 0
+    if not API_KEYS:
+        print(Fore.RED + "Error: No valid API key found in 'config.yaml'. Please add your key(s).")
+        return False
+    
+    print(Fore.CYAN + f"Found {len(API_KEYS)} API key(s). Starting with key #1.")
+    return True
+
+def get_next_api_key():
+    """Rotates to the next available API key."""
+    global CURRENT_KEY_INDEX
+    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
+    print(Fore.YELLOW + f"Switching to API key #{CURRENT_KEY_INDEX + 1}...")
+    return API_KEYS[CURRENT_KEY_INDEX]
+
 def call_generative_model(prompt_text, config):
-    """A centralized function to call the generative model with robust retries."""
+    """A centralized function to call the generative model with robust retries and API key rotation."""
+    global CURRENT_KEY_INDEX
     max_retries = 3
     while True: # Loop for user-prompted retries
         for attempt in range(max_retries):
@@ -119,25 +587,53 @@ def call_generative_model(prompt_text, config):
                     safety_settings=safety_settings
                 )
 
-                if not response.candidates or response.candidates[0].finish_reason not in [1, "STOP"]:
+                # --- NEW, MORE ROBUST RESPONSE VALIDATION ---
+                # 1. First, check if the prompt was blocked for safety reasons.
+                if hasattr(response, 'prompt_feedback') and getattr(response.prompt_feedback, 'block_reason', None):
+                    print(Fore.RED + f"Error on attempt {attempt + 1}: Your prompt was blocked by the safety filter." + Style.RESET_ALL)
+                    try:
+                        reason_name = response.prompt_feedback.block_reason.name
+                    except Exception:
+                        reason_name = str(getattr(response.prompt_feedback, 'block_reason', 'UNKNOWN'))
+                    print(Fore.YELLOW + f"Reason: {reason_name}. Please try rephrasing your creative direction to be less aggressive or explicit." + Style.RESET_ALL)
+                    continue # Move to the next retry attempt
+
+                # 2. Second, check if the AI returned an empty or incomplete response, even if not blocked.
+                if not response.candidates or not response.candidates[0].content or not response.candidates[0].content.parts:
                     finish_reason_name = "UNKNOWN"
                     if response.candidates:
-                        try:
-                            finish_reason_name = response.candidates[0].finish_reason.name
-                        except AttributeError:
-                            finish_reason_name = str(response.candidates[0].finish_reason)
-                    print(Fore.RED + f"Error on attempt {attempt + 1}: Generation failed or was incomplete." + Style.RESET_ALL)
-                    print(Fore.YELLOW + f"Reason: {finish_reason_name}" + Style.RESET_ALL)
-                    if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                         print(Fore.YELLOW + f"Block Reason: {response.prompt_feedback.block_reason.name}" + Style.RESET_ALL)
-                    continue
+                        try: finish_reason_name = response.candidates[0].finish_reason.name
+                        except AttributeError: finish_reason_name = str(response.candidates[0].finish_reason)
+                    
+                    print(Fore.RED + f"Error on attempt {attempt + 1}: The AI returned an empty or incomplete response." + Style.RESET_ALL)
+                    print(Fore.YELLOW + f"Finish Reason: {finish_reason_name}. This can happen if the request is too complex. The script will retry." + Style.RESET_ALL)
+                    continue # Move to the next retry attempt
 
                 print(Fore.GREEN + "AI call successful." + Style.RESET_ALL)
-                return response.text
+                
+                total_token_count = 0
+                if hasattr(response, 'usage_metadata'):
+                    total_token_count = response.usage_metadata.total_token_count
+
+                return response.text, total_token_count
 
             except Exception as e:
                 if "429" in str(e) and "quota" in str(e).lower():
-                    print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: API quota exceeded." + Style.RESET_ALL)
+                    print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: API quota exceeded for key #{CURRENT_KEY_INDEX + 1}." + Style.RESET_ALL)
+                    
+                    # --- Key Rotation Logic ---
+                    if len(API_KEYS) > 1:
+                        if (CURRENT_KEY_INDEX + 1) < len(API_KEYS):
+                            new_key = get_next_api_key()
+                            genai.configure(api_key=new_key)
+                            print(Fore.CYAN + "Retrying immediately with the next key...")
+                            # We don't increment the attempt counter here, we just retry the same attempt with a new key.
+                            continue
+                        else:
+                            print(Fore.RED + "All available API keys have exceeded their quota.")
+                            # Fall through to the normal retry waiting period
+                    # --- End Key Rotation ---
+
                 else:
                     print(Fore.RED + f"An unexpected error occurred on attempt {attempt + 1}: {str(e)}" + Style.RESET_ALL)
             
@@ -216,26 +712,45 @@ def generate_instrument_list_with_ai(genre, inspiration, num_instruments, config
 
     Now, generate the JSON for {num_instruments} instruments. Your entire response must be ONLY the raw JSON array.
     """
-    response_text = call_generative_model(prompt, config)
+    response_text, tokens_used = call_generative_model(prompt, config)
+    
     if response_text:
         try:
             # Clean up the response to ensure it's valid JSON
             json_text = response_text.strip().replace("```json", "").replace("```", "")
             instrument_list = json.loads(json_text)
             if isinstance(instrument_list, list) and len(instrument_list) == num_instruments:
-                return instrument_list
+                return instrument_list, tokens_used
             else:
                 print(Fore.YELLOW + "Warning: AI did not return the expected number of instruments. Using a default list.")
-                return None
+                return None, tokens_used
         except json.JSONDecodeError:
             print(Fore.YELLOW + "Warning: Failed to decode JSON from AI response for instruments. Using a default list.")
-            return None
-    return None
+            return None, tokens_used
+    return None, tokens_used
 
 def generate_song_structure_with_ai(genre, inspiration, instruments, num_parts, part_length, config):
     """Uses AI to generate theme definitions for a full song."""
     instrument_list_str = "\n".join([f"- {i['name']} (Role: {i['role']})" for i in instruments])
     
+    # --- NEW: Dynamically add automation instructions to the prompt ---
+    automation_instructions = ""
+    automation_settings = config.get("automation_settings", {})
+    use_pitch_bend = automation_settings.get("use_pitch_bend", 0) == 1
+    use_cc_automation = automation_settings.get("use_cc_automation", 0) == 1
+    use_sustain_pedal = automation_settings.get("use_sustain_pedal", 0) == 1
+
+    if use_pitch_bend or use_cc_automation or use_sustain_pedal:
+        automation_instructions += "\n5. **Describe Expressive Automations:**"
+        if use_pitch_bend:
+            automation_instructions += "\n   - **Pitch Bend:** For expressive roles like `lead`, `bass`, `melody`, `vocal`, or `guitar`, describe pitch slides and bends (e.g., 'a fast pitch bend up into the note')."
+        if use_cc_automation:
+            allowed_ccs = ", ".join(map(str, automation_settings.get("allowed_cc_numbers", [])))
+            automation_instructions += f"\n   - **CC Automation:** For synth-based or textural roles like `pads`, `atmosphere`, `lead`, `bass`, `arp`, `texture`, `fx`, or `riser`, describe automations like filter sweeps using allowed CCs ({allowed_ccs})."
+        if use_sustain_pedal:
+            automation_instructions += "\n   - **Sustain Pedal:** For sustaining instruments like `piano`, `pads`, `chords`, `harmony`, `atmosphere`, `guitar`, or `melody`, describe when the pedal is pressed/released."
+    # --- END NEW ---
+
     prompt = f"""
     You are a creative music producer. Your task is to design the complete structure for a new song.
     The song should have exactly {num_parts} distinct parts, and each part will be {part_length} bars long.
@@ -249,43 +764,43 @@ def generate_song_structure_with_ai(genre, inspiration, instruments, num_parts, 
     **Your Task:**
     Generate a JSON array of {num_parts} theme objects. Each object needs a "label" and a "description".
 
-    **CRITICAL INSTRUCTIONS FOR DESCRIPTIONS:**
-    1.  **MIDI-Focused:** The descriptions MUST be concrete and 100% translatable to MIDI. Focus exclusively on pitch, rhythm, velocity, timing, and note duration.
-    2.  **NO Sound Design Terms:** Do NOT use words related to sound design, synthesis, or audio effects (e.g., "reverb", "delay", "filter sweep", "warm", "punchy", "crystal-clear").
-    3.  **Be Specific:** Instead of "energetic drums," write "kick on every beat with high velocity (120-127), snare on beats 2 and 4."
-    4.  **Instrument by Instrument:** For each part, describe what EACH of the available instruments is doing, or state if it is "completely silent".
+    **CRITICAL INSTRUCTIONS FOR DESCRIPTIONS (NEW CREATIVE APPROACH):**
+    1.  **Focus on Vibe and Emotion:** Your primary goal is to describe the *feeling*, *mood*, and *musical role* of each instrument. Use evocative and creative language (e.g., "a melancholic piano melody," "an aggressive, driving bassline," "a floating, atmospheric pad").
+    2.  **Describe the Musical Narrative:** Explain how the parts evolve. Does the energy build? Does an instrument become more complex? Does a new feeling emerge? Tell a small story for each part.
+    3.  **Use Technical Terms as Support:** You can and should include specific musical details to guide the next AI, but they should support your creative description, not replace it. Instead of just "Kick on all four beats," write "A powerful, driving four-on-the-floor kick pattern that anchors the track's high energy."
+    4.  **Instrument by Instrument:** For each part, describe what EACH of the available instruments is doing, or state if it is "silent." This structure remains critical.{automation_instructions}
 
     **Output Format:**
     Your response MUST be a valid JSON array of objects.
 
-    Example for 2 parts:
+    Example for 2 parts (NEW CREATIVE APPROACH):
     [
       {{
-        "label": "Intro_Groove",
-        "description": "Progressive Kick & Snare: Kick on beats 1 and 3, velocity 90. Snare is completely silent. Rolling Bass: Plays a simple quarter-note pattern on the root note, velocity 80. Floating Lead: Completely silent. Ethereal Pad: Sustains a single minor chord for all {part_length} bars, velocity 60."
+        "label": "Tense_Intro",
+        "description": "The track begins with a sense of suspense. The 'Progressive Kick' is completely silent. The 'Rolling Bass' introduces a simple, hypnotic pulse on the root note, with a low velocity, creating a feeling of something lurking. The 'Floating Lead' is silent. The 'Ethereal Pad' holds a single, sustained minor chord that feels cold and spacious. A slow filter sweep (CC 74) gradually opens over the full {part_length} bars, slowly building tension."
       }},
       {{
-        "label": "Main_Section",
-        "description": "Progressive Kick & Snare: Kick on all four beats, velocity 120. Snare on beats 2 and 4, velocity 110. Rolling Bass: Plays a syncopated 16th-note pattern using root and fifth notes, velocity 100. Floating Lead: Plays a high-register melody with long, sustained notes. Ethereal Pad: Plays a rhythmic chord stab pattern on the off-beats."
+        "label": "Groove_Establishment",
+        "description": "The energy level rises as the core groove is established. The 'Progressive Kick' now lays down a solid four-on-the-floor beat with a confident, high velocity. The 'Rolling Bass' becomes more energetic and complex, playing a syncopated 16th-note pattern that adds momentum. The 'Floating Lead' is still silent, saving its entry for later. The 'Ethereal Pad' shifts to a rhythmic, pulsing pattern that complements the bassline, adding to the driving feel."
       }}
     ]
 
-    Now, generate the JSON for {num_parts} parts, following all instructions precisely.
+    Now, generate the JSON for {num_parts} parts, following the new creative instructions precisely.
     """
-    response_text = call_generative_model(prompt, config)
+    response_text, tokens_used = call_generative_model(prompt, config)
     if response_text:
         try:
             json_text = response_text.strip().replace("```json", "").replace("```", "")
             themes = json.loads(json_text)
             if isinstance(themes, list) and len(themes) == num_parts:
-                return themes
+                return themes, tokens_used
             else:
                  print(Fore.YELLOW + "Warning: AI did not return the expected number of song parts. Using placeholders.")
-                 return None
+                 return None, tokens_used
         except json.JSONDecodeError:
             print(Fore.YELLOW + "Warning: Failed to decode JSON from AI response for song structure. Using placeholders.")
-            return None
-    return None
+            return None, tokens_used
+    return None, tokens_used
 
 def expand_inspiration_with_ai(genre, inspiration, config):
     """Uses AI to expand a short user inspiration into a detailed one, while preserving the original context."""
@@ -315,11 +830,11 @@ def expand_inspiration_with_ai(genre, inspiration, config):
 
     Now, take the user's input "{inspiration}" and expand it into a single, detailed, MIDI-focused paragraph. Remember to incorporate the original idea directly into your response.
     """
-    response_text = call_generative_model(prompt, config)
+    response_text, tokens_used = call_generative_model(prompt, config)
     if response_text:
         # Remove potential markdown and quotes
-        return response_text.strip().replace("```", "").replace('"', '')
-    return inspiration # Fallback to original inspiration
+        return response_text.strip().replace("```", "").replace('"', ''), tokens_used
+    return inspiration, tokens_used # Fallback to original inspiration
 
 def confirm_and_execute(target_script, config, settings=None):
     """Shows a summary and asks for confirmation before saving and executing."""
@@ -381,46 +896,52 @@ def find_progress_files(script_dir: str) -> list:
     return sorted(progress_files, key=os.path.getmtime, reverse=True)
 
 def get_musical_parameters_with_ai(genre, inspiration, config, config_details):
-    """Uses AI to suggest BPM and Key/Scale based on genre and inspiration."""
+    """Uses AI to suggest BPM and Key/Scale based on genre and inspiration, leveraging the AI's musical knowledge."""
     
-    scales_list_str = ", ".join(config_details.get("scales", []))
+    scales_list_str = ", ".join(f'"{s}"' for s in config_details.get("scales", []))
     scales_prompt_part = ""
     if scales_list_str:
-        scales_prompt_part = f"\\n\\n**Available Scales:**\\nYou MUST choose a scale from this list: {scales_list_str}."
+        scales_prompt_part = f"You MUST choose a scale from this specific list: {scales_list_str}."
 
     prompt = f"""
-    You are an expert music producer. Based on the user's creative direction, suggest the most appropriate BPM and Key/Scale.
+    You are an expert music producer and historian with a deep knowledge of music theory across all genres.
+    Based on the user's creative direction, suggest the most appropriate BPM and Key/Scale.
 
     **User's Input:**
     - **Genre:** {genre}
     - **Inspiration/Style:** {inspiration}
 
-    **Your Task:**
-    Analyze the user's input and determine an optimal BPM and a fitting Key/Scale. The key should include a scale type (e.g., 'minor', 'major', 'dorian').{scales_prompt_part}
+    **Your Task & Logic:**
+    1.  **Analyze for Specifics:** First, scan the 'Inspiration/Style' for any mention of specific artists (e.g., "like Infected Mushroom"), niche subgenres (e.g., "Future Garage"), or specific songs.
+    2.  **Apply Your Knowledge:**
+        *   **If specifics are found:** Use your deep musical knowledge to determine the most common or characteristic key and scale used by that artist or within that subgenre. For example, you know that many classic Psytrance artists frequently use keys like E minor, F# minor, or G minor, and often employ exotic scales like Phrygian or Byzantine.
+        *   **If no specifics are found:** Analyze the emotional keywords (e.g., "melancholic," "energetic," "mysterious") and choose a scale that best fits that mood.
+    3.  **Select from Available Scales:** Choose a scale from the provided list that is the closest match to your expert analysis. {scales_prompt_part}
+    4.  **Determine Root Note & BPM:** Finally, choose a root note and BPM that are characteristic of the genre and inspiration.
 
     **Output Format:**
     Your response MUST be a single, valid JSON object with two keys: "bpm" (integer) and "key_scale" (string).
 
-    **Example 1:**
-    - **User Input:** "Progressive Psytrance like Astrix"
+    **Example 1 (Artist-specific):**
+    - **User Input:** "Psytrance in the style of Astrix"
     - **Your Output:** {{"bpm": 140, "key_scale": "F# minor"}}
 
-    **Example 2:**
-    - **User Input:** "A slow, melancholic ambient track that sounds like a rainy day."
-    - **Your Output:** {{"bpm": 75, "key_scale": "C# minor"}}
+    **Example 2 (Mood-specific):**
+    - **User Input:** "A slow, mysterious ambient track."
+    - **Your Output:** {{"bpm": 75, "key_scale": "C# phrygian"}}
 
     Now, provide the JSON for the given user input.
     """
-    response_text = call_generative_model(prompt, config)
+    response_text, tokens_used = call_generative_model(prompt, config)
     if response_text:
         try:
             json_text = response_text.strip().replace("```json", "").replace("```", "")
             params = json.loads(json_text)
             if isinstance(params, dict) and "bpm" in params and "key_scale" in params:
-                return params
+                return params, tokens_used
         except json.JSONDecodeError:
             print(Fore.YELLOW + "Warning: Failed to decode JSON from AI response for musical parameters.")
-    return None
+    return None, tokens_used
 
 # --- MAIN LOGIC ---
 
@@ -440,10 +961,14 @@ def main():
     print(f"{Style.BRIGHT}Let's get started!{Style.RESET_ALL}")
     
     while True: # Loop to allow restarting the whole process
+        total_tokens_used = 0  # Reset token counter for each run
         config = load_config()
+        normalize_automation_settings(config)
         config_details = extract_config_details(CONFIG_FILE) # Extract details from comments
         try:
-            genai.configure(api_key=config["api_key"])
+            if not initialize_api_keys(config):
+                break # Exit if no valid keys are found
+            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
         except Exception as e:
             print(Fore.RED + f"API Key configuration error: {e}. Please check your config.yaml.")
             break # Exit if API key is not configured
@@ -514,28 +1039,36 @@ def main():
             print_header("PROCESSING WITH AI - PLEASE WAIT")
         
             print("\nDetermining musical parameters (BPM, Key)...")
-            musical_params = get_musical_parameters_with_ai(genre, inspiration, config, config_details)
+            musical_params, tokens_used = get_musical_parameters_with_ai(genre, inspiration, config, config_details)
+            total_tokens_used += tokens_used
             if musical_params:
                 bpm = musical_params.get('bpm', 120)
                 key_scale = musical_params.get('key_scale', 'C minor')
                 print(f"{Fore.CYAN}AI Suggestion: {bpm} BPM, {key_scale}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}Tokens used for this step: {tokens_used:,}{Style.RESET_ALL}")
             else:
                 print(Fore.YELLOW + "AI failed to suggest musical parameters. Using defaults from config.yaml.")
                 bpm = config.get('bpm', 120)
                 key_scale = config.get('key_scale', 'C minor')
 
             print("\nExpanding creative direction...")
-            expanded_inspiration = expand_inspiration_with_ai(genre, inspiration, config)
+            expanded_inspiration, tokens_used = expand_inspiration_with_ai(genre, inspiration, config)
+            total_tokens_used += tokens_used
+            print(f"{Fore.CYAN}Tokens used for this step: {tokens_used:,}{Style.RESET_ALL}")
             if not expanded_inspiration: continue
 
             print("\nGenerating instrument list...")
-            instruments = generate_instrument_list_with_ai(genre, expanded_inspiration, num_instruments, config, config_details)
+            instruments, tokens_used = generate_instrument_list_with_ai(genre, expanded_inspiration, num_instruments, config, config_details)
+            total_tokens_used += tokens_used
+            print(f"{Fore.CYAN}Tokens used for this step: {tokens_used:,}{Style.RESET_ALL}")
             if not instruments:
                 print(Fore.YELLOW + "AI failed to generate instruments. Using default list from config.yaml.")
                 instruments = config.get('instruments', [])
                 if not instruments:
                     print(Fore.RED + "No instruments found in config.yaml. Cannot proceed.")
                     continue
+            # Validate & normalize instruments
+            instruments = validate_instruments(instruments, config_details)
 
             # 4. Create a single "theme" definition
             theme_definitions = [{"label": part_label, "description": part_description}]
@@ -554,6 +1087,8 @@ def main():
                 'theme_definitions': theme_definitions
             }
             
+            print(f"\n{Style.BRIGHT}{Fore.MAGENTA}Total tokens used for setup: {total_tokens_used:,}{Style.RESET_ALL}")
+            
             # Save and execute
             if confirm_and_execute(PART_GENERATOR_SCRIPT, config, song_settings):
                  print(Fore.GREEN + "\nSingle Part Generator finished.")
@@ -569,11 +1104,12 @@ def main():
                 try:
                     with open(pfile, 'r') as f:
                         pdata = json.load(f)
-                    ptype = pdata.get('type', 'unknown')
+                    # Check for new and old key format for robustness
+                    ptype = pdata.get('type') or pdata.get('generation_type', 'unknown')
                     if 'generation' in ptype:
-                        info = f"Gen: T {pdata.get('current_theme_index', 0) + 1}, Trk {pdata.get('current_track_index', 0)}"
+                        info = f"Gen: Theme {pdata.get('current_theme_index', 0) + 1}, Track {pdata.get('current_track_index', 0) + 1}"
                     elif 'optimization' in ptype:
-                        info = f"Opt: T {pdata.get('current_theme_index',0)+1}, Trk {pdata.get('current_track_index',0)}"
+                        info = f"Opt: Theme {pdata.get('current_theme_index',0)+1}, Track {pdata.get('current_track_index',0) + 1}"
                 except:
                     info = "Unknown"
                 print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {basename} ({time_str}) - {info}")
@@ -590,14 +1126,15 @@ def main():
 
             try:
                 print_header("Resuming Process")
-                subprocess.run([sys.executable, SONG_GENERATOR_SCRIPT, '--resume', selected_file], check=True)
+                # Call song_generator.py directly with the file to resume, bypassing its menu.
+                subprocess.run([sys.executable, SONG_GENERATOR_SCRIPT, '--resume-file', selected_file], check=True)
                 print(Fore.GREEN + "\nResumed process finished successfully!")
             except subprocess.CalledProcessError as e:
                 print(Fore.RED + f"\nError during resumed execution: {e}")
             except FileNotFoundError:
                 print(Fore.RED + f"\nError: Could not find the script '{SONG_GENERATOR_SCRIPT}'.")
     
-            # After resuming, we can either exit or show the menu again. Let's show the menu.
+            # After resuming, return to the main menu.
             continue
 
         # --- Full Song Mode ('new_song' action) ---
@@ -634,11 +1171,13 @@ def main():
             
             # 1. Get Musical Parameters (BPM, Key)
             print("\nDetermining musical parameters (BPM, Key)...")
-            musical_params = get_musical_parameters_with_ai(genre, inspiration, config, config_details)
+            musical_params, tokens_used = get_musical_parameters_with_ai(genre, inspiration, config, config_details)
+            total_tokens_used += tokens_used
             if musical_params:
                 bpm = musical_params.get('bpm', 120)
                 key_scale = musical_params.get('key_scale', 'C minor')
                 print(f"{Fore.CYAN}AI Suggestion: {bpm} BPM, {key_scale}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}Tokens used for this step: {tokens_used:,}{Style.RESET_ALL}")
             else:
                 print(Fore.YELLOW + "AI failed to suggest musical parameters. Using defaults from config.yaml.")
                 bpm = config.get('bpm', 120)
@@ -646,23 +1185,31 @@ def main():
 
             # 2. Expand Inspiration
             print("\nExpanding creative direction...")
-            expanded_inspiration = expand_inspiration_with_ai(genre, inspiration, config)
+            expanded_inspiration, tokens_used = expand_inspiration_with_ai(genre, inspiration, config)
+            total_tokens_used += tokens_used
+            print(f"{Fore.CYAN}Tokens used for this step: {tokens_used:,}{Style.RESET_ALL}")
             if not expanded_inspiration:
                 continue # Exit if AI call fails and user cancels
 
             # 3. Generate Instrument List
             print("\nGenerating instrument list...")
-            instruments = generate_instrument_list_with_ai(genre, expanded_inspiration, num_instruments, config, config_details)
+            instruments, tokens_used = generate_instrument_list_with_ai(genre, expanded_inspiration, num_instruments, config, config_details)
+            total_tokens_used += tokens_used
+            print(f"{Fore.CYAN}Tokens used for this step: {tokens_used:,}{Style.RESET_ALL}")
             if not instruments:
                 print(Fore.YELLOW + "AI failed to generate instruments. Using default list from config.yaml.")
                 instruments = config.get('instruments', []) # Fallback to config
                 if not instruments:
                     print(Fore.RED + "No instruments found in config.yaml. Cannot proceed.")
                     continue
+            # Validate & normalize instruments
+            instruments = validate_instruments(instruments, config_details)
 
             # 4. Generate Song Structure
             print("\nGenerating song structure...")
-            theme_definitions = generate_song_structure_with_ai(genre, expanded_inspiration, instruments, num_parts, part_length, config)
+            theme_definitions, tokens_used = generate_song_structure_with_ai(genre, expanded_inspiration, instruments, num_parts, part_length, config)
+            total_tokens_used += tokens_used
+            print(f"{Fore.CYAN}Tokens used for this step: {tokens_used:,}{Style.RESET_ALL}")
             if not theme_definitions:
                  print(Fore.YELLOW + f"AI failed to generate song structure. Creating {num_parts} placeholder parts.")
                  theme_definitions = [{"label": f"Part_{i+1}", "description": "This is a placeholder description."} for i in range(num_parts)]
@@ -683,47 +1230,19 @@ def main():
                 'theme_definitions': theme_definitions
             }
             
-            # Confirm, save, and execute the main generation script
-            if not confirm_and_execute(SONG_GENERATOR_SCRIPT, config, song_settings):
-                # If user cancels, the loop in main() will restart the process.
-                continue
+            print(f"\n{Style.BRIGHT}{Fore.MAGENTA}Total tokens used for setup: {total_tokens_used:,}{Style.RESET_ALL}")
             
-            # --- PHASE 4: OPTIMIZE (NEW) ---
-            details_file = os.path.join(script_dir, "last_generation_details.json")
-            if os.path.exists(details_file):
-                print_header("STEP 4: OPTIMIZE SONG")
-                print("The optimization pass revisits each track of your song with a 'producer's mindset'.")
-                print("The AI will analyze the musical context and try to:")
-                print(f"  - {Fore.CYAN}Enhance Groove:{Style.RESET_ALL} Add subtle syncopation or timing shifts to make rhythms feel more human.")
-                print(f"  - {Fore.CYAN}Exaggerate Dynamics:{Style.RESET_ALL} Make quiet parts quieter and loud parts louder for more expression.")
-                print(f"  - {Fore.CYAN}Develop Ideas:{Style.RESET_ALL} Introduce subtle variations to looping parts to keep them interesting over time.")
-                print(f"  - {Fore.CYAN}Improve Ensemble Playing:{Style.RESET_ALL} Refine how different instrument parts interact with each other.")
-                
-                optimize_choice = get_user_input("\nDo you want to run optimizations on the generated song? (y/n):", "y").lower()
-                if optimize_choice == 'y':
-                    user_opt_prompt = get_user_input("Enter an optional English prompt to guide this optimization (e.g., 'make it sound more melancholic'), or press Enter for a general enhancement pass:")
-                    
-                    print_header("Starting Optimization")
-                    try:
-                        # Construct command with the prompt
-                        command = [sys.executable, SONG_GENERATOR_SCRIPT, '--optimize']
-                        if user_opt_prompt:
-                            # Pass the prompt as separate arguments if it contains spaces
-                            command.extend(user_opt_prompt.split())
+            # Confirm, save, and execute the main generation script
+            if confirm_and_execute(SONG_GENERATOR_SCRIPT, config, song_settings):
+                print(f"\n{Fore.GREEN}Generation process started successfully.{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}The Song Generator has taken over. Check its window for progress.{Style.RESET_ALL}")
+            else:
+                # User cancelled in confirm_and_execute, message is already printed
+                pass
 
-                        subprocess.run(command, check=True)
-                        print(Fore.GREEN + "\nOptimization script finished successfully!")
-                    except subprocess.CalledProcessError as e:
-                        print(Fore.RED + f"\nError during optimization script execution: {e}")
-                    except FileNotFoundError:
-                        print(Fore.RED + f"\nError: Could not find the script '{SONG_GENERATOR_SCRIPT}'.")
-                else:
-                    # Clean up the details file if user chooses not to optimize
-                    os.remove(details_file)
-                    print(Fore.YELLOW + "Skipping optimization.")
-
-            print(Fore.CYAN + "\nMusic Crafter setup complete. Exiting.")
-            break
+            print(f"\n{Fore.CYAN}Music Crafter setup complete. Returning to main menu.{Style.RESET_ALL}")
+            # We use 'continue' to go back to the main menu
+            continue
 
 if __name__ == "__main__":
     main() 

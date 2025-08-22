@@ -1,136 +1,162 @@
+# =============================================================================
+# Contextual Music Crafter - Configuration
+# =============================================================================
+# This file controls model settings, musical parameters, and instruments.
+# All comments are informational; you can keep or remove them as you like.
+
+# Meta notes (informational)
+# - Comments are preserved when using music_crafter.py (ruamel.yaml round-trip).
+# - Provide a list under api_key to enable automatic key rotation on 429/quota.
+# - For long runs, song_generator.py can resume with --resume-file.
+# - See README for advanced notes and troubleshooting.
+
+# -----------------------------------------------------------------------------
 # API Configuration
-# Replace with your actual Google AI API key.
-api_key: "YOUR_GOOGLE_AI_API_KEY" #YOUR_GOOGLE_AI_API_KEY
-model_name: "gemini-2.5-pro" #"gemini-2.5-pro"  #gemini-2.5-flash 
-# Temperature for the model (0.0 = deterministic, 2.0 = very creative). Default is 1.0.
-temperature: 0.1
-# The number of preceding themes to send as context for the next generation.
-# This helps the AI understand the most recent musical developments.
-# -1 = Dynamic Mode: Sends the maximum number of recent themes that will fit within the model's context window. (Recommended for quality)
-#  0 = No Context: Sends no previous themes. Each part is generated in isolation.
-# >0 = Fixed Number: Sends exactly that many of the most recent themes (e.g., 4). (Good for saving tokens)
-context_window_size: -1
+# -----------------------------------------------------------------------------
+# You can provide a single key (string) or multiple keys (list) for key rotation.
 
-# --- Musical Parameters ---
-# Use these settings to define the core musical direction of your generated track.
+api_key:
+  - "YOUR_GOOGLE_AI_API_KEY_1"
+  #- "YOUR_GOOGLE_AI_API_KEY_2"
+  #- "YOUR_GOOGLE_AI_API_KEY_3"
+  #- "YOUR_GOOGLE_AI_API_KEY_4"
+  #- "YOUR_GOOGLE_AI_API_KEY_5"
 
-# A detailed description of the musical style you want to create.
-# Be specific about feeling, instrumentation, and rhythm. You can also name
-# artists (e.g. "in the style of Daft Punk"), songs, albums, or other concepts as inspiration.
-# Example: "A high-energy, four-on-the-floor house track in the style of Daft Punk. 
-# Focus on a funky, filtered bassline, a classic house piano chord progression, 
-# and a simple, catchy lead synth melody. The drums should be punchy and groovy."
-inspiration: "A high-energy, four-on-the-floor house track with a funky bassline."
+# Model selection
+# Recommended options: "gemini-2.5-pro" (highest quality), "gemini-2.5-flash" (faster/cheaper)
+model_name: gemini-2.5-pro
 
-# The primary genre of the track. This helps the AI understand the conventions to follow.
-genre: "House Music"
+# Sampling temperature (0.0 = deterministic, 2.0 = very creative)
+# Note: Values closer to 0 tend to be more reliable/consistent but less creative/playful;
+#       higher values increase novelty and variation at the cost of stability.
+temperature: 0
 
-# Beats Per Minute (Tempo) of the song.
+# -----------------------------------------------------------------------------
+# Automation Settings
+# -----------------------------------------------------------------------------
+# Enable expressive MIDI data. 0 = disabled, 1 = enabled
+automation_settings:
+  # Pitch Bend: slides and vibrato
+  use_pitch_bend: 0
+
+  # Sustain Pedal (CC64): legato/hold for pianos and pads
+  use_sustain_pedal: 0
+
+  # Control Change (CC) curves: filter/volume/pan etc.
+  use_cc_automation: 0
+
+  # Allowed CC numbers if CC automation is enabled
+  # 1: Modulation, 10: Pan, 11: Expression, 74: Filter Cutoff
+  allowed_cc_numbers: [1, 10, 11, 74]
+
+# -----------------------------------------------------------------------------
+# Musical Parameters
+# -----------------------------------------------------------------------------
+# Free-form description to guide the composition
+inspiration: |-
+  Generate a track that captures the essence of a generic house music track. The rhythmic foundation should feature a consistent four-on-the-floor kick on every quarter note, reinforced by a clap on beats two and four, and a driving pattern of closed 16th-note hi-hats, often with an open hi-hat on the second and fourth upbeat of each bar. A simple, repetitive two or four-bar bassline, predominantly using 8th notes, should establish the harmonic movement, typically outlining root notes and fifths of a diatonic major or minor scale with consistent note velocities. Over this, introduce a sustained chord progression, often four or eight bars in length, played with moderate velocities (e.g., 80-100), accompanied by a short, catchy melodic motif, repeating every two or four bars, using simple 8th or 16th-note figures. The structure should build through repetition, subtle additions of percussive elements like shakers or congas playing off-beat 16th notes, and occasional removal of elements to create tension and release, maintaining a steady tempo throughout.
+
+# Main style/genre
+genre: House
+
+# Tempo in BPM
 bpm: 125
 
-# The key and scale of the song (e.g., "C major", "A minor", "F# dorian").
-# The script supports a wide variety of scales and church modes.
-# Available scales: "major", "ionian", "minor", "natural minor", "aeolian", 
-# "harmonic minor", "melodic minor", "dorian", "phrygian", "lydian", 
-# "mixolydian", "locrian", "major pentatonic", "minor pentatonic", "chromatic", 
-# "whole tone", "diminished", "augmented", "byzantine", "hungarian minor", 
-# "persian", "arabic", "jewish", "ahava raba", "blues", "major blues"
-key_scale: "C minor"
+# Key and scale (e.g., "C major", "A minor", "F# dorian")
+key_scale: C major
 
-# Enables a "call and response" generation mode for melodic instruments.
-# 0 = Disabled: Each track is generated independently based on the full context.
-# 1 = Enabled: Melodic instruments will try to create a dialogue by playing in the gaps left by other melodic parts.
+# Available scales: "major", "ionian", "minor", "natural minor", "aeolian", "harmonic minor", "melodic minor",
+# "dorian", "phrygian", "lydian", "mixolydian", "locrian", "major pentatonic", "minor pentatonic",
+# "chromatic", "whole tone", "diminished", "augmented", "byzantine", "hungarian minor", "persian",
+# "arabic", "jewish", "ahava raba", "blues", "major blues"
+
+# -----------------------------------------------------------------------------
+# Generation & Performance Settings
+# -----------------------------------------------------------------------------
+
+# Maximum tokens per model response (higher = longer outputs, more cost).
+# Increase if responses get truncated; decrease to save tokens.
+max_output_tokens: 65536
+
+# Previous-themes context window:
+# -1 = dynamic (use as much as fits), 0 = none, >0 = fixed number of recent themes
+context_window_size: -1
+
+# Call-and-response mode for melodic instruments (0/1).
+# Eligible roles: bass, chords, arp, guitar, lead, melody, vocal
 use_call_and_response: 0
 
-# The number of complete songs to generate in a single run.
+# Number of complete songs per run
 number_of_iterations: 1
 
-# The time signature of the song.
+# Time signature
 time_signature:
   beats_per_bar: 4
-  beat_value: 4 # (4 = quarter note)
+  beat_value: 4
 
-# --- Instrument Definitions ---
-# Define the instruments that will make up your arrangement.
-# Each instrument is a list item with a `name`, a `program_num` (General MIDI program number), and a `role`.
-# The `role` tells the AI the musical function of the track. 
+# -----------------------------------------------------------------------------
+# Instrument Definitions
+# -----------------------------------------------------------------------------
+# Order defines generation order. Each entry needs name, program_num, and role.
+# MIDI channel policy: drums/percussion use Channel 10 (index 9). Melodic parts
+# are assigned sequentially across remaining channels, skipping 10.
+# Available roles (selection): drums, kick_and_snare, percussion, sub_bass, bass,
+# pads, atmosphere, texture, chords, harmony, arp, guitar, lead, melody, vocal,
+# fx, complementary
+
 # Available Roles:
-#   - "drums":      The main rhythmic foundation (kick, snare, hats).
-#   - "kick_and_snare": The foundational kick and snare pattern, adapted to the specified genre.
-#   - "percussion": Complementary rhythmic elements (bongos, congas, shakers).
-#   - "sub_bass":   Very deep, fundamental bass (often a sine wave).
-#   - "bass":       The main, rhythmic bassline. (Responds to Call/Response)
-#   - "pads":       Atmospheric pads, long/slow chords.
-#   - "atmosphere": Similar to pads, often more textured or evolving.
-#   - "texture":    Sonic textures, not necessarily melodic or rhythmic.
-#   - "chords":     Defines the chord progression, can be rhythmic stabs or sustained. (Responds to Call/Response)
-#   - "harmony":    Similar to chords, providing harmonic structure.
-#   - "arp":        An arpeggio; plays chord notes sequentially in a pattern. (Responds to Call/Response)
-#   - "guitar":     Versatile for riffs, melodies, or rhythmic chords. (Responds to Call/Response)
-#   - "lead":       The main melody or riff, the focal point. (Responds to Call/Response)
-#   - "melody":     A secondary or supporting melody line. (Responds to Call/Response)
-#   - "vocal":      Rhythmic vocal chops or short, catchy phrases. (Responds to Call/Response)
-#   - "fx":         Sound effects, risers, impacts, sweeps, etc.
-#   - "complementary": A general, complementary role (default if no role is specified).
+#   - "drums"
+#   - "kick_and_snare"
+#   - "percussion"
+#   - "sub_bass"
+#   - "bass"
+#   - "pads"
+#   - "atmosphere"
+#   - "texture"
+#   - "chords"
+#   - "harmony"
+#   - "arp"
+#   - "guitar"
+#   - "lead"
+#   - "melody"
+#   - "vocal"
+#   - "fx"
+#   - "complementary"
 
-#The order in this list determines the generation order.
-# You can add as many instruments as you like to the list below.
-# The script will generate a part for each one sequentially.
 instruments:
-  - name: "Drums"
-    program_num: 10      # Standard Drum Kit (often ignored by DAWs, but required)
-    role: "drums"
-    
-  - name: "Funky Bass"
-    program_num: 39 # Synth Bass 2
-    role: "bass"
-    
-  - name: "House Piano"
-    program_num: 2  # Acoustic Grand Piano
-    role: "harmony"
-    
-  - name: "Lead Synth"
-    program_num: 82 # Lead 2 (sawtooth)
-    role: "melody"
-    
-  - name: "Atmospheric Pads"
-    program_num: 90 # Pad 2 (warm)
-    role: "complementary"
-    
-# --- MIDI Technical Reference ---
-# This section is for information only and does not configure the script.
-#
+  - name: House Kick & Clap
+    program_num: 119
+    role: kick_and_snare
+  - name: Driving Hi-Hats
+    program_num: 119
+    role: percussion
+  - name: Classic House Bassline
+    program_num: 39
+    role: bass
+  - name: Warm Chord Pad
+    program_num: 90
+    role: pads
+  - name: Catchy Synth Lead
+    program_num: 82
+    role: lead
+  - name: Off-Beat Percussion
+    program_num: 114
+    role: percussion
+
+# -----------------------------------------------------------------------------
+# Troubleshooting (quick reference)
+# -----------------------------------------------------------------------------
+# - 429 / quota exceeded: rotate API keys or pause and resume later.
+# - 5xx internal errors/timeouts: retry later; switching model (e.g., gemini-2.5-flash) can help.
+# - Empty/invalid response: usually transient under load; try again or lower temperature.
+
+# --- MIDI Technical Reference (informational) ---
 # General MIDI Channel Assignments:
-# The script automatically handles channel assignments based on instrument roles.
-#
-# - Channel 10 (internal index 9): Reserved for Drums & Percussion.
-#   Any instrument with the role "drums" or "percussion" will be assigned to this channel
-#   to ensure it plays with a drum kit sound in any standard MIDI player.
-#
-# - Channels 1-9 & 11-16: Used for Melodic & Tonal Instruments.
-#   All other roles (bass, pads, lead, etc.) are assigned to these channels.
-#   The script assigns them sequentially, skipping channel 10.
-#
-# General MIDI Program Numbers (Examples for reference):
-#   1-8: Pianos
-#   9-16: Chromatic Percussion
-#   17-24: Organs
-#   25-32: Guitars
-#   33-40: Basses
-#   41-48: Strings
-#   49-56: Ensemble
-#   57-64: Brass
-#   65-72: Reed
-#   73-80: Pipe
-#   81-88: Synth Lead
-#   89-96: Synth Pad
-#   97-104: Synth Effects
-#   105-112: Ethnic
-#   113-120: Percussive
-#   121-128: Sound Effects
+# - Channel 10 (index 9): Drums & Percussion.
+# - Channels 1-9 & 11-16: Melodic & Tonal Instruments. Assigned sequentially, skipping channel 10.
 
 # ALL MIDI Program Numbers
-#
+
 # 1-8: Pianos
 # 1. Acoustic Grand Piano
 # 2. Bright Acoustic Piano
@@ -290,7 +316,3 @@ instruments:
 # 126. Helicopter
 # 127. Applause
 # 128. Gunshot
-
-
-
-

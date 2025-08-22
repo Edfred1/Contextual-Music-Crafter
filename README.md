@@ -189,3 +189,41 @@ python song_generator.py
 > **Don't worry, your progress will be saved!** The `song_generator.py` script is designed for this. If generation stops, you can simply resume it from its interactive menu. It will pick up exactly where it left off.
 >
 > **💡 A Note on Quality:** While the process can be resource-intensive, the results from this two-step workflow can be strikingly good. The detailed plan created by `music_crafter.py` gives `song_generator.py` the context it needs to produce surprisingly cohesive and creative pieces.
+
+## 📌 Note on legacy scripts
+
+The original standalone scripts `part_generator.py`, `part_extender.py`, and `part_variator.py` remain in this repository and continue to work with the latest changes (including the new API key logic and the extended `config.yaml`).
+
+- Going forward, these capabilities will be gradually integrated into the two main programs: `music_crafter.py` (planning/setup) and `song_generator.py` (generation), and expanded there.
+- Until the integration is complete, you can keep using the three scripts as usual. Deprecation notices and migration guidance will be provided ahead of any breaking changes.
+- Recommendation: For new workflows, prefer `music_crafter.py` and `song_generator.py` to benefit from advanced features (e.g., key rotation, resume support, automation options).
+
+## ⚙️ Advanced usage and notes
+
+- **API keys & rotation**: The `api_key` field supports either a single string or a list of keys. When a 429/quota error occurs, the system rotates to the next key automatically. 
+
+- **YAML comments preservation**: `music_crafter.py` reads/writes `config.yaml` using ruamel.yaml in round-trip mode to preserve comments and quoting. You can safely annotate the config; comments will persist across saves.
+
+- **Automation settings**: The `automation_settings` block controls expressive data:
+  - `use_pitch_bend` (0/1): enables pitch bend events for expressive roles.
+  - `use_sustain_pedal` (0/1): enables CC64 pedal events for sustaining instruments.
+  - `use_cc_automation` (0/1): enables CC curves (e.g., filter sweeps).
+  - `allowed_cc_numbers`: list of allowed CC numbers when CC automation is enabled (e.g., `[1, 10, 11, 74]`).
+
+- **Call-and-response mode**: If `use_call_and_response` is `1`, eligible roles (e.g., `bass`, `chords`, `arp`, `guitar`, `lead`, `melody`, `vocal`) will alternate between “call” and “response” to improve interplay.
+
+- **Token usage**: `max_output_tokens` sets the upper bound of model output length per call. Higher values improve completeness but increase cost. The scripts print token usage to help you tune settings.
+
+- **Resuming long runs**: The song generator saves progress and supports resuming via its interactive menu. You can also resume directly with:
+  ```bash
+  python song_generator.py --resume-file path/to/progress_run_*.json
+  ```
+
+- **MIDI channel policy**: Drums/percussion use MIDI Channel 10 (index 9). Melodic instruments are assigned sequentially across remaining channels, skipping 10.
+
+- **Output filenames**:
+  - `part_generator.py`: dynamic names like `<Genre>_<Key>_<Bars>bars_<BPM>bpm_<Timestamp>.mid`.
+  - `part_extender.py`: `<OriginalName>_ext_<N>.mid`.
+  - `part_variator.py`: `<OriginalName>_var_<N>.mid`.
+
+- **Dependencies**: See `requirements.txt` (google-generativeai, midiutil, PyYAML, colorama, ruamel.yaml, mido). Standard library modules are used for everything else.

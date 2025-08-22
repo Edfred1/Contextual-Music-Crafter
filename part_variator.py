@@ -33,6 +33,10 @@ init(autoreset=True)
 # Constants
 GENERATED_CODE_FILE = os.path.join(script_dir, "generated_code.py")
 
+# --- NEW: API key rotation state ---
+API_KEYS = []
+CURRENT_KEY_INDEX = 0
+
 def select_midi_file() -> str:
     """
     Scans for MIDI files in the current directory and subdirectories,
@@ -216,15 +220,21 @@ def load_config(config_file):
             config = yaml.safe_load(f)
 
         # Validate critical fields first
-        if not config.get("api_key"):
+        if "api_key" not in config:
             raise ValueError("API key is missing in configuration.")
             
         if not config.get("model_name"):
             raise ValueError("Model name is missing in configuration.")
             
-        # Validate API-Key Format (basic check)
-        if not isinstance(config["api_key"], str) or len(config["api_key"]) < 10:
-            raise ValueError("API key appears to be invalid.")
+        # Validate API key(s): accept string or list of strings
+        api_key_value = config["api_key"]
+        valid_key_present = False
+        if isinstance(api_key_value, str):
+            valid_key_present = len(api_key_value) >= 10 and "YOUR_" not in api_key_value
+        elif isinstance(api_key_value, list):
+            valid_key_present = any(isinstance(k, str) and len(k) >= 10 and "YOUR_" not in k for k in api_key_value)
+        if not valid_key_present:
+            raise ValueError("No valid API key found. Provide a string or a list of keys in config.yaml.")
 
         # A list of required fields for the configuration to be valid.
         required_fields = [
@@ -329,6 +339,31 @@ def load_config(config_file):
     except Exception as e:
         print(Fore.RED + f"Error loading configuration: {str(e)}" + Style.RESET_ALL)
         exit()
+
+def initialize_api_keys(config):
+    """Loads API keys from config and prepares them for rotation."""
+    global API_KEYS, CURRENT_KEY_INDEX
+    api_key_config = config.get("api_key")
+    if isinstance(api_key_config, list):
+        API_KEYS = [key for key in api_key_config if isinstance(key, str) and key and "YOUR_" not in key]
+    elif isinstance(api_key_config, str) and "YOUR_" not in api_key_config:
+        API_KEYS = [api_key_config]
+    else:
+        API_KEYS = []
+
+    CURRENT_KEY_INDEX = 0
+    if not API_KEYS:
+        print(Fore.RED + "Error: No valid API key found in 'config.yaml'. Please add your key(s).")
+        return False
+    print(Fore.CYAN + f"Found {len(API_KEYS)} API key(s). Starting with key #1.")
+    return True
+
+def get_next_api_key():
+    """Rotates to the next available API key and returns it."""
+    global CURRENT_KEY_INDEX
+    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
+    print(Fore.YELLOW + f"Switching to API key #{CURRENT_KEY_INDEX + 1}...")
+    return API_KEYS[CURRENT_KEY_INDEX]
 
 def get_scale_notes(root_note, scale_type="minor"):
     """
@@ -644,7 +679,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
             generation_config = {
                 "temperature": config["temperature"],
                 "response_mime_type": "application/json",
-                "max_output_tokens": 65536
+                "max_output_tokens": int(config.get("max_output_tokens", 65536))
             }
 
             model = genai.GenerativeModel(
@@ -719,6 +754,14 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
             if "response_text" in locals():
                 print(Fore.YELLOW + "Model response was:\n" + response_text + Style.RESET_ALL)
         except Exception as e:
+            # Handle quota errors with key rotation if multiple keys provided
+            if "429" in str(e) and "quota" in str(e).lower():
+                print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: API quota exceeded." + Style.RESET_ALL)
+                if len(API_KEYS) > 1:
+                    new_key = get_next_api_key()
+                    genai.configure(api_key=new_key)
+                    print(Fore.CYAN + "Retrying immediately with the next key...")
+                    continue
             print(Fore.RED + f"An unexpected error occurred on attempt {attempt + 1} for {instrument_name}: {str(e)}" + Style.RESET_ALL)
 
         # If we are not on the last attempt, wait before retrying
@@ -1089,6 +1132,7 @@ def generate_variation_data(config: Dict, length: int, context_tracks: List[Dict
             generation_config = {
                 "temperature": config["temperature"],
                 "response_mime_type": "application/json",
+                "max_output_tokens": int(config.get("max_output_tokens", 65536))
             }
             model = genai.GenerativeModel(model_name=config["model_name"], generation_config=generation_config)
             safety_settings=[
@@ -1125,6 +1169,14 @@ def generate_variation_data(config: Dict, length: int, context_tracks: List[Dict
         except (json.JSONDecodeError, TypeError) as e:
             print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: Data validation failed for {track_to_vary['instrument_name']}. Reason: {str(e)}" + Style.RESET_ALL)
         except Exception as e:
+            # Handle quota errors with key rotation if multiple keys provided
+            if "429" in str(e) and "quota" in str(e).lower():
+                print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: API quota exceeded." + Style.RESET_ALL)
+                if len(API_KEYS) > 1:
+                    new_key = get_next_api_key()
+                    genai.configure(api_key=new_key)
+                    print(Fore.CYAN + "Retrying immediately with the next key...")
+                    continue
             print(Fore.RED + f"An unexpected error occurred on attempt {attempt + 1}: {str(e)}" + Style.RESET_ALL)
 
         if attempt < max_retries - 1:
@@ -1209,8 +1261,10 @@ def main():
     try:
         config = load_config(CONFIG_FILE)
         
-        # Configure the generative AI model
-        genai.configure(api_key=config["api_key"])
+        # Configure the generative AI model with API key rotation
+        if not initialize_api_keys(config):
+            return
+        genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
         
         # --- MIDI File Selection ---
         input_midi_file = select_midi_file()
