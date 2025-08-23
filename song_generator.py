@@ -364,6 +364,107 @@ def get_scale_notes(root_note, scale_type="minor"):
         print(Fore.RED + f"Error generating scale for {scale_type}: {str(e)}" + Style.RESET_ALL)
         return [60, 62, 64, 65, 67, 69, 71] # Return C Major scale on error
 
+def _expand_pattern_blocks(pattern_blocks: List[Dict], length_bars: int, beats_per_bar: int) -> List[Dict]:
+    """
+    Expands a compact pattern representation into a list of note objects.
+    Expected block schema (flexible, fields optional):
+    - length_bars (int): length of this block in bars (default 1)
+    - subdivision (int): steps per bar (e.g., 16, 32, 64; default 16)
+    - bar_repeats (int): how many times this block repeats in sequence (default 1)
+    - transpose (int): semitone transpose for this block (default 0)
+    - octave_shift (int): octave shift in 12-semitone steps (default 0)
+    - steps (list): each step definition:
+        {"pitch": int, "velocity": int, "gate": float (0..1),
+         one of: "mask": "0101..." or "indices": [int, ...]}
+
+    Notes will be clamped into the total part length (length_bars * beats_per_bar).
+    """
+    try:
+        notes: List[Dict] = []
+        total_beats = float(length_bars * beats_per_bar)
+        current_bar_offset = 0.0
+
+        if not isinstance(pattern_blocks, list):
+            return notes
+
+        for block in pattern_blocks:
+            if not isinstance(block, dict):
+                continue
+            length_bars_blk = int(block.get("length_bars", 1))
+            subdivision = int(block.get("subdivision", 16))
+            bar_repeats = int(block.get("bar_repeats", 1))
+            transpose = int(block.get("transpose", 0)) + int(block.get("octave_shift", 0)) * 12
+
+            step_count = max(1, length_bars_blk * max(1, subdivision))
+            step_duration = float(beats_per_bar) / max(1, subdivision)
+
+            steps = block.get("steps", [])
+            if not isinstance(steps, list):
+                steps = []
+
+            # Place this block sequentially; repeat as requested
+            for rep in range(max(1, bar_repeats)):
+                bar_base = (current_bar_offset + rep * length_bars_blk) * float(beats_per_bar)
+
+                for stepdef in steps:
+                    if not isinstance(stepdef, dict):
+                        continue
+                    base_pitch = int(stepdef.get("pitch", 60)) + transpose
+                    base_pitch = max(0, min(127, base_pitch))
+                    velocity = int(stepdef.get("velocity", 100))
+                    velocity = max(1, min(127, velocity))
+                    gate = stepdef.get("gate", 0.5)
+                    try:
+                        gate = float(gate)
+                    except Exception:
+                        gate = 0.5
+                    if gate <= 0:
+                        gate = 0.5
+
+                    indices: List[int] = []
+                    if isinstance(stepdef.get("indices"), list):
+                        try:
+                            indices = [int(i) for i in stepdef.get("indices", [])]
+                        except Exception:
+                            indices = []
+                    elif isinstance(stepdef.get("mask"), str):
+                        mask = stepdef.get("mask", "")
+                        step_len = min(len(mask), step_count)
+                        for idx in range(step_len):
+                            if mask[idx] == '1':
+                                indices.append(idx)
+
+                    # Create notes for each index within this block
+                    for idx in indices:
+                        if not isinstance(idx, int):
+                            continue
+                        if idx < 0 or idx >= step_count:
+                            continue
+                        start_beat = bar_base + float(idx) * step_duration
+                        if start_beat >= total_beats:
+                            continue
+                        duration = max(0.01, step_duration * gate)
+                        if start_beat + duration > total_beats:
+                            duration = max(0.0, total_beats - start_beat)
+                        if duration <= 0:
+                            continue
+                        notes.append({
+                            "pitch": base_pitch,
+                            "start_beat": float(start_beat),
+                            "duration_beats": float(duration),
+                            "velocity": velocity
+                        })
+
+            # Advance placement cursor by the total repeated length of this block
+            current_bar_offset += float(length_bars_blk * max(1, bar_repeats))
+            if current_bar_offset * beats_per_bar >= total_beats:
+                break
+
+        return notes
+    except Exception:
+        # On any unexpected error, return empty list and let caller fallback
+        return []
+
 def create_theme_prompt(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes_full_history: List[Dict], current_theme_index: int):
     """
     Creates a universal, music-intelligent prompt that is tailored to generating a new theme based on previous ones.
@@ -583,6 +684,7 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         f'- **"duration_beats"**: The note\'s length in beats (float).\n'
         f'- **"velocity"**: MIDI velocity (integer 1-127).\n'
         f'- **"automations"**: (Optional) An object containing automation data for this note.\n\n'
+        f"Optional compact format for dense rhythms: You may include a 'pattern_blocks' array to represent many fast steps (e.g., 32nd/64th). Each block may have: 'length_bars', 'subdivision', 'bar_repeats', optional 'transpose' or 'octave_shift', and 'steps' with either 'mask' (e.g., '1010..') or 'indices' [0,2,4]. I will expand these into concrete notes.\n\n"
         f"**IMPORTANT RULES:**\n"
         f'1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with "{" and ending with "}".\n'
         # ... (other rules remain the same)
@@ -819,10 +921,25 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     continue
                 response_data = json.loads(json_payload)
 
+                if isinstance(response_data, dict) and "notes" not in response_data and isinstance(response_data.get("pattern_blocks"), list):
+                    # Accept compact format without explicit notes array
+                    response_data["notes"] = []
                 if not isinstance(response_data, dict) or "notes" not in response_data:
                     raise TypeError("The generated data is not a valid JSON object with a 'notes' key.")
 
                 notes_list = response_data["notes"]
+                # Optional compact pattern support
+                try:
+                    pattern_blocks = response_data.get("pattern_blocks")
+                    if isinstance(pattern_blocks, list):
+                        expanded = _expand_pattern_blocks(pattern_blocks, length, config["time_signature"]["beats_per_bar"])
+                        if expanded:
+                            if isinstance(notes_list, list):
+                                notes_list = notes_list + expanded
+                            else:
+                                notes_list = expanded
+                except Exception:
+                    pass
                 sustain_events = response_data.get("sustain_pedal", []) # Get sustain events or an empty list
 
                 # --- NEW: Check for special silence signal ---
@@ -1369,18 +1486,21 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
             time_offset_beats = context_theme_index_for_offset * theme_length_beats
 
             previous_themes_prompt_part += f"- **{theme_name}**:\n"
-            for track in theme['tracks']:
+            for track in theme.get('tracks', []):
                 # Normalize notes to be relative to the start of their own theme
                 normalized_notes = []
-                for note in track['notes']:
-                    new_note = note.copy()
-                    new_note['start_beat'] = float(new_note['start_beat']) - time_offset_beats
-                    # Clip at 0 to prevent negative start times from floating point errors
-                    new_note['start_beat'] = max(0, round(new_note['start_beat'], 4))
+                for note in track.get('notes', []):
+                    try:
+                        sb = float(note.get('start_beat'))
+                    except Exception:
+                        # Skip malformed notes lacking start_beat
+                        continue
+                    new_note = dict(note)
+                    new_note['start_beat'] = max(0, round(sb - time_offset_beats, 4))
                     normalized_notes.append(new_note)
 
                 notes_as_str = json.dumps(normalized_notes, separators=(',', ':'))
-                previous_themes_prompt_part += f"  - **{track['instrument_name']}** (Role: {track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
+                previous_themes_prompt_part += f"  - **{track.get('instrument_name', 'Unknown Instrument')}** (Role: {track.get('role', 'complementary')}):\n  ```json\n  {notes_as_str}\n  ```\n"
         previous_themes_prompt_part += "\n"
 
     # The final prompt putting it all together
@@ -1420,6 +1540,7 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"5.  **Be Creative:** Compose a high-quality, optimized part that is musically interesting and follows the creative direction.\n"
         f'6.  **Valid JSON Syntax:** The output must be a perfectly valid JSON object.\n'
         f'7.  **Handling Silence:** If the instrument should be completely silent, output this specific JSON object: `{{"notes": []}}`.\n\n'
+        f"Optional compact format for dense rhythms: You may include a 'pattern_blocks' array to represent many fast steps (e.g., 32nd/64th). Each block may have: 'length_bars', 'subdivision', 'bar_repeats', optional 'transpose' or 'octave_shift', and 'steps' with either 'mask' (e.g., '1010..') or 'indices' [0,2,4]. I will expand these into concrete notes.\n\n"
         f"Now, generate the JSON object for the new, optimized version of the **{get_instrument_name(track_to_optimize)}** track for the section '{theme_label}'. The generated part MUST cover the full {length} bars.\n"
     )
     return prompt
@@ -1486,10 +1607,25 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                     print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: Could not extract JSON object for {instrument_name}." + Style.RESET_ALL)
                     continue
                 parsed_data = json.loads(json_payload)
-                
+
+                if isinstance(parsed_data, dict) and "notes" not in parsed_data and isinstance(parsed_data.get("pattern_blocks"), list):
+                    parsed_data["notes"] = []
                 if not isinstance(parsed_data, dict) or "notes" not in parsed_data:
                     raise ValueError("JSON is valid but does not contain the required 'notes' key.")
                 
+                # Optional compact pattern support
+                try:
+                    pattern_blocks = parsed_data.get("pattern_blocks")
+                    if isinstance(pattern_blocks, list):
+                        expanded = _expand_pattern_blocks(pattern_blocks, length, config["time_signature"]["beats_per_bar"])
+                        if expanded:
+                            if isinstance(parsed_data.get("notes"), list):
+                                parsed_data["notes"].extend(expanded)
+                            else:
+                                parsed_data["notes"] = expanded
+                except Exception:
+                    pass
+
                 total_token_count = response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else 0
                 return parsed_data, total_token_count
 
