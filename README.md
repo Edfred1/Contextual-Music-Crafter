@@ -148,6 +148,7 @@ This is the core engine that reads the song plan and generates the final MIDI fi
 
 -   Manually create or edit your `config.yaml` and `song_settings.json` files.
 -   Re-generate a song using existing settings.
+-   Run an optimization pass on a previously generated song.
 -   Resume an interrupted generation.
 
 `song_generator.py` has its own interactive menu for these tasks.
@@ -187,6 +188,17 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 - **Call-and-response mode**: If `use_call_and_response` is `1`, eligible roles (e.g., `bass`, `chords`, `arp`, `guitar`, `lead`, `melody`, `vocal`) will alternate between “call” and “response” to improve interplay.
 
 - **Token usage**: `max_output_tokens` sets the upper bound of model output length per call. Higher values improve completeness but increase cost. The scripts print token usage to help you tune settings.
+
+- **Live model switching (hotkeys)**: While generating or optimizing, you can switch models on the fly (Windows hotkeys):
+  - `1` = gemini-2.5-pro, `2` = gemini-2.5-flash, `3` = custom (prompt for name), `0` = set current as session default
+  - `a` = toggle auto‑escalate: when enabled, if you are on flash and a track repeatedly fails (e.g., JSON errors, empty responses, MAX_TOKENS, or transient 5xx/timeout issues), the script automatically switches to pro after 6 failures and restarts the step.
+  - The hotkey banner shows whether auto‑escalate is [ON]/[OFF]. Switches take effect as soon as the current request finishes; the step restarts with the new model.
+
+- **Quality tip (Pro vs Flash)**:
+  - If you want strong one‑shot results with fewer retries, run with `gemini-2.5-pro` from the start.
+  - If you prefer lower cost, run `gemini-2.5-flash` plus an optimization pass; enable auto‑escalate so that problematic tracks automatically retry with `pro` when needed. This balances cost and reliability.
+
+- **Why the context sometimes shows “Using 4/6 previous themes”**: The generator fits context under an internal character budget (`MAX_CONTEXT_CHARS`). In dynamic mode (`context_window_size: -1`) it includes as many previous parts as fit that budget, so the fraction (e.g., 4/6) is expected and will change if you or future versions adjust this character limit. Set `context_window_size` to a positive number to force a fixed number of previous parts, or to `0` to disable history entirely.
 
 - **Resuming long runs**: The song generator saves progress and supports resuming via its interactive menu. You can also resume directly with:
   ```bash
