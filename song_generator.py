@@ -29,6 +29,7 @@ REQUEST_SET_SESSION_DEFAULT = False
 ABORT_CURRENT_STEP = False        # Soft-abort signal; we discard current result when it returns
 AUTO_ESCALATE_TO_PRO = False      # If True and using flash, auto-switch to pro after N failures per track
 AUTO_ESCALATE_THRESHOLD = 6
+DEFER_CURRENT_TRACK = False       # If True, immediately defer the current track (skip and push to end)
 
 def _hotkey_monitor_loop(config: Dict):
     """Background loop to catch hotkeys continuously while long API calls run."""
@@ -66,6 +67,11 @@ def _hotkey_monitor_loop(config: Dict):
                 elif ch == '0':
                     REQUEST_SET_SESSION_DEFAULT = True
                     print(Fore.CYAN + "\nSession default will be set to current model after restart of step." + Style.RESET_ALL)
+                elif ch == 'd':
+                    # Defer current track
+                    global DEFER_CURRENT_TRACK
+                    DEFER_CURRENT_TRACK = True
+                    print(Fore.MAGENTA + "\nDeferred: current track will be moved to the end of the queue." + Style.RESET_ALL)
             time.sleep(0.05)
     except Exception:
         pass
@@ -230,6 +236,12 @@ def _poll_model_switch(local_model_name: str, config: Dict) -> str:
                 REQUEST_SET_SESSION_DEFAULT = True
                 print(Fore.CYAN + f"Session default will be set to current model after restart of step." + Style.RESET_ALL)
                 return local_model_name
+            if ch == 'd':
+                # Request deferral of current track
+                global DEFER_CURRENT_TRACK
+                DEFER_CURRENT_TRACK = True
+                print(Fore.MAGENTA + "Deferred: current track will be moved to the end of the queue." + Style.RESET_ALL)
+                return local_model_name
     except Exception:
         pass
     return local_model_name
@@ -245,7 +257,7 @@ def print_hotkey_hint(config: Dict, context: str = "") -> None:
         print(
             Style.DIM
             + Fore.CYAN
-            + f"Hotkeys{ctx}: 1=gemini-2.5-pro, 2=gemini-2.5-flash, 3={custom}, 0=set session default, a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails)"
+            + f"Hotkeys{ctx}: 1=gemini-2.5-pro, 2=gemini-2.5-flash, 3={custom}, 0=set session default, a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails), d=defer track"
             + (" [ON]" if 'AUTO_ESCALATE_TO_PRO' in globals() and AUTO_ESCALATE_TO_PRO else " [OFF]")
             + "\n  Note: The switch takes effect right after the current request finishes; the step restarts with the new model."
             + Style.RESET_ALL
@@ -354,6 +366,15 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
     # Validate divisibility
     if window_bars % max(1, theme_length_bars) != 0:
         print(Fore.YELLOW + f"Window {window_bars} bars is not divisible by part length {theme_length_bars}. Skipping." + Style.RESET_ALL)
+        # After all windows are processed, create a combined final song MIDI for this pass
+        try:
+            final_song_data = merge_themes_to_song_data(themes, config, theme_length_bars)
+            base = build_final_song_basename(config, themes, run_timestamp, resumed=True)
+            suffix = f"_win{window_bars}" + ("_seam" if seam_mode else "")
+            final_path = os.path.join(script_dir, f"{base}{suffix}.mid")
+            create_midi_from_json(final_song_data, config, final_path)
+        except Exception:
+            pass
         return themes
     window_parts = window_bars // theme_length_bars
     if window_parts <= 1:
@@ -387,6 +408,20 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
             except Exception:
                 track_resume_index = 0
 
+            # Build window summaries (full descriptions of the parts in this window, lightly capped)
+            window_summaries = []
+            try:
+                for offset in range(actual_parts):
+                    idx = start + offset
+                    if idx < len(themes):
+                        lbl = themes[idx].get('label', f'Part_{idx+1}')
+                        desc = str(themes[idx].get('description', ''))
+                        if len(desc) > 800:
+                            desc = desc[:800] + '...'
+                        window_summaries.append(f"- {lbl}: {desc}")
+            except Exception:
+                pass
+
             for track_idx, base_tr in enumerate(window_theme['tracks']):
                 if track_idx < track_resume_index:
                     continue
@@ -405,6 +440,11 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
                 opt_prompt = user_optimization_prompt or ""
                 if seam_mode and "[SEAM_MODE]" not in opt_prompt:
                     opt_prompt = "[SEAM_MODE] " + opt_prompt
+                # Prepend full window part descriptions to give narrative intent
+                if window_summaries:
+                    opt_prompt = (
+                        "Window context (full descriptions):\n" + "\n".join(window_summaries) + "\n\n" + opt_prompt
+                    )
                 optimized_track, _tokens = generate_optimization_data(
                     config, window_bars, track_to_optimize, role,
                     window_theme['label'], window_theme.get('label', ''),
@@ -427,23 +467,7 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
                 except Exception:
                     pass
 
-                # Export updated parts' MIDIs immediately (optional but useful for monitoring)
-                try:
-                    part_len_beats = theme_length_bars * beats_per_bar
-                    for idx in range(start, end):
-                        theme = themes[idx]
-                        theme_data = {"tracks": theme.get('tracks', [])}
-                        theme_label = theme.get('label', f"Part_{idx+1}")
-                        base_name = generate_filename(config, script_dir, theme_length_bars, theme_label, idx, run_timestamp)
-                        time_offset_for_this_theme = idx * part_len_beats
-                        create_part_midi_from_theme(theme_data, config, base_name, time_offset_for_this_theme, section_length_beats=part_len_beats)
-                        # Ensure filesystem ordering by mod-time (Windows Explorer sorting)
-                        try:
-                            time.sleep(1)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                # (Changed) No immediate per-track MIDI export; MIDIs will be written after the whole window finishes
 
                 # Save per-track resumable progress
                 try:
@@ -471,7 +495,7 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
             except Exception:
                 pass
 
-            # Export MIDI for each updated part in this window
+            # Export MIDI once per part after the entire window is completed (finalized state for this window)
             try:
                 part_len_beats = theme_length_bars * beats_per_bar
                 for idx in range(start, end):
@@ -480,9 +504,8 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
                     # Reuse generation filename logic
                     theme_label = theme.get('label', f"Part_{idx+1}")
                     base_name = generate_filename(config, script_dir, theme_length_bars, theme_label, idx, run_timestamp)
-                    time_offset_for_this_theme = idx * part_len_beats
-                    # Clamp exactly to part length
-                    create_part_midi_from_theme(theme_data, config, base_name, time_offset_for_this_theme, section_length_beats=part_len_beats)
+                    # Notes have been split back to part-relative timing; don't subtract a time offset here
+                    create_part_midi_from_theme(theme_data, config, base_name, time_offset_beats=0, section_length_beats=part_len_beats)
                     # Ensure filesystem ordering by mod-time
                     try:
                         time.sleep(1)
@@ -864,14 +887,19 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     # Context for other tracks *within the current theme*
     context_prompt_part = ""
     if context_tracks:
+        notes_cap = 0
+        try:
+            notes_cap = int(config.get('_notes_context_cap', MAX_NOTES_IN_CONTEXT))
+        except Exception:
+            notes_cap = MAX_NOTES_IN_CONTEXT
         context_prompt_part = "**Inside the current theme, you have already written these parts. Compose a new part that fits with them:**\n"
         for track in context_tracks:
             # Use a more compact representation for context to save tokens and reduce JSON failures
             try:
                 notes = track.get('notes', [])
-                if isinstance(notes, list) and len(notes) > MAX_NOTES_IN_CONTEXT:
-                    head = notes[:MAX_NOTES_IN_CONTEXT//2]
-                    tail = notes[-MAX_NOTES_IN_CONTEXT//2:]
+                if isinstance(notes, list) and len(notes) > max(1, notes_cap):
+                    head = notes[:max(1, notes_cap)//2]
+                    tail = notes[-max(1, notes_cap)//2:]
                     notes = head + tail
             except Exception:
                 notes = track.get('notes', [])
@@ -1192,6 +1220,9 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
     local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
     json_failure_count = 0
     failure_for_escalation_count = 0
+    # MAX_TOKENS phase counters
+    max_tokens_fail_flash = 0
+    max_tokens_fail_pro = 0
     def _escalate_if_needed():
         nonlocal local_model_name, failure_for_escalation_count
         try:
@@ -1202,11 +1233,12 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
             pass
     
     # Reset runtime hotkey guards/state for this step and show hint
-    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP
+    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK
     PROMPTED_CUSTOM_THIS_STEP = False
     REQUESTED_SWITCH_MODEL = None
     REQUEST_SET_SESSION_DEFAULT = False
     ABORT_CURRENT_STEP = False
+    DEFER_CURRENT_TRACK = False
     # Show hotkey hint once before we start attempts
     print_hotkey_hint(config, context=f"Generate: {instrument_name}")
     # Start background hotkey monitor once per process
@@ -1286,7 +1318,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                 # Asynchronous poll for hotkeys while waiting: short slices with checks
                 # We chunk one long call into a loop that polls and bails fast if a switch is requested.
                 # Gemini SDK doesn't expose a non-blocking call; we simulate cooperative checks around the call sites.
-                if ABORT_CURRENT_STEP:
+                if ABORT_CURRENT_STEP or DEFER_CURRENT_TRACK:
                     # Apply requested switch immediately before issuing the call
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
@@ -1297,6 +1329,10 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     if REQUEST_SET_SESSION_DEFAULT:
                         SESSION_MODEL_OVERRIDE = local_model_name
                         REQUEST_SET_SESSION_DEFAULT = False
+                    if DEFER_CURRENT_TRACK:
+                        print(Fore.MAGENTA + "Deferring current track on user request (hotkey 'd')." + Style.RESET_ALL)
+                        DEFER_CURRENT_TRACK = False
+                        return None, 0
                     ABORT_CURRENT_STEP = False
                 response = model.generate_content(
                     effective_prompt,
@@ -1320,8 +1356,23 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     # Also check for safety blocking information
                     if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
                          print(Fore.YELLOW + f"Block Reason: {response.prompt_feedback.block_reason.name}" + Style.RESET_ALL)
-                    # Non-counting errors: MAX_TOKENS
+                    # Non-counting errors: MAX_TOKENS (but tracked for phase/deferral)
                     if str(finish_reason_name).upper().find("MAX_TOKENS") != -1:
+                        if 'flash' in (local_model_name or ''):
+                            max_tokens_fail_flash += 1
+                            if max_tokens_fail_flash >= 6:
+                                if AUTO_ESCALATE_TO_PRO:
+                                    local_model_name = 'gemini-2.5-pro'
+                                    max_tokens_fail_pro = 0
+                                    print(Fore.CYAN + "Auto-escalate after 6 MAX_TOKENS on flash → switching to pro for this track." + Style.RESET_ALL)
+                                else:
+                                    print(Fore.YELLOW + "Deferring this track due to repeated MAX_TOKENS on flash (6 attempts)." + Style.RESET_ALL)
+                                    return None, 0
+                        elif 'pro' in (local_model_name or ''):
+                            max_tokens_fail_pro += 1
+                            if max_tokens_fail_pro >= 6:
+                                print(Fore.YELLOW + "Deferring this track due to repeated MAX_TOKENS on pro (6 attempts)." + Style.RESET_ALL)
+                                return None, 0
                         print(Fore.YELLOW + "Not counting this attempt due to MAX_TOKENS. Retrying..." + Style.RESET_ALL)
                         failure_for_escalation_count += 1
                         _escalate_if_needed()
@@ -1341,13 +1392,17 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
 
                 # 2. Now that we know the response is valid, safely access the text and parse JSON
                 # Check if user requested a switch during generation window
-                if ABORT_CURRENT_STEP:
+                if ABORT_CURRENT_STEP or DEFER_CURRENT_TRACK:
                     # Apply requested switch and restart this attempt cleanly
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
                     if REQUEST_SET_SESSION_DEFAULT:
                         SESSION_MODEL_OVERRIDE = local_model_name
                         REQUEST_SET_SESSION_DEFAULT = False
+                    if DEFER_CURRENT_TRACK:
+                        print(Fore.MAGENTA + "Deferring current track on user request (hotkey 'd')." + Style.RESET_ALL)
+                        DEFER_CURRENT_TRACK = False
+                        return None, 0
                     print(Fore.CYAN + f"Restarting step with model: {local_model_name}" + Style.RESET_ALL)
                     ABORT_CURRENT_STEP = False
                     continue
@@ -1736,7 +1791,7 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
                     print(Fore.CYAN + f"Cumulative optimization tokens so far: {total_optimization_tokens:,}" + Style.RESET_ALL)
 
                 else:
-                    # Track failed: push to deferred queue for this theme
+                    # Track failed (e.g., MAX_TOKENS deferral): push to deferred queue for this theme
                     theme_deferred_tracks.append([track_index, 1])
             # Retry deferred tracks for this theme until success or cap
             round_counter = 0
@@ -1750,9 +1805,22 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
                 role = track_to_optimize.get('role', 'Unknown Role')
                 print(Fore.MAGENTA + f"\nRetry deferred optimization (round {round_counter}): {instrument_name} in theme {theme_index+1}" + Style.RESET_ALL)
                 inner_context = [t for idx, t in enumerate(tracks) if idx != track_index]
+                # Halve historical theme context size each round for optimization as well
+                try:
+                    cws_base = theme_index  # number of previous themes available
+                    cws_override = max(1, cws_base // (2 ** max(0, round_counter-1))) if cws_base > 0 else 0
+                    temp_cfg = json.loads(json.dumps(config))
+                    if cws_override > 0:
+                        temp_cfg["context_window_size"] = cws_override
+                    else:
+                        temp_cfg["context_window_size"] = 0
+                    prev_ctx_decayed = optimized_themes[:theme_index][-cws_override:] if cws_override > 0 else []
+                except Exception:
+                    temp_cfg = config
+                    prev_ctx_decayed = optimized_themes[:theme_index]
                 (optimized_track_data, tokens_used) = generate_optimization_data(
-                    config, theme_length, track_to_optimize, role, theme_to_optimize.get('label', f"Theme {theme_index+1}"),
-                    theme_to_optimize.get('description', ''), optimized_themes[:theme_index], inner_context, theme_index,
+                    temp_cfg, theme_length, track_to_optimize, role, theme_to_optimize.get('label', f"Theme {theme_index+1}"),
+                    theme_to_optimize.get('description', ''), prev_ctx_decayed, inner_context, theme_index,
                     user_optimization_prompt=effective_prompt
                 )
                 total_optimization_tokens += tokens_used
@@ -1849,13 +1917,17 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     # --- Context from tracks WITHIN the CURRENT theme ---
     inner_context_prompt_part = ""
     if inner_context_tracks:
+        try:
+            notes_cap = int(config.get('_notes_context_cap', MAX_NOTES_IN_CONTEXT))
+        except Exception:
+            notes_cap = MAX_NOTES_IN_CONTEXT
         inner_context_prompt_part = "**Context from the Current Song Section:**\nWithin this section, you have already optimized these parts. Make your new part fit perfectly with them.\n"
         for track in inner_context_tracks:
             try:
                 notes = track.get('notes', [])
-                if isinstance(notes, list) and len(notes) > MAX_NOTES_IN_CONTEXT:
-                    head = notes[:MAX_NOTES_IN_CONTEXT//2]
-                    tail = notes[-MAX_NOTES_IN_CONTEXT//2:]
+                if isinstance(notes, list) and len(notes) > max(1, notes_cap):
+                    head = notes[:max(1, notes_cap)//2]
+                    tail = notes[-max(1, notes_cap)//2:]
                     notes = head + tail
             except Exception:
                 notes = track.get('notes', [])
@@ -2043,7 +2115,7 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"{role_instructions}\n"
         f"{drum_map_instructions}"
         f"--- Your Producer's Checklist for Optimization ---\n\n"
-        f"1.  **Seam Awareness:** If this section combines multiple 8-bar segments (e.g., 8→9), evaluate each seam. If the current transition already supports the narrative, keep changes minimal. If it feels unintentionally abrupt, add a small fill/tie; if contrast is intended (drop/break), sharpen it musically.\n\n"
+        f"1.  **Seam Awareness:** If this section combines multiple {length}-bar segments (e.g., boundary between consecutive parts), evaluate each seam. If the transition already supports the narrative, keep changes minimal. If it feels unintentionally abrupt, add a small fill/tie; if contrast is intended (drop/break), sharpen it musically.\n\n"
         f"2.  **Continuity vs. Contrast:** Base the decision on genre, part descriptions, and surrounding context.\n\n"
         f"3.  **Preserve Identity:** Keep motifs/register; avoid full rewrites unless clearly necessary.\n\n"
         f"4.  **Analyze Musical Density:** First, assess the original part. \n"
@@ -2086,12 +2158,15 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
     max_retries = 6
     local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
     json_failure_count = 0
+    max_tokens_fail_flash = 0
+    max_tokens_fail_pro = 0
     # Reset custom prompt guard for this step and show hint
-    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP
+    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK
     PROMPTED_CUSTOM_THIS_STEP = False
     REQUESTED_SWITCH_MODEL = None
     REQUEST_SET_SESSION_DEFAULT = False
     ABORT_CURRENT_STEP = False
+    DEFER_CURRENT_TRACK = False
     # Show hotkey hint before attempts
     print_hotkey_hint(config, context=f"Optimize: {track_to_optimize.get('instrument_name','track')}")
     global HOTKEY_MONITOR_STARTED
@@ -2133,23 +2208,31 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                 if attempt >= 4:
                     effective_prompt = re.sub(r"\*\*\-\-\- Advanced MIDI Automation[\s\S]*?\n\n", "", effective_prompt)
 
-                if ABORT_CURRENT_STEP:
+                if ABORT_CURRENT_STEP or DEFER_CURRENT_TRACK:
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
                         model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
                     if REQUEST_SET_SESSION_DEFAULT:
                         SESSION_MODEL_OVERRIDE = local_model_name
                         REQUEST_SET_SESSION_DEFAULT = False
+                    if DEFER_CURRENT_TRACK:
+                        print(Fore.MAGENTA + "Deferring current optimization track on user request (hotkey 'd')." + Style.RESET_ALL)
+                        DEFER_CURRENT_TRACK = False
+                        return None, 0
                     ABORT_CURRENT_STEP = False
                 response = model.generate_content(effective_prompt, safety_settings=safety_settings, generation_config=generation_config)
                 
                 # Mid-call hotkey: if requested, restart this attempt with new model
-                if ABORT_CURRENT_STEP:
+                if ABORT_CURRENT_STEP or DEFER_CURRENT_TRACK:
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
                     if REQUEST_SET_SESSION_DEFAULT:
                         SESSION_MODEL_OVERRIDE = local_model_name
                         REQUEST_SET_SESSION_DEFAULT = False
+                    if DEFER_CURRENT_TRACK:
+                        print(Fore.MAGENTA + "Deferring current optimization track on user request (hotkey 'd')." + Style.RESET_ALL)
+                        DEFER_CURRENT_TRACK = False
+                        return None, 0
                     print(Fore.CYAN + f"Restarting step with model: {local_model_name}" + Style.RESET_ALL)
                     ABORT_CURRENT_STEP = False
                     continue
@@ -2245,6 +2328,23 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                         time.sleep(wait_time)
                         continue
                 else:
+                    # Detect MAX_TOKENS phase and defer if needed
+                    if "max_tokens" in error_message:
+                        if 'flash' in (local_model_name or ''):
+                            max_tokens_fail_flash += 1
+                            if max_tokens_fail_flash >= 6:
+                                if AUTO_ESCALATE_TO_PRO:
+                                    local_model_name = 'gemini-2.5-pro'
+                                    max_tokens_fail_pro = 0
+                                    print(Fore.CYAN + "Auto-escalate after 6 MAX_TOKENS on flash → switching to pro for this track (optimization)." + Style.RESET_ALL)
+                                else:
+                                    print(Fore.YELLOW + "Deferring this optimization track due to repeated MAX_TOKENS on flash (6 attempts)." + Style.RESET_ALL)
+                                    return None, 0
+                        elif 'pro' in (local_model_name or ''):
+                            max_tokens_fail_pro += 1
+                            if max_tokens_fail_pro >= 6:
+                                print(Fore.YELLOW + "Deferring this optimization track due to repeated MAX_TOKENS on pro (6 attempts)." + Style.RESET_ALL)
+                                return None, 0
                     print(Fore.RED + f"An unexpected error during optimization on attempt {attempt + 1}: {str(e)}" + Style.RESET_ALL)
                     # Offer a quick, non-blocking model switch for JSON parse/content issues
                     if sys.platform == "win32" and any(k in error_message for k in ["json", "expecting", "delimiter", "notes"]):
@@ -2316,7 +2416,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
     return None, 0 # Default exit
 
 # --- AUTOMATION ENHANCEMENT MODE (NEW) ---
-def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict], current_theme_index: int) -> str:
+def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict], current_theme_index: int, enhancement_mode: str = "auto") -> str:
     scale_notes = get_scale_notes(config["root_note"], config["scale_type"])
 
     # Compact original track JSON
@@ -2377,10 +2477,36 @@ def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: 
     use_sus = a.get('use_sustain_pedal', 0) == 1
     allowed_ccs = a.get('allowed_cc_numbers', [])
 
+    # Detect existing automations in the base_track (to allow "improve" vs "add")
+    has_track_pb = bool(base_track.get('track_automations', {}).get('pitch_bend')) if isinstance(base_track.get('track_automations'), dict) else False
+    has_track_cc = bool(base_track.get('track_automations', {}).get('cc')) if isinstance(base_track.get('track_automations'), dict) else False
+    has_sustain = bool(base_track.get('sustain_pedal'))
+    # Note-level detection (counts only for brevity)
+    note_pb_count = 0
+    note_cc_count = 0
+    try:
+        for n in base_track.get('notes', [])[:200]:  # scan up to 200 notes for speed
+            autos = n.get('automations', {}) if isinstance(n, dict) else {}
+            if isinstance(autos, dict):
+                if isinstance(autos.get('pitch_bend'), list) and autos.get('pitch_bend'):
+                    note_pb_count += 1
+                if isinstance(autos.get('cc'), list) and autos.get('cc'):
+                    note_cc_count += 1
+    except Exception:
+        pass
+    has_existing = any([has_track_pb, has_track_cc, has_sustain, note_pb_count > 0, note_cc_count > 0])
+
     # Build automation instructions only for enabled features
     auto_text = ""
     if use_pb or use_cc or use_sus:
-        auto_text += "**--- Automation Goals (Only enabled types) ---**\n"
+        # Mode guidance
+        mode_line = ""
+        if enhancement_mode == 'improve' or (enhancement_mode == 'auto' and has_existing):
+            mode_line = ("Improve and refine existing automation curves. You MAY also add new curves when musically justified. "
+                         "Do not remove useful curves; remove only if they clearly harm the musical intent.\n")
+        elif enhancement_mode == 'add' or (enhancement_mode == 'auto' and not has_existing):
+            mode_line = ("Add new expressive automations. Prefer subtlety and musicality. Ensure proper resets.\n")
+        auto_text += "**--- Automation Goals (Only enabled types) ---**\n" + mode_line
         if use_pb:
             auto_text += ("- **Pitch Bend:** Add expressive slides/vibrato where musical. Range −8192..8191. Always return to 0 after each phrase.\n"
                           "  You may split notes to reflect bends accurately.\n")
@@ -2396,6 +2522,28 @@ def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: 
                       "- Slight length/position tweaks to fit automation phrasing.\n"
                       "- Do NOT rewrite the musical content drastically.\n\n")
 
+    # Existing automation summary (shown if present and enabled)
+    existing_summary_text = ""
+    try:
+        if has_existing:
+            existing_summary_text += "**--- Existing Automation Summary ---**\n"
+            if use_pb and has_track_pb:
+                pb = base_track.get('track_automations', {}).get('pitch_bend', [])
+                existing_summary_text += f"- Track Pitch Bend curves: {len(pb)}\n"
+            if use_cc and has_track_cc:
+                cc = base_track.get('track_automations', {}).get('cc', [])
+                existing_summary_text += f"- Track CC curves: {len(cc)}\n"
+            if use_sus and has_sustain:
+                sus = base_track.get('sustain_pedal', [])
+                existing_summary_text += f"- Sustain pedal events: {len(sus)}\n"
+            if use_pb and note_pb_count:
+                existing_summary_text += f"- Notes with note-level pitch_bend: {note_pb_count}\n"
+            if use_cc and note_cc_count:
+                existing_summary_text += f"- Notes with note-level CC: {note_cc_count}\n"
+            existing_summary_text += "\n"
+    except Exception:
+        pass
+
     prompt = (
         f"You are an expert MIDI musician. Your task is to enhance expression by adding automations to a single track.\n\n"
         f"**--- MUSICAL CONTEXT ---**\n"
@@ -2405,6 +2553,7 @@ def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: 
         f"{inner_context_prompt_part}"
         f"**--- ORIGINAL TRACK ---**\n"
         f"```json\n{original_part_str}\n```\n\n"
+        f"{existing_summary_text}"
         f"**--- YOUR TASK ---**\n"
         f"Enhance the track with expressive automation. Respect the musical intent and keep note edits minimal.\n\n"
         f"{auto_text}"
@@ -2415,14 +2564,15 @@ def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: 
     )
     return prompt
 
-def generate_automation_data(config: Dict, length: int, base_track: Dict, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict], current_theme_index: int) -> Tuple[Dict, int]:
+def generate_automation_data(config: Dict, length: int, base_track: Dict, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict], current_theme_index: int, enhancement_mode: str = "auto") -> Tuple[Dict, int]:
     global CURRENT_KEY_INDEX, SESSION_MODEL_OVERRIDE
     # Reset custom prompt guard for this step and show hint
-    global PROMPTED_CUSTOM_THIS_STEP
+    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK
     PROMPTED_CUSTOM_THIS_STEP = False
     REQUESTED_SWITCH_MODEL = None
     REQUEST_SET_SESSION_DEFAULT = False
     ABORT_CURRENT_STEP = False
+    DEFER_CURRENT_TRACK = False
     # Show hotkey hint before attempts
     print_hotkey_hint(config, context=f"Automation: {get_instrument_name(base_track)}")
     global HOTKEY_MONITOR_STARTED
@@ -2432,7 +2582,7 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
             t.start(); HOTKEY_MONITOR_STARTED = True
         except Exception:
             HOTKEY_MONITOR_STARTED = True
-    prompt = create_automation_prompt(config, length, base_track, role, theme_label, theme_detailed_description, historical_themes_context, inner_context_tracks, current_theme_index)
+    prompt = create_automation_prompt(config, length, base_track, role, theme_label, theme_detailed_description, historical_themes_context, inner_context_tracks, current_theme_index, enhancement_mode=enhancement_mode)
     max_retries = 6
     local_model_name = config["model_name"]
     json_failure_count = 0
@@ -2454,23 +2604,31 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
                 ]
                 effective = prompt + "\nOutput: Return a single JSON object with a 'notes' key only; no prose.\n"
-                if ABORT_CURRENT_STEP:
+                if ABORT_CURRENT_STEP or DEFER_CURRENT_TRACK:
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
                         model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
                     if REQUEST_SET_SESSION_DEFAULT:
                         SESSION_MODEL_OVERRIDE = local_model_name
                         REQUEST_SET_SESSION_DEFAULT = False
+                    if DEFER_CURRENT_TRACK:
+                        print(Fore.MAGENTA + "Deferring current automation track on user request (hotkey 'd')." + Style.RESET_ALL)
+                        DEFER_CURRENT_TRACK = False
+                        return None, 0
                     ABORT_CURRENT_STEP = False
                 response = model.generate_content(effective, safety_settings=safety_settings, generation_config=generation_config)
 
                 # Mid-call hotkey: if requested, restart this attempt with new model
-                if ABORT_CURRENT_STEP:
+                if ABORT_CURRENT_STEP or DEFER_CURRENT_TRACK:
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
                     if REQUEST_SET_SESSION_DEFAULT:
                         SESSION_MODEL_OVERRIDE = local_model_name
                         REQUEST_SET_SESSION_DEFAULT = False
+                    if DEFER_CURRENT_TRACK:
+                        print(Fore.MAGENTA + "Deferring current automation track on user request (hotkey 'd')." + Style.RESET_ALL)
+                        DEFER_CURRENT_TRACK = False
+                        return None, 0
                     print(Fore.CYAN + f"Restarting step with model: {local_model_name}" + Style.RESET_ALL)
                     ABORT_CURRENT_STEP = False
                     continue
@@ -2505,9 +2663,16 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                     "role": role,
                     "notes": data.get("notes", base_track.get("notes", []))
                 }
+                # Sustain: replace if provided, else keep existing
                 if "sustain_pedal" in data:
                     merged["sustain_pedal"] = data.get("sustain_pedal", [])
-                track_autos = data.get("track_automations", {})
+                elif base_track.get("sustain_pedal"):
+                    merged["sustain_pedal"] = base_track.get("sustain_pedal", [])
+
+                # Track-level automations: if new provided, use them; otherwise keep existing
+                track_autos = data.get("track_automations", {}) or {}
+                if not track_autos and isinstance(base_track.get("track_automations"), dict):
+                    track_autos = base_track.get("track_automations", {})
                 if track_autos:
                     merged["track_automations"] = track_autos
                 return merged, getattr(response.usage_metadata, 'total_token_count', 0)
@@ -2526,7 +2691,7 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                 base = 3; wait = min(30, base * (2 ** attempt) + random.uniform(0,1.5)); time.sleep(wait); break
     return None, 0
 
-def create_automation_enhancement(config: Dict, theme_length: int, themes_to_enhance: List[Dict], script_dir: str, run_timestamp: str, user_prompt: str = "") -> List[Dict]:
+def create_automation_enhancement(config: Dict, theme_length: int, themes_to_enhance: List[Dict], script_dir: str, run_timestamp: str, user_prompt: str = "", enhancement_mode: str = "auto") -> List[Dict]:
     # Guard: if all automation flags disabled, warn
     a = config.get('automation_settings', {})
     if a.get('use_pitch_bend',0)==0 and a.get('use_cc_automation',0)==0 and a.get('use_sustain_pedal',0)==0:
@@ -2544,9 +2709,31 @@ def create_automation_enhancement(config: Dict, theme_length: int, themes_to_enh
                     continue
                 print(Fore.BLUE + f"Enhancing automations on {name} (Role: {role})" + Style.RESET_ALL)
                 other = [t for i,t in enumerate(inner_context) if i!=track_index]
-                new_track, _tok = generate_automation_data(config, theme_length, track, role, theme.get('label',''), theme.get('description',''), historical_context, other, theme_index)
+                new_track, _tok = generate_automation_data(config, theme_length, track, role, theme.get('label',''), theme.get('description',''), historical_context, other, theme_index, enhancement_mode=enhancement_mode)
                 if new_track:
                     theme['tracks'][track_index] = new_track
+                # Save resumable progress after each track
+                try:
+                    save_progress({
+                        'type': 'automation_enhancement',
+                        'config': config,
+                        'theme_length': theme_length,
+                        'themes': optimized,
+                        'current_theme_index': theme_index,
+                        'current_track_index': track_index + 1,
+                        'user_optimization_prompt': user_prompt,
+                        'timestamp': run_timestamp
+                    }, script_dir, run_timestamp)
+                except Exception:
+                    pass
+        # After enhancement, write a combined final MIDI for this pass
+        try:
+            final_song_data = merge_themes_to_song_data(optimized, config, theme_length)
+            base = build_final_song_basename(config, optimized, run_timestamp, resumed=True)
+            final_path = os.path.join(script_dir, f"{base}_automation.mid")
+            create_midi_from_json(final_song_data, config, final_path)
+        except Exception:
+            pass
         return optimized
     except Exception as e:
         print(Fore.RED + f"Automation enhancement failed: {e}" + Style.RESET_ALL)
@@ -3321,6 +3508,25 @@ def handle_resume(resume_file_path, script_dir):
                 print(Fore.RED + "Resumed windowed optimization did not produce themes." + Style.RESET_ALL)
         except Exception as e:
             print(Fore.RED + f"Windowed resume failed: {e}" + Style.RESET_ALL)
+    elif 'automation_enhancement' in progress_data.get('type', ''):
+        print_header("Resume Automation Enhancement")
+        try:
+            theme_len = int(progress_data.get('theme_length', DEFAULT_LENGTH))
+            themes_to_use = progress_data.get('themes', [])
+            if not themes_to_use:
+                print(Fore.RED + "No themes stored in progress. Cannot resume automation enhancement." + Style.RESET_ALL)
+                return None, None, None, None
+            print(Fore.CYAN + f"Resuming automation enhancement at theme {progress_data.get('current_theme_index',0)+1}, track {progress_data.get('current_track_index',0)+1}." + Style.RESET_ALL)
+            resumed = create_automation_enhancement(config, theme_len, themes_to_use, script_dir, run_timestamp, progress_data.get('user_optimization_prompt',''))
+            if resumed:
+                save_final_artifact(config, resumed, theme_len, progress_data.get('theme_definitions', []), script_dir, run_timestamp)
+                settings = {'length': theme_len, 'theme_definitions': progress_data.get('theme_definitions', [])}
+                final_base = build_final_song_basename(config, resumed, run_timestamp, resumed=True)
+                return resumed, merge_themes_to_song_data(resumed, config, theme_len), final_base, settings
+            else:
+                print(Fore.RED + "Resumed automation enhancement did not produce themes." + Style.RESET_ALL)
+        except Exception as e:
+            print(Fore.RED + f"Automation enhancement resume failed: {e}" + Style.RESET_ALL)
     elif 'optimization' in progress_data.get('type', ''):
         print_header("Resume Optimization")
         # Backward/compatibility: some files may miss 'themes_to_optimize' (e.g., windowed schema)
@@ -3686,29 +3892,76 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
             elif action == 'advanced_opt':
                 print_header("Advanced Optimization Options")
                 artifacts = find_final_artifacts(script_dir)
-                if artifacts:
-                    print("Use latest artifact as base. Alternatively, optimize last in-session song if available.")
-                base_themes = last_generated_themes
-                base_defs = previous_settings.get('theme_definitions', []) if previous_settings else []
-                if not base_themes and artifacts:
-                    artifact = load_final_artifact(artifacts[0])
+                print("Select the base song: last in-session result or choose from saved artifacts.")
+
+                base_themes = None
+                base_defs = []
+                theme_len = None
+
+                if last_generated_themes and artifacts:
+                    print("  Base options: 1) In-session song  2) Choose artifact")
+                    bc = input(f"{Fore.GREEN}Choose base [1/2, default 1]: {Style.RESET_ALL}").strip()
+                    if bc == '2':
+                        # List artifacts and let the user choose one
+                        for i, ap in enumerate(artifacts[:10]):
+                            print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {summarize_artifact(ap)}")
+                        try:
+                            sel = input(f"{Fore.GREEN}Choose artifact (1-{min(10,len(artifacts))}): {Style.RESET_ALL}").strip()
+                            idx = int(sel) - 1
+                        except Exception:
+                            idx = 0
+                        if not (0 <= idx < len(artifacts[:10])):
+                            idx = 0
+                        artifact = load_final_artifact(artifacts[idx])
+                        if artifact:
+                            base_themes = artifact.get('themes', [])
+                            base_defs = artifact.get('theme_definitions', [])
+                            theme_len = int(artifact.get('length', previous_settings.get('length', DEFAULT_LENGTH) if previous_settings else DEFAULT_LENGTH))
+                    else:
+                        base_themes = last_generated_themes
+                        base_defs = previous_settings.get('theme_definitions', []) if previous_settings else []
+                        theme_len = previous_settings.get('length', DEFAULT_LENGTH) if previous_settings else DEFAULT_LENGTH
+                elif last_generated_themes:
+                    # Only in-session available
+                    base_themes = last_generated_themes
+                    base_defs = previous_settings.get('theme_definitions', []) if previous_settings else []
+                    theme_len = previous_settings.get('length', DEFAULT_LENGTH) if previous_settings else DEFAULT_LENGTH
+                elif artifacts:
+                    # Only artifacts available: force selection
+                    print("No in-session song available. Choose an artifact:")
+                    for i, ap in enumerate(artifacts[:10]):
+                        print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {summarize_artifact(ap)}")
+                    try:
+                        sel = input(f"{Fore.GREEN}Choose artifact (1-{min(10,len(artifacts))}): {Style.RESET_ALL}").strip()
+                        idx = int(sel) - 1
+                    except Exception:
+                        idx = 0
+                    if not (0 <= idx < len(artifacts[:10])):
+                        idx = 0
+                    artifact = load_final_artifact(artifacts[idx])
                     if artifact:
                         base_themes = artifact.get('themes', [])
                         base_defs = artifact.get('theme_definitions', [])
+                        theme_len = int(artifact.get('length', previous_settings.get('length', DEFAULT_LENGTH) if previous_settings else DEFAULT_LENGTH))
+
                 if not base_themes:
                     print(Fore.YELLOW + "No song available to optimize." + Style.RESET_ALL)
                     continue
+
                 run_timestamp = time.strftime("%Y%m%d-%H%M%S")
-                user_opt_prompt = input(f"{Fore.CYAN}\nOptional prompt for windowed passes (or Enter):\n> {Style.RESET_ALL}").strip()
-                theme_len = previous_settings.get('length', DEFAULT_LENGTH) if previous_settings else DEFAULT_LENGTH
+                if theme_len is None:
+                    theme_len = previous_settings.get('length', DEFAULT_LENGTH) if previous_settings else DEFAULT_LENGTH
                 # Work on a deep copy to avoid accidental shared references
                 themes_copy = json.loads(json.dumps(base_themes))
                 # Interactive loop: choose which advanced optimization to run
                 while True:
                     print(f"\n{Fore.GREEN}Choose an advanced optimization:{Style.RESET_ALL}")
                     print("  1) 16-bar Window Optimization")
+                    print("     - Optimizes across 2 consecutive parts (if part length is 8 bars); focuses on longer phrases.")
                     print("  2) 32-bar Window Optimization")
-                    print("  3) Seam-aware Window Optimization (bridging)")
+                    print("     - Optimizes across 4 consecutive parts; stronger macro‑phrasing with higher context.")
+                    print("  3) Automation Enhancement")
+                    print("     - Adds expressive Pitch Bend/CC/Sustain (as enabled in config). Minimal note edits allowed.")
                     print("  4) Done")
                     choice = input(f"{Fore.GREEN}> {Style.RESET_ALL}").strip()
                     if choice in ['', '4', 'q', 'Q']:
@@ -3716,31 +3969,75 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     if choice not in ['1', '2', '3', '16', '32']:
                         print(Fore.YELLOW + "Invalid choice." + Style.RESET_ALL)
                         continue
-                    seam_mode = (choice == '3')
-                    window_bars = 16 if choice in ['1', '16', '3'] else 32
+                    if choice == '3':
+                        # Automation Enhancement flow
+                        user_prompt = input(f"{Fore.CYAN}\nOptional prompt for Automation Enhancement (or Enter):\n> {Style.RESET_ALL}").strip()
+                        # Mode selection: auto/improve/add
+                        print("Choose mode: 1) Auto-detect  2) Improve existing (may add)  3) Add new")
+                        mode_in = input(f"{Fore.GREEN}Mode [1/2/3, default 1]: {Style.RESET_ALL}").strip()
+                        mode_map = {'1': 'auto', '2': 'improve', '3': 'add'}
+                        enh_mode = mode_map.get(mode_in, 'auto')
+                        themes_copy = create_automation_enhancement(config, theme_len, themes_copy, script_dir, run_timestamp, user_prompt, enhancement_mode=enh_mode)
+                        save_final_artifact(config, themes_copy, theme_len, base_defs, script_dir, run_timestamp)
+                        print(Fore.GREEN + "Automation enhancement pass done. Artifact saved." + Style.RESET_ALL)
+                        continue
 
-                    # Resume support: detect progress for this window size
+                    # Windowed optimization flow (16/32 bars)
+                    window_bars = 16 if choice in ['1', '16'] else 32
+
+                    # Ask for an optional prompt now with tailored hint
+                    prompt_hint = ("32-bar window" if window_bars == 32 else "16-bar window")
+                    user_opt_prompt = input(f"{Fore.CYAN}\nOptional prompt for {prompt_hint} (or Enter):\n> {Style.RESET_ALL}").strip()
+
+                    # Resume support: detect progress for this window size and match current song
                     resume_files = find_progress_files(script_dir)
                     resume_start_index = 0
                     found_progress = False
-                    for rf in resume_files:
-                        pdata = load_progress(rf)
-                        if pdata and pdata.get('type') == 'window_optimization' and pdata.get('window_bars') == window_bars:
+                    matched_progress = None
+                    try:
+                        base_labels = [t.get('label') for t in themes_copy]
+                        base_parts = len(base_labels)
+                        base_cfg = { 'genre': config.get('genre'), 'bpm': config.get('bpm'), 'key_scale': config.get('key_scale') }
+                        for rf in resume_files:
+                            pdata = _load_progress_silent(rf)
+                            if not pdata: continue
+                            if pdata.get('type') != 'window_optimization': continue
+                            if pdata.get('window_bars') != window_bars: continue
+                            pthemes = pdata.get('themes', [])
+                            plabels = [t.get('label') for t in pthemes]
+                            pcfg = pdata.get('config', {})
+                            same_song = (len(plabels) == base_parts and plabels == base_labels and 
+                                         str(pcfg.get('genre')) == str(base_cfg['genre']) and 
+                                         str(pcfg.get('bpm')) == str(base_cfg['bpm']) and 
+                                         str(pcfg.get('key_scale')) == str(base_cfg['key_scale']))
+                            if same_song:
+                                matched_progress = pdata
+                                break
+                        if matched_progress:
                             try:
-                                resume_start_index = int(pdata.get('current_window_start_index', 0))
+                                resume_start_index = int(matched_progress.get('current_window_start_index', 0))
                             except Exception:
                                 resume_start_index = 0
-                            found_progress = True
-                            break
+                            ts = matched_progress.get('timestamp', 'unknown time')
+                            print(Fore.CYAN + f"Resume available for this window (start part index {resume_start_index+1}, saved {ts})." + Style.RESET_ALL)
+                            ans = input(f"{Fore.GREEN}Resume from there (r) or start from part 1 (s)? [s]: {Style.RESET_ALL}").strip().lower()
+                            if ans == 'r':
+                                found_progress = True
+                            else:
+                                resume_start_index = 0
+                                found_progress = False
+                    except Exception:
+                        resume_start_index = 0
+                        found_progress = False
 
                     themes_copy = create_windowed_optimization(
                         config, themes_copy, theme_len, window_bars, script_dir, run_timestamp,
-                        user_optimization_prompt=user_opt_prompt, resume_start_index=resume_start_index if found_progress else 0, seam_mode=seam_mode
+                        user_optimization_prompt=user_opt_prompt, resume_start_index=resume_start_index if found_progress else 0
                     )
 
                     # Save result as artifact after each pass
                     save_final_artifact(config, themes_copy, theme_len, base_defs, script_dir, run_timestamp)
-                    label = "Seam-aware" if seam_mode else f"{window_bars}-bar Window"
+                    label = f"{window_bars}-bar Window"
                     print(Fore.GREEN + f"{label} optimization pass done. Artifact saved." + Style.RESET_ALL)
             
             else:
@@ -4022,6 +4319,7 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
             CALL_AND_RESPONSE_ROLES = {'bass', 'chords', 'arp', 'guitar', 'lead', 'melody', 'vocal'}
             
             deferred_queue = []  # list of track indices to retry after first pass
+            global DEFER_CURRENT_TRACK
             for j in range(track_start_index_for_this_theme, len(config["instruments"])):
                 instrument = config["instruments"][j]
                 instrument_name, program_num, role = instrument["name"], instrument["program_num"], instrument.get("role", "complementary")
@@ -4062,6 +4360,12 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
                     }
                     save_progress(progress_data, script_dir, timestamp)
                 else:
+                    # If was user-deferred, we push it to queue explicitly
+                    if DEFER_CURRENT_TRACK:
+                        print(Fore.MAGENTA + f"Track '{instrument_name}' deferred; will retry after other tracks." + Style.RESET_ALL)
+                        DEFER_CURRENT_TRACK = False
+                        deferred_queue.append(j)
+                        continue
                     print(Fore.YELLOW + f"Deferring track '{instrument_name}' for later retry within this theme." + Style.RESET_ALL)
                     deferred_queue.append(j)
 
@@ -4073,10 +4377,23 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
                 instrument = config["instruments"][j]
                 instrument_name, program_num, role = instrument["name"], instrument["program_num"], instrument.get("role", "complementary")
                 print(Fore.MAGENTA + f"\nRetry deferred track (round {rounds}): {instrument_name}" + Style.RESET_ALL)
+                # Halve historical theme context size each round (do not change notes cap)
+                try:
+                    cws_base = i  # number of previous themes available
+                    cws_override = max(1, cws_base // (2 ** max(0, rounds-1))) if cws_base > 0 else 0
+                    temp_cfg = json.loads(json.dumps(config))
+                    if cws_override > 0:
+                        temp_cfg["context_window_size"] = cws_override
+                    else:
+                        temp_cfg["context_window_size"] = 0
+                    prev_ctx_decayed = get_context_for_theme(all_themes_data, i, temp_cfg)
+                except Exception:
+                    prev_ctx_decayed = previous_themes_context
+                    temp_cfg = config
                 track_data, tokens_used = generate_instrument_track_data(
-                    config, length, instrument_name, program_num,
+                    temp_cfg, length, instrument_name, program_num,
                     context_tracks_for_current_theme, role, j, len(config['instruments']), dialogue_role,
-                    theme_def['label'], theme_def['description'], previous_themes_context,
+                    theme_def['label'], theme_def['description'], prev_ctx_decayed,
                     current_theme_index=i
                 )
                 if track_data:
@@ -4370,6 +4687,14 @@ def load_progress(progress_path: str) -> Dict:
         return data
     except Exception as e:
         print(Fore.RED + f"Failed to load progress: {e}" + Style.RESET_ALL)
+        return None
+
+def _load_progress_silent(progress_path: str) -> Dict:
+    """Loads progress JSON without printing (used for scanning)."""
+    try:
+        with open(progress_path, 'r') as f:
+            return json.load(f)
+    except Exception:
         return None
 
 def save_final_artifact(config: Dict, generated_themes: List[Dict], length_bars: int, theme_definitions: List[Dict], script_dir: str, run_timestamp: str) -> str:
