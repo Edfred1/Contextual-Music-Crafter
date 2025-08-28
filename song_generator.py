@@ -38,21 +38,38 @@ def _hotkey_monitor_loop(config: Dict):
     global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP
     try:
         while True:
+            # Allow disabling hotkeys via config
+            if not config.get('enable_hotkeys', 1):
+                time.sleep(0.2)
+                continue
             if sys.platform == "win32" and msvcrt.kbhit():
-                ch = msvcrt.getch().decode().lower()
+                ch = msvcrt.getch().decode(errors='ignore').lower()
+                now = time.time()
                 if ch == '1':
+                    if now - _LAST_HOTKEY_TS.get('1', 0.0) < HOTKEY_DEBOUNCE_SEC:
+                        continue
+                    _LAST_HOTKEY_TS['1'] = now
                     REQUESTED_SWITCH_MODEL = 'gemini-2.5-pro'; ABORT_CURRENT_STEP = True
                     print(Fore.YELLOW + "\nModel switch requested: gemini-2.5-pro (will restart current step)" + Style.RESET_ALL)
                 elif ch == '2':
+                    if now - _LAST_HOTKEY_TS.get('2', 0.0) < HOTKEY_DEBOUNCE_SEC:
+                        continue
+                    _LAST_HOTKEY_TS['2'] = now
                     REQUESTED_SWITCH_MODEL = 'gemini-2.5-flash'; ABORT_CURRENT_STEP = True
                     print(Fore.YELLOW + "\nModel switch requested: gemini-2.5-flash (will restart current step)" + Style.RESET_ALL)
                 elif ch == 'a':
                     # Toggle auto-escalate mode
+                    if now - _LAST_HOTKEY_TS.get('a', 0.0) < HOTKEY_DEBOUNCE_SEC:
+                        continue
+                    _LAST_HOTKEY_TS['a'] = now
                     global AUTO_ESCALATE_TO_PRO
                     AUTO_ESCALATE_TO_PRO = not AUTO_ESCALATE_TO_PRO
                     state = 'ON' if AUTO_ESCALATE_TO_PRO else 'OFF'
                     print(Fore.CYAN + f"\nAuto-escalate to pro after {AUTO_ESCALATE_THRESHOLD} failures: {state}" + Style.RESET_ALL)
                 elif ch == '3':
+                    if now - _LAST_HOTKEY_TS.get('3', 0.0) < HOTKEY_DEBOUNCE_SEC:
+                        continue
+                    _LAST_HOTKEY_TS['3'] = now
                     if not PROMPTED_CUSTOM_THIS_STEP:
                         PROMPTED_CUSTOM_THIS_STEP = True
                         suggestion = config.get('custom_model_name') or ''
@@ -67,9 +84,15 @@ def _hotkey_monitor_loop(config: Dict):
                             REQUESTED_SWITCH_MODEL = custom; ABORT_CURRENT_STEP = True
                             print(Fore.YELLOW + f"\nModel switch requested: {custom} (will restart current step)" + Style.RESET_ALL)
                 elif ch == '0':
+                    if now - _LAST_HOTKEY_TS.get('0', 0.0) < HOTKEY_DEBOUNCE_SEC:
+                        continue
+                    _LAST_HOTKEY_TS['0'] = now
                     REQUEST_SET_SESSION_DEFAULT = True
                     print(Fore.CYAN + "\nSession default will be set to current model after restart of step." + Style.RESET_ALL)
                 elif ch == 'd':
+                    if now - _LAST_HOTKEY_TS.get('d', 0.0) < HOTKEY_DEBOUNCE_SEC:
+                        continue
+                    _LAST_HOTKEY_TS['d'] = now
                     # Defer current track
                     global DEFER_CURRENT_TRACK
                     DEFER_CURRENT_TRACK = True
