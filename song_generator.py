@@ -30,6 +30,8 @@ ABORT_CURRENT_STEP = False        # Soft-abort signal; we discard current result
 AUTO_ESCALATE_TO_PRO = False      # If True and using flash, auto-switch to pro after N failures per track
 AUTO_ESCALATE_THRESHOLD = 6
 DEFER_CURRENT_TRACK = False       # If True, immediately defer the current track (skip and push to end)
+HOTKEY_DEBOUNCE_SEC = 0.8         # Debounce window for hotkeys
+_LAST_HOTKEY_TS = {'1': 0.0, '2': 0.0, '3': 0.0, '0': 0.0, 'a': 0.0, 'd': 0.0}
 
 def _hotkey_monitor_loop(config: Dict):
     """Background loop to catch hotkeys continuously while long API calls run."""
@@ -254,16 +256,81 @@ def print_hotkey_hint(config: Dict, context: str = "") -> None:
             return
         custom = config.get('custom_model_name') or 'custom'
         ctx = f" [{context}]" if context else ""
+        escalate_state = " [ON]" if ('AUTO_ESCALATE_TO_PRO' in globals() and AUTO_ESCALATE_TO_PRO) else " [OFF]"
         print(
             Style.DIM
             + Fore.CYAN
-            + f"Hotkeys{ctx}: 1=gemini-2.5-pro, 2=gemini-2.5-flash, 3={custom}, 0=set session default, a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails), d=defer track"
-            + (" [ON]" if 'AUTO_ESCALATE_TO_PRO' in globals() and AUTO_ESCALATE_TO_PRO else " [OFF]")
-            + "\n  Note: The switch takes effect right after the current request finishes; the step restarts with the new model."
+            + (
+                f"Hotkeys{ctx}: 1=gemini-2.5-pro, 2=gemini-2.5-flash, 3={custom}, 0=set session default, "
+                f"a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails{escalate_state}), d=defer track"
+            )
+            + "\n  Note: Changes take effect immediately after the current request or backoff is interrupted."
             + Style.RESET_ALL
         )
     except Exception:
         pass
+
+# --- Interruptible backoff (hotkey-aware) ---
+def _interruptible_backoff(wait_time: float, config: Dict, context_label: str = "") -> None:
+    """Sleeps up to wait_time seconds but polls for hotkeys to interrupt immediately.
+    If user presses 1/2/3/0: set model switch/session default and abort current step.
+    If 'd': defer current track.
+    If 'a': toggle auto-escalate.
+    """
+    try:
+        end_t = time.time() + max(0.0, wait_time)
+        if sys.platform != "win32":
+            # Non-Windows: simple sleep
+            time.sleep(max(0.0, wait_time))
+            return
+        print(Fore.CYAN + (f"Waiting {wait_time:.1f}s" + (f" [{context_label}]" if context_label else "") + 
+              "; press 1/2/3/0 to switch model, 'd' to defer, 'a' to toggle auto-escalate...") + Style.RESET_ALL)
+        while time.time() < end_t:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch().decode(errors='ignore').lower()
+                now = time.time()
+                if ch in _LAST_HOTKEY_TS and now - _LAST_HOTKEY_TS.get(ch, 0.0) < HOTKEY_DEBOUNCE_SEC:
+                    continue
+                if ch == '1':
+                    _LAST_HOTKEY_TS['1'] = now
+                    globals()['REQUESTED_SWITCH_MODEL'] = 'gemini-2.5-pro'
+                    globals()['ABORT_CURRENT_STEP'] = True
+                    print(Fore.YELLOW + "Model switch requested: gemini-2.5-pro (will restart current step)" + Style.RESET_ALL)
+                    return
+                if ch == '2':
+                    _LAST_HOTKEY_TS['2'] = now
+                    globals()['REQUESTED_SWITCH_MODEL'] = 'gemini-2.5-flash'
+                    globals()['ABORT_CURRENT_STEP'] = True
+                    print(Fore.YELLOW + "Model switch requested: gemini-2.5-flash (will restart current step)" + Style.RESET_ALL)
+                    return
+                if ch == '3':
+                    _LAST_HOTKEY_TS['3'] = now
+                    # Use saved custom model if present; no prompt during backoff
+                    custom = config.get('custom_model_name')
+                    if custom:
+                        globals()['REQUESTED_SWITCH_MODEL'] = custom
+                        globals()['ABORT_CURRENT_STEP'] = True
+                        print(Fore.YELLOW + f"Model switch requested: {custom} (will restart current step)" + Style.RESET_ALL)
+                        return
+                if ch == '0':
+                    _LAST_HOTKEY_TS['0'] = now
+                    globals()['REQUEST_SET_SESSION_DEFAULT'] = True
+                    print(Fore.CYAN + "Session default will be set to current model after restart of step." + Style.RESET_ALL)
+                    return
+                if ch == 'd':
+                    _LAST_HOTKEY_TS['d'] = now
+                    globals()['DEFER_CURRENT_TRACK'] = True
+                    print(Fore.MAGENTA + "Deferred: current track will be moved to the end of the queue." + Style.RESET_ALL)
+                    return
+                if ch == 'a':
+                    _LAST_HOTKEY_TS['a'] = now
+                    globals()['AUTO_ESCALATE_TO_PRO'] = not globals().get('AUTO_ESCALATE_TO_PRO', False)
+                    state = 'ON' if globals().get('AUTO_ESCALATE_TO_PRO', False) else 'OFF'
+                    print(Fore.CYAN + f"Auto-escalate to pro after {AUTO_ESCALATE_THRESHOLD} failures: {state}" + Style.RESET_ALL)
+            time.sleep(0.2)
+    except Exception:
+        # Fallback to plain sleep on any error
+        time.sleep(max(0.0, wait_time))
 
 # --- Windowed Optimization Helpers (beta) ---
 def _build_window_from_themes(themes: List[Dict], start_index: int, num_themes_in_window: int, theme_length_bars: int, beats_per_bar: int) -> Dict:
@@ -931,9 +998,29 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         )
         timing_rule = f"5.  **Timing is Absolute:** 'start_beat' is the absolute position from the beginning of the *entire song composition so far*.\n"
 
-    # Dialogue instructions
+    # Dialogue instructions (Call & Response)
     call_and_response_instructions = ""
-    # ... (call and response logic remains the same)
+    try:
+        if str(dialogue_role).lower() == 'call':
+            call_and_response_instructions = (
+                "**Call & Response (this track is the CALL):**\n"
+                "- Introduce a clear 1–2 bar motif.\n"
+                "- Leave air afterwards (rests) to invite a response.\n"
+                "- Avoid always starting phrases exactly on beat 1; try upbeat or beat 2/4 entries.\n"
+                "- Keep the final 0.5–1 bar simpler to make room for the response.\n\n"
+            )
+        elif str(dialogue_role).lower() == 'response':
+            call_and_response_instructions = (
+                "**Call & Response (this track is the RESPONSE):**\n"
+                "- Enter on off‑beats or slightly after the call; do not start on the exact same beat as the call.\n"
+                "- Reference the last 2–4 notes of the call (rhythm or contour), but avoid unison and avoid the same register within ±2 semitones.\n"
+                "- Complement rhythmically/harmonically; do not cover the call at the same time.\n"
+                "- Keep density slightly lower than the call unless a lift is required.\n\n"
+            )
+        else:
+            call_and_response_instructions = ""
+    except Exception:
+        call_and_response_instructions = ""
 
     # --- NEW: Define Polyphony and Key Rules ---
     POLYPHONIC_ROLES = {"harmony", "chords", "pads", "atmosphere", "texture", "guitar"}
@@ -958,7 +1045,18 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         drum_map_instructions = (
             "**Drum Map Guidance (Addictive Drums 2 Standard):**\n"
             "You MUST use the following MIDI notes for the corresponding drum sounds.\n"
-            # ... (drum map remains the same)
+            "- **Kick:** MIDI Note 36\n"
+            "- **Snare (Center Hit):** MIDI Note 38\n"
+            "- **Snare (Rimshot):** MIDI Note 40\n"
+            "- **Hi-Hat (Closed):** MIDI Note 42\n"
+            "- **Hi-Hat (Pedal Close):** MIDI Note 44\n"
+            "- **Hi-Hat (Open):** MIDI Note 46\n"
+            "- **Crash Cymbal 1:** MIDI Note 49\n"
+            "- **Ride Cymbal 1:** MIDI Note 51\n"
+            "- **High Tom:** MIDI Note 50\n"
+            "- **Mid Tom:** MIDI Note 48\n"
+            "- **Low Tom:** MIDI Note 45\n"
+            "Velocity guidance: ghost snare < 45; closed HH vary 40–90; crash ≥ 100.\n\n"
         )
     
     # Polyphony and Key rules
@@ -1089,7 +1187,7 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         f"{role_instructions}\n\n"
         f"{automation_instructions}"
         f"**--- UNIVERSAL PRINCIPLES OF GOOD MUSIC ---**\n"
-        # ... (universal principles remain the same)
+        f"1. Reprise & Transform: Reprise the main motif in key parts with transformation (inversion, octave shift, rhythm augmentation).\n"
         f"**--- OUTPUT FORMAT: JSON ---**\n"
         f"Generate the musical data as a single, valid JSON object with a top-level key \"notes\". The \"notes\" array contains note objects with these keys:\n"
         f'- **"pitch"**: MIDI note number (integer 0-127).\n'
@@ -1097,7 +1195,7 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         f'- **"duration_beats"**: The note\'s length in beats (float).\n'
         f'- **"velocity"**: MIDI velocity (integer 1-127).\n'
         f'- **"automations"**: (Optional) An object containing automation data for this note.\n\n'
-        f"Optional compact format for dense rhythms: You may include a 'pattern_blocks' array to represent many fast steps (e.g., 32nd/64th). Each block may have: 'length_bars', 'subdivision', 'bar_repeats', optional 'transpose' or 'octave_shift', and 'steps' with either 'mask' (e.g., '1010..') or 'indices' [0,2,4]. I will expand these into concrete notes.\n\n"
+        f"Optional compact format for dense rhythms: You may include a 'pattern_blocks' array to represent many fast steps (e.g., 32nd/64th). Each block may have: 'length_bars', 'subdivision', 'bar_repeats', optional 'transpose' or 'octave_shift', and 'steps' with either 'mask' (e.g., '1010..') or 'indices' [0,2,4]. Ensure that expanded notes do not exceed the section length.\n\n"
         f"**IMPORTANT RULES:**\n"
         f'1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with "{" and ending with "}".\n'
         # ... (other rules remain the same)
@@ -1190,19 +1288,22 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         f"5.  **Ensemble Playing:** Think like a member of a band. Your performance must complement the other parts. Pay attention to the phrasing of other instruments and find pockets of space to add your musical statement without cluttering the arrangement.\n"
         f"6.  **Micro-timing for Groove:** To add a human feel, you can subtly shift notes off the strict grid. Slightly anticipating a beat (pushing) can add urgency, while slightly delaying it (pulling) can create a more relaxed feel. This is especially effective for non-kick/snare elements.\n\n"
         f"**--- OUTPUT FORMAT: JSON ---**\n"
-        f"Generate the musical data as a single, valid JSON object. This object MUST have a key named \"notes\" which contains an array of note objects. Each note object MUST have these keys:\n"
+        f"Generate the musical data as a single, valid JSON object with ONLY these top-level keys: `notes` (required), `track_automations` (optional), `sustain_pedal` (optional), `pattern_blocks` (optional). No other top-level keys. No prose, no markdown.\n\n"
+        f"Each note object MUST have these keys:\n"
         f'- **"pitch"**: MIDI note number (integer 0-127).\n'
         f'- **"start_beat"**: The beat on which the note begins (float).\n'
         f'- **"duration_beats"**: The note\'s length in beats (float).\n'
         f'- **"velocity"**: MIDI velocity (integer 1-127).\n'
         f'- **"automations"**: (Optional) An object containing automation data for this note.\n\n'
         f"**IMPORTANT RULES:**\n"
-        f'1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with `{{` and ending with `}}`.\n'
+        f'1.  **JSON OBJECT ONLY:** The entire response MUST be only the raw JSON object (no markdown, no commentary).\n'
         f"{polyphony_rule}\n"
         f"{stay_in_key_rule}"
         f"{timing_rule}"
         f'5.  **Valid JSON Syntax:** The output must be a perfectly valid JSON object.\n'
-        f'6.  **Handling Silence:** If the creative direction explicitly requires this instrument to be silent for the entire section, output this specific JSON object to signify intentional silence: `{{"notes": [{{"pitch": 0, "start_beat": 0, "duration_beats": 0, "velocity": 0}}]}}`. Do not output an empty array for silence.\n\n'
+        f'6.  **Handling Silence:** If the instrument is intentionally silent for the entire section, return ONLY: `{{"notes": [{{"pitch": 0, "start_beat": 0, "duration_beats": 0, "velocity": 0}}]}}`. Do not return any other keys.\n'
+        f'7.  **Density Cap:** Keep the total number of notes for this part reasonable (≤ 400) to avoid excessive density.\n'
+        f'8.  **Sorting & Formatting:** Use dot decimals (e.g., 1.5), non-negative beats, and sort notes by `start_beat` ascending.\n\n'
         f"Now, generate the JSON object for the **{instrument_name}** track for the theme described as '{theme_description}'.\n"
     )
     
@@ -1376,6 +1477,19 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                         print(Fore.YELLOW + "Not counting this attempt due to MAX_TOKENS. Retrying..." + Style.RESET_ALL)
                         failure_for_escalation_count += 1
                         _escalate_if_needed()
+                        # After two MAX_TOKENS, reduce historical context by half and retry
+                        try:
+                            if (('flash' in (local_model_name or '')) and max_tokens_fail_flash >= 2) or (('pro' in (local_model_name or '')) and max_tokens_fail_pro >= 2):
+                                reduced_cfg = json.loads(json.dumps(config))
+                                prev_ctx = previous_themes_full_history
+                                if isinstance(prev_ctx, list) and prev_ctx:
+                                    half = max(1, len(prev_ctx)//2)
+                                    reduced_cfg["context_window_size"] = half
+                                    print(Fore.CYAN + f"Reducing historical context window to {half} due to repeated MAX_TOKENS." + Style.RESET_ALL)
+                                    # Replace prompt with smaller context on next loop
+                                    prompt = create_theme_prompt(reduced_cfg, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history[-half:], current_theme_index)
+                        except Exception:
+                            pass
                         # Offer a quick, non-blocking model switch for this track
                         _wait_with_optional_switch(3)
                         continue
@@ -1387,7 +1501,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     jitter = random.uniform(0, 1.5)
                     wait_time = min(30, wait_time + jitter)
                     print(Fore.YELLOW + f"Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
-                    _wait_with_optional_switch(wait_time)
+                    _interruptible_backoff(wait_time, config, context_label=f"{instrument_name}")
                     continue
 
                 # 2. Now that we know the response is valid, safely access the text and parse JSON
@@ -1417,7 +1531,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     jitter = random.uniform(0, 1.5)
                     wait_time = min(30, wait_time + jitter)
                     print(Fore.YELLOW + f"Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
-                    _wait_with_optional_switch(wait_time)
+                    _interruptible_backoff(wait_time, config, context_label=f"{instrument_name}")
                     continue
 
                 # --- NEW: Token Usage Reporting ---
@@ -1555,7 +1669,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                 # We already checked for blocking, so we just show the text if parsing fails.
                 if "response_text" in locals():
                     print(Fore.YELLOW + "Model response was:\n" + response_text + Style.RESET_ALL)
-                # Zählt als inhaltlicher Fehler
+                # Counts as content-related error
                 json_failure_count += 1
                 failure_for_escalation_count += 1
                 _escalate_if_needed()
@@ -1584,7 +1698,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                             continue
                     elif len(API_KEYS) <= 1:
                         print(Fore.RED + "The only available API key has exceeded its quota.")
-                    # 429 zählt nicht als Versuch; bei kompletter Erschöpfung: langer Backoff bis max. 1h
+                    # 429 does not count as an attempt; after all keys are exhausted: long backoff up to 1h
                     quota_rotation_count += 1
                     base = 3
                     wait_time = base * (2 ** max(0, quota_rotation_count - 1))
@@ -1977,21 +2091,19 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         automation_instructions += "\n**--- Advanced MIDI Automation (Apply where musically appropriate) ---**\n"
         if use_pitch_bend:
             automation_instructions += (
-                f'- **Pitch Bend:** For expressive roles (`lead`, `bass`, etc.), you can add a `"pitch_bend"` key to a note. It is an array of objects, each with `"beat"` (float, relative to the note\'s start) and `"bend_semitones"` (float, how many semitones to bend).\n'
-                f'  Example: `{{"pitch": 60, ..., "pitch_bend": [{{"beat": 0.5, "bend_semitones": 2.0}}]}}`\n'
+                f'- **Pitch Bend (curves):** Add a `"pitch_bend"` array under `note.automations` with curve objects: `{{"type":"curve","start_beat":0.0,"end_beat":0.5,"start_value":0,"end_value":8191,"bias":1.0}}`. Range: −8192..8191.\n'
+                f'  Example: `{{"pitch":60, "start_beat":0, "duration_beats":1, "velocity":100, "automations":{{"pitch_bend":[{{"type":"curve","start_beat":0.0,"end_beat":0.5,"start_value":0,"end_value":8191,"bias":1.0}}]}}}}`\n'
             )
         if use_cc_automation:
             allowed_ccs = ", ".join(map(str, automation_settings.get("allowed_cc_numbers", [])))
             automation_instructions += (
-                f'- **CC Automation:** For textural roles (`pads`, `lead`, etc.), you can add a `"cc"` key to the track. It is an array of objects, each with `"cc_num"` (int, from [{allowed_ccs}]), `"beat"` (float, relative to the part\'s start), and `"value"` (int, 0-127).\n'
-                f'  Example: `{{"instrument_name": "...", ..., "cc": [{{"cc_num": 74, "beat": 0, "value": 64}}]}}`\n'
+                f'- **CC (curves):** Use only CCs [{allowed_ccs}]. Track‑level under `track_automations.cc` or note‑level under `note.automations.cc` as curves: `{{"type":"curve","cc":74,"start_beat":0.0,"end_beat":4.0,"start_value":60,"end_value":127,"bias":1.0}}`.\n'
             )
         if use_sustain_pedal:
             automation_instructions += (
-                f'- **Sustain Pedal:** For sustaining instruments (`piano`, `pads`, etc.), you can add a `"sustain_pedal"` key to the track. It is an array of objects, each with `"beat"` (float, relative to the part\'s start) and `"action"` (string, "press" or "release").\n'
-                f'  Example: `{{"instrument_name": "...", ..., "sustain_pedal": [{{"beat": 0, "action": "press"}}]}}`\n\n'
+                f'- **Sustain Pedal (CC64):** Track‑level events `{{"beat":x,"action":"down|up"}}`. Example: `{{"sustain_pedal":[{{"beat":0.0,"action":"down"}},{{"beat":3.5,"action":"up"}}]}}`.\n\n'
             )
-        automation_instructions += "**CRITICAL AUTOMATION TASK:** Your primary goal is to translate the automation cues from the creative direction (like 'pitch bend up', 'filter sweep') into the precise JSON format specified above. This is not optional.\n\n"
+        automation_instructions += "**CRITICAL AUTOMATION TASK:** Use the curve schema consistently and return to neutral values (e.g., pitch bend → 0).\n\n"
 
 
     # --- Drum Map Instructions ---
@@ -2127,21 +2239,23 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"5.  **Play with the Ensemble:** Always remember the context of the other instruments. Listen to their phrasing and find pockets of space for your musical statements without cluttering the overall arrangement.\n\n"
 
         f"**--- OUTPUT FORMAT: JSON ---**\n"
-        f"Your response MUST be a single, valid JSON object. This object represents the entire track for this part and may contain keys like `notes`, `cc`, and `sustain_pedal`.\n\n"
+        f"Your response MUST be a single, valid JSON object with ONLY these top-level keys: `notes` (required), `track_automations` (optional), `sustain_pedal` (optional), `pattern_blocks` (optional). No other top-level keys. No prose, no markdown.\n\n"
         f'1.  **Notes Array:** The JSON object MUST have a key named `"notes"` containing an array of note objects. Each note object MUST have these keys:\n'
         f'    - **"pitch"**: MIDI note number (integer 0-127).\n'
         f'    - **"start_beat"**: The beat on which the note begins (float, relative to the start of this part).\n'
         f'    - **"duration_beats"**: The note\'s length in beats (float).\n'
         f'    - **"velocity"**: MIDI velocity (integer 1-127).\n\n'
         f"**--- IMPORTANT RULES ---**\n"
-        f'1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with `{{` and ending with `}}`.\n'
+        f'1.  **JSON OBJECT ONLY:** The entire response MUST be only the raw JSON object (no markdown, no commentary).\n'
         f"{polyphony_rule}\n"
         f"{stay_in_key_rule}"
         f"4.  **Timing is Relative:** All 'start_beat' values must be relative to the beginning of this {length}-bar section, NOT the whole song.\n"
         f"5.  **Be Creative:** Compose a high-quality, optimized part that is musically interesting and follows the creative direction.\n"
         f'6.  **Valid JSON Syntax:** The output must be a perfectly valid JSON object.\n'
-        f'7.  **Handling Silence:** If the instrument should be completely silent, output this specific JSON object: `{{"notes": []}}`.\n\n'
-        f"Optional compact format for dense rhythms: You may include a 'pattern_blocks' array to represent many fast steps (e.g., 32nd/64th). Each block may have: 'length_bars', 'subdivision', 'bar_repeats', optional 'transpose' or 'octave_shift', and 'steps' with either 'mask' (e.g., '1010..') or 'indices' [0,2,4]. I will expand these into concrete notes.\n\n"
+        f'7.  **Handling Silence:** If the instrument is intentionally silent for the entire section, return ONLY: `{{"notes": [{{"pitch": 0, "start_beat": 0, "duration_beats": 0, "velocity": 0}}]}}`. Do not return any other keys.\n'
+        f'8.  **Density Cap:** Keep the total number of notes for this part reasonable (≤ 400) to avoid excessive density.\n'
+        f'9.  **Sorting & Formatting:** Use dot decimals (e.g., 1.5), non-negative beats, and sort notes by `start_beat` ascending.\n\n'
+        f"Optional compact format for dense rhythms: You may include a 'pattern_blocks' array to represent many fast steps (e.g., 32nd/64th). Each block may have: 'length_bars', 'subdivision', 'bar_repeats', optional 'transpose' or 'octave_shift', and 'steps' with either 'mask' (e.g., '1010..') or 'indices' [0,2,4]. Ensure that expanded notes do not exceed the section length.\n\n"
         f"Now, generate the JSON object for the new, optimized version of the **{get_instrument_name(track_to_optimize)}** track for the section '{theme_label}'. The generated part MUST cover the full {length} bars.\n"
     )
     return prompt
@@ -2287,6 +2401,18 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                                 parsed_data["notes"].extend(expanded)
                             else:
                                 parsed_data["notes"] = expanded
+                except Exception:
+                    pass
+
+                # Harmonize intentional silence handling with generation path
+                try:
+                    notes_list = parsed_data.get("notes", [])
+                    if isinstance(notes_list, list) and len(notes_list) == 1:
+                        n0 = notes_list[0]
+                        if isinstance(n0, dict) and n0.get("pitch") == 0 and n0.get("start_beat") == 0 and n0.get("duration_beats") == 0 and n0.get("velocity") == 0:
+                            parsed_data["notes"] = []
+                            if "sustain_pedal" not in parsed_data:
+                                parsed_data["sustain_pedal"] = []
                 except Exception:
                     pass
                 
@@ -2880,6 +3006,9 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                                 current_val = int(pb_start_val + (pb_end_val - pb_start_val) * progress)
                                 current_time = pb_start_beat + t * duration
                                 midi_file.addPitchWheelEvent(midi_track_num, channel, current_time, current_val)
+                            # Enforce neutral reset (0) at curve end if needed
+                            if pb_end_val != 0:
+                                midi_file.addPitchWheelEvent(midi_track_num, channel, pb_end_beat, 0)
                 # Process CC
                 if allow_cc and "cc" in track_data["track_automations"]:
                     for cc in track_data["track_automations"]["cc"]:
@@ -2904,6 +3033,9 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                                 current_val = int(cc_start_val + (cc_end_val - cc_start_val) * progress)
                                 current_time = cc_start_beat + t * duration
                                 midi_file.addControllerEvent(midi_track_num, channel, current_time, cc_num, current_val)
+                            # Enforce neutral reset (0) at curve end if needed
+                            if cc_end_val != 0:
+                                midi_file.addControllerEvent(midi_track_num, channel, cc_end_beat, cc_num, 0)
             
             # --- Sustain Pedal --- (skip for drums)
             if allow_sustain and "sustain_pedal" in track_data and role not in DRUM_ROLES:
@@ -2969,6 +3101,9 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                                         current_val = int(pb_start_val + (pb_end_val - pb_start_val) * progress)
                                         current_time = pb_start_beat + t * duration
                                         midi_file.addPitchWheelEvent(midi_track_num, channel, current_time, current_val)
+                                    # Enforce neutral reset (0) at curve end if needed
+                                    if pb_end_val != 0:
+                                        midi_file.addPitchWheelEvent(midi_track_num, channel, pb_end_beat, 0)
                                 else: # Fallback for single points (legacy)
                                     pb_time = start_beat + time_offset_beats + pb.get("beat", 0)
                                     pb_value = int(pb.get("value", 0))
@@ -3008,6 +3143,9 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                                         current_val = int(cc_start_val + (cc_end_val - cc_start_val) * progress)
                                         current_time = cc_start_beat + t * duration
                                         midi_file.addControllerEvent(midi_track_num, channel, current_time, cc_num, current_val)
+                                    # Enforce neutral reset (0) at curve end if needed
+                                    if cc_end_val != 0:
+                                        midi_file.addControllerEvent(midi_track_num, channel, cc_end_beat, cc_num, 0)
                                 else: # Fallback for single points (legacy)
                                     cc_time = start_beat + time_offset_beats + cc.get("beat", 0)
                                     cc_num = int(cc.get("cc", 0))
@@ -3481,33 +3619,7 @@ def handle_resume(resume_file_path, script_dir):
         else:
             print(Fore.RED + "Resumed generation failed to produce themes." + Style.RESET_ALL)
 
-    elif 'window_optimization' in progress_data.get('type', ''):
-        print_header("Resume Windowed Optimization")
-        try:
-            theme_len = int(progress_data.get('theme_length', DEFAULT_LENGTH))
-            window_bars = int(progress_data.get('window_bars', 16))
-            resume_start_index = int(progress_data.get('current_window_start_index', 0))
-            user_opt_prompt = progress_data.get('user_optimization_prompt', "")
-            themes_to_use = progress_data.get('themes', [])
-            if not themes_to_use:
-                print(Fore.RED + "No themes stored in progress. Cannot resume windowed optimization." + Style.RESET_ALL)
-                return None, None, None, None
-
-            print(Fore.CYAN + f"Resuming windowed optimization at window starting part index {resume_start_index+1} ({window_bars} bars)." + Style.RESET_ALL)
-            resumed_themes = create_windowed_optimization(
-                config, themes_to_use, theme_len, window_bars, script_dir, run_timestamp,
-                user_optimization_prompt=user_opt_prompt, resume_start_index=resume_start_index
-            )
-            if resumed_themes:
-                save_final_artifact(config, resumed_themes, theme_len, progress_data.get('theme_definitions', []), script_dir, run_timestamp)
-                print(Fore.GREEN + "\n--- Resumed Windowed Optimization Complete! ---" + Style.RESET_ALL)
-                settings = {'length': theme_len, 'theme_definitions': progress_data.get('theme_definitions', [])}
-                final_base = build_final_song_basename(config, resumed_themes, run_timestamp, resumed=True)
-                return resumed_themes, merge_themes_to_song_data(resumed_themes, config, theme_len), final_base, settings
-            else:
-                print(Fore.RED + "Resumed windowed optimization did not produce themes." + Style.RESET_ALL)
-        except Exception as e:
-            print(Fore.RED + f"Windowed resume failed: {e}" + Style.RESET_ALL)
+    # (removed duplicate 'window_optimization' branch)
     elif 'automation_enhancement' in progress_data.get('type', ''):
         print_header("Resume Automation Enhancement")
         try:
@@ -4090,10 +4202,10 @@ def normalize_themes(themes: List[Dict], theme_length_bars: int, config: Dict) -
 
 def merge_themes_to_song_data(themes: List[Dict], config: Dict, theme_length_bars: int) -> Dict:
     """
-    Führt Themes zu einem finalen Song zusammen und korrigiert Timing:
-    - Ermittelt pro Theme/Track automatisch, ob Noten relativ (0..part) oder absolut (offset..offset+part) sind
-    - Wendet passenden Offset an, kürzt Noten an Partgrenzen und verwirft Out-of-Range-Noten
-    - Übernimmt Sustain-Pedal-Events und Track-Automationen mit Offsets und Clamping
+    Merges themes into a final song and corrects timing:
+    - Detects per theme/track whether notes are relative (0..part) or absolute (offset..offset+part)
+    - Applies appropriate offsets, clamps notes to part boundaries and discards out-of-range notes
+    - Transfers sustain pedal events and track automations with offsets and clamping
     """
     merged_tracks: Dict[str, Dict] = {}
     instrument_order = [inst['name'] for inst in config['instruments']]
@@ -4436,7 +4548,7 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
     return all_themes_data, total_tokens_used
 
 def combine_and_save_final_song(config, generated_themes, script_dir, timestamp):
-    """Merges generated themes into a final song and saves it to a MIDI file."""
+    """Merges generated themes into a final song and saves it to a MIDI file (incl. Automationen)."""
     if not generated_themes:
         print(Fore.YELLOW + "No themes were generated, cannot create a final song." + Style.RESET_ALL)
         return None, None
@@ -4444,59 +4556,34 @@ def combine_and_save_final_song(config, generated_themes, script_dir, timestamp)
     print(Fore.CYAN + "\n--- Stage 2: Combining all parts into the final song... ---" + Style.RESET_ALL)
 
     try:
-        # Merging logic (from main)
-        merged_tracks = {}
-        instrument_order = [inst['name'] for inst in config['instruments']]
-        
-        for theme in generated_themes:
-            for track in theme['tracks']:
-                name = track['instrument_name']
-                if name not in merged_tracks:
-                    merged_tracks[name] = {
-                        "instrument_name": name,
-                        "program_num": track.get('program_num', 0),
-                        "role": track.get('role', 'complementary'),
-                        "notes": []
-                    }
-                merged_tracks[name]['notes'].extend(track['notes'])
-        
-        final_tracks_sorted = [merged_tracks[name] for name in instrument_order if name in merged_tracks]
+        # Verwende die robuste Merge-Logik inkl. Sustain & Track-Automationen
+        try:
+            with open(os.path.join(script_dir, "song_settings.json"), 'r') as f:
+                s = json.load(f)
+                length_bars = int(s.get('length', DEFAULT_LENGTH)) if isinstance(s.get('length'), int) else DEFAULT_LENGTH
+        except Exception:
+            length_bars = DEFAULT_LENGTH
 
-        final_song_data = {
-            "bpm": config["bpm"],
-            "time_signature": config["time_signature"],
-            "key_scale": config["key_scale"],
-            "tracks": final_tracks_sorted
-        }
-        
-        # Filename logic (from main)
-        genre = config.get("genre", "audio").replace(" ", "_").replace("/", "-")
-        key = config.get("key_scale", "").replace(" ", "").replace("#", "s")
-        bpm = round(float(config.get("bpm", 120)))
-        
+        final_song_data = merge_themes_to_song_data(generated_themes, config, length_bars)
+
         final_base = build_final_song_basename(config, generated_themes, timestamp)
         final_filename = os.path.join(script_dir, f"{final_base}.mid")
 
-        # --- NEW: Add a small delay to ensure correct file sorting by date ---
+        # small delay to ensure clean file sorting by date
         time.sleep(3)
 
         create_midi_from_json(final_song_data, config, final_filename)
-        
-        final_song_basename = final_base
-        
-        # Save reusable artifact for later optimizations
+
+        # Artefakt speichern (wie zuvor)
         try:
             with open(os.path.join(script_dir, "song_settings.json"), 'r') as f:
                 s = json.load(f)
                 defs = s.get('theme_definitions', [])
-                length_bars = int(s.get('length', DEFAULT_LENGTH)) if isinstance(s.get('length'), int) else DEFAULT_LENGTH
         except Exception:
             defs = []
-            length_bars = DEFAULT_LENGTH
         save_final_artifact(config, generated_themes, length_bars, defs, script_dir, timestamp)
-        
-        # Return the data needed for the optimization step
-        return final_song_data, final_song_basename
+
+        return final_song_data, final_base
 
     except Exception as e:
         print(Fore.RED + f"Failed to create the final combined MIDI file. Reason: {e}" + Style.RESET_ALL)
@@ -4809,13 +4896,6 @@ def get_optimization_goal_for_role(role: str) -> str:
         "complementary": "Enhancing the part to better support the overall composition."
     }
     return goals.get(role, goals["complementary"]) # Default to complementary
-
-# --- HELPER FUNCTIONS ---
-
-def get_user_input(prompt, default=None):
-    """Gets user input with a default value."""
-    response = input(f"{Fore.GREEN}{prompt}{Style.RESET_ALL} ").strip()
-    return response or default
 
 if __name__ == "__main__":
     main() 

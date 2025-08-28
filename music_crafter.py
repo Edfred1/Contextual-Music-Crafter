@@ -18,7 +18,7 @@ init(autoreset=True)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(script_dir, "config.yaml")
 SONG_SETTINGS_FILE = os.path.join(script_dir, "song_settings.json")
-PART_GENERATOR_SCRIPT = os.path.join(script_dir, "part_generator.py")
+PART_GENERATOR_SCRIPT = os.path.join(script_dir, "song_generator.py")
 SONG_GENERATOR_SCRIPT = os.path.join(script_dir, "song_generator.py")
 
 # --- NEW: Global state for API key rotation ---
@@ -573,7 +573,20 @@ def call_generative_model(prompt_text, config):
                 task_description = "Expanding inspiration" if "expand this" in prompt_text else "Generating content"
                 print(Fore.BLUE + f"Attempt {attempt + 1}/{max_retries}: Calling generative AI ({task_description})..." + Style.RESET_ALL)
                 
-                model = genai.GenerativeModel(model_name=config["model_name"])
+                # Build generation config; enforce JSON MIME only for JSON prompts
+                wants_json = "JSON" in (prompt_text or "")
+                generation_config = {
+                    "temperature": config.get("temperature", 1.0)
+                }
+                if wants_json:
+                    generation_config["response_mime_type"] = "application/json"
+                if isinstance(config.get("max_output_tokens"), int):
+                    generation_config["max_output_tokens"] = config.get("max_output_tokens")
+
+                model = genai.GenerativeModel(
+                    model_name=config["model_name"],
+                    generation_config=generation_config
+                )
                 
                 safety_settings=[
                     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -584,7 +597,7 @@ def call_generative_model(prompt_text, config):
 
                 response = model.generate_content(
                     prompt_text,
-                    safety_settings=safety_settings
+                    safety_settings=safety_settings,
                 )
 
                 # --- NEW, MORE ROBUST RESPONSE VALIDATION ---
