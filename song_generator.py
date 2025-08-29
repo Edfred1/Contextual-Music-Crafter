@@ -33,6 +33,75 @@ DEFER_CURRENT_TRACK = False       # If True, immediately defer the current track
 HOTKEY_DEBOUNCE_SEC = 0.8         # Debounce window for hotkeys
 _LAST_HOTKEY_TS = {'1': 0.0, '2': 0.0, '3': 0.0, '0': 0.0, 'a': 0.0, 'd': 0.0, 'h': 0.0}
 REDUCE_CONTEXT_THIS_STEP = False  # If True, halve historical context for the current step
+REDUCE_CONTEXT_HALVES = 0        # Number of times to halve context for the current step
+LAST_CONTEXT_COUNT = 0           # Last known number of context themes (for hotkey preview)
+PLANNED_CONTEXT_COUNT = 0        # Planned context size after pending halvings (preview)
+
+# --- Helper: classify 429 quota messages (best-effort) ---
+def _classify_quota_error(err_text: str) -> str:
+    """Heuristic classification of quota type from error text.
+    Priority: per-day > per-hour > per-minute > rate-limit > user/project/unknown
+    """
+    try:
+        t = (err_text or "").lower()
+        # Normalize separators
+        t = t.replace("-", " ")
+        # Prefer explicit daily/hourly/minute windows first
+        if any(k in t for k in ["per day", "daily", "per 24 hours", "per 24hrs", "per 24 hr", "per 1 day", "per day per user"]):
+            return "per-day"
+        if any(k in t for k in ["per hour", "hourly", "per 1 hour", "per 60 minutes", "per 3600 seconds", "per 3600s"]):
+            return "per-hour"
+        # Minute windows: allow variants like "per 60 seconds", "per minute"
+        if any(k in t for k in ["per minute", "per 1 minute", "per 60 seconds", "per 60s", "per 60 sec"]):
+            return "per-minute"
+        # Generic rate limit hints with timeframe tokens
+        if ("rate limit" in t or "rate limit".replace(" ","") in t) and "hour" in t:
+            return "per-hour"
+        if ("rate limit" in t or "rate limit".replace(" ","") in t) and "day" in t:
+            return "per-day"
+        if "rate limit" in t or "rate limit".replace(" ","") in t or "rate-limit" in t:
+            return "rate-limit"
+        if "quota" in t and "user" in t and "project" in t:
+            return "project-quota"
+        if "quota" in t and "user" in t:
+            return "user-quota"
+    except Exception:
+        pass
+    return "unknown"
+
+# --- Per-key cooldown management (per-minute quota) ---
+KEY_COOLDOWN_UNTIL = {}  # index->unix_timestamp until which key is cooling down
+PER_MINUTE_COOLDOWN_SECONDS = 60
+PER_HOUR_COOLDOWN_SECONDS = 3600
+PER_DAY_COOLDOWN_SECONDS = 86400
+
+def _is_key_available(idx: int) -> bool:
+    until = KEY_COOLDOWN_UNTIL.get(idx, 0)
+    return time.time() >= until
+
+def _set_key_cooldown(idx: int, seconds: float) -> None:
+    KEY_COOLDOWN_UNTIL[idx] = max(KEY_COOLDOWN_UNTIL.get(idx, 0), time.time() + max(1.0, seconds))
+
+def _next_available_key(start_idx: int | None = None) -> int | None:
+    if not API_KEYS:
+        return None
+    n = len(API_KEYS)
+    s = CURRENT_KEY_INDEX if start_idx is None else start_idx
+    for off in range(1, n+1):
+        idx = (s + off) % n
+        if _is_key_available(idx):
+            return idx
+    return None
+
+def _all_keys_cooling_down() -> bool:
+    if not API_KEYS:
+        return True
+    return all(not _is_key_available(i) for i in range(len(API_KEYS)))
+
+def _seconds_until_first_available() -> float:
+    if not API_KEYS:
+        return 0.0
+    return max(0.0, min(KEY_COOLDOWN_UNTIL.get(i, 0) - time.time() for i in range(len(API_KEYS))))
 
 def _hotkey_monitor_loop(config: Dict):
     """Background loop to catch hotkeys continuously while long API calls run."""
@@ -103,8 +172,20 @@ def _hotkey_monitor_loop(config: Dict):
                         continue
                     _LAST_HOTKEY_TS['h'] = now
                     globals()['REDUCE_CONTEXT_THIS_STEP'] = True
+                    globals()['REDUCE_CONTEXT_HALVES'] = globals().get('REDUCE_CONTEXT_HALVES', 0) + 1
                     globals()['ABORT_CURRENT_STEP'] = True
-                    print(Fore.CYAN + "\nRequested: halve historical context for THIS step (will restart current step)." + Style.RESET_ALL)
+                    # Show a preview using LAST_CONTEXT_COUNT if known
+                    try:
+                        prev = int(globals().get('PLANNED_CONTEXT_COUNT') or globals().get('LAST_CONTEXT_COUNT') or 0)
+                        if prev > 0:
+                            new_count = max(1, prev // 2)
+                            globals()['PLANNED_CONTEXT_COUNT'] = new_count
+                            print(Fore.CYAN + f"\nRequested: halve context (#{globals()['REDUCE_CONTEXT_HALVES']}) for THIS step: {prev} → {new_count} parts (will restart current step)." + Style.RESET_ALL)
+                            print(Fore.CYAN + f"Using {new_count}/{prev} previous parts next." + Style.RESET_ALL)
+                        else:
+                            print(Fore.CYAN + f"\nRequested: halve context (#{globals()['REDUCE_CONTEXT_HALVES']}) for THIS step (will restart current step)." + Style.RESET_ALL)
+                    except Exception:
+                        print(Fore.CYAN + f"\nRequested: halve context (#{globals()['REDUCE_CONTEXT_HALVES']}) for THIS step (will restart current step)." + Style.RESET_ALL)
             time.sleep(0.05)
     except Exception:
         pass
@@ -316,7 +397,7 @@ def _interruptible_backoff(wait_time: float, config: Dict, context_label: str = 
             time.sleep(max(0.0, wait_time))
             return
         print(Fore.CYAN + (f"Waiting {wait_time:.1f}s" + (f" [{context_label}]" if context_label else "") + 
-              "; press 1/2/3/0 to switch model, 'd' to defer, 'a' to toggle auto-escalate...") + Style.RESET_ALL)
+              "; press 1/2/3/0 (model), 'h' (halve context), 'd' (defer), 'a' (auto-escalate)...") + Style.RESET_ALL)
         while time.time() < end_t:
             if msvcrt.kbhit():
                 ch = msvcrt.getch().decode(errors='ignore').lower()
@@ -359,6 +440,24 @@ def _interruptible_backoff(wait_time: float, config: Dict, context_label: str = 
                     globals()['AUTO_ESCALATE_TO_PRO'] = not globals().get('AUTO_ESCALATE_TO_PRO', False)
                     state = 'ON' if globals().get('AUTO_ESCALATE_TO_PRO', False) else 'OFF'
                     print(Fore.CYAN + f"Auto-escalate to pro after {AUTO_ESCALATE_THRESHOLD} failures: {state}" + Style.RESET_ALL)
+                    return
+                if ch == 'h':
+                    _LAST_HOTKEY_TS['h'] = now
+                    globals()['REDUCE_CONTEXT_THIS_STEP'] = True
+                    globals()['REDUCE_CONTEXT_HALVES'] = globals().get('REDUCE_CONTEXT_HALVES', 0) + 1
+                    globals()['ABORT_CURRENT_STEP'] = True
+                    try:
+                        prev = int(globals().get('PLANNED_CONTEXT_COUNT') or globals().get('LAST_CONTEXT_COUNT') or 0)
+                        if prev > 0:
+                            new_count = max(1, prev // 2)
+                            globals()['PLANNED_CONTEXT_COUNT'] = new_count
+                            print(Fore.CYAN + f"\nRequested: halve context (#{globals()['REDUCE_CONTEXT_HALVES']}) for THIS step: {prev} → {new_count} parts (will restart current step)." + Style.RESET_ALL)
+                            print(Fore.CYAN + f"Using {new_count}/{prev} previous parts next." + Style.RESET_ALL)
+                        else:
+                            print(Fore.CYAN + f"\nRequested: halve context (#{globals()['REDUCE_CONTEXT_HALVES']}) for THIS step (will restart current step)." + Style.RESET_ALL)
+                    except Exception:
+                        print(Fore.CYAN + f"\nRequested: halve context (#{globals()['REDUCE_CONTEXT_HALVES']}) for THIS step (will restart current step)." + Style.RESET_ALL)
+                    return
             time.sleep(0.2)
     except Exception:
         # Fallback to plain sleep on any error
@@ -1286,6 +1385,11 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
         end_theme_num = start_theme_num + used_themes_count - 1
         if used_themes_count > 0:
             print(Fore.CYAN + f"Context Info: Using {used_themes_count}/{total_previous_themes} previous themes (original indices {start_theme_num}-{end_theme_num}) for context ({limit_source})." + Style.RESET_ALL)
+            try:
+                globals()['LAST_CONTEXT_COUNT'] = int(used_themes_count)
+                globals()['PLANNED_CONTEXT_COUNT'] = int(used_themes_count)
+            except Exception:
+                pass
 
     if safe_previous_themes:
         previous_themes_prompt_part = "**You have already composed the following themes. Use them as the primary context for what comes next:**\n"
@@ -1371,13 +1475,15 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
             pass
     
     # Reset runtime hotkey guards/state for this step and show hint
-    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK, REDUCE_CONTEXT_THIS_STEP
+    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK, REDUCE_CONTEXT_THIS_STEP, REDUCE_CONTEXT_HALVES, LAST_CONTEXT_COUNT
     PROMPTED_CUSTOM_THIS_STEP = False
     REQUESTED_SWITCH_MODEL = None
     REQUEST_SET_SESSION_DEFAULT = False
     ABORT_CURRENT_STEP = False
     DEFER_CURRENT_TRACK = False
     REDUCE_CONTEXT_THIS_STEP = False
+    REDUCE_CONTEXT_HALVES = 0
+    LAST_CONTEXT_COUNT = 0
     # Show hotkey hint once before we start attempts
     print_hotkey_hint(config, context=f"Generate: {instrument_name}")
     # Start background hotkey monitor once per process
@@ -1479,13 +1585,20 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                         reduced_cfg = json.loads(json.dumps(config))
                         prev_ctx = previous_themes_full_history
                         if isinstance(prev_ctx, list) and prev_ctx:
-                            half = max(1, len(prev_ctx)//2)
-                            reduced_cfg["context_window_size"] = half
-                            print(Fore.CYAN + f"Halving historical context for this step to {half}." + Style.RESET_ALL)
-                            prompt = create_theme_prompt(reduced_cfg, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history[-half:], current_theme_index)
+                            original = len(prev_ctx)
+                            LAST_CONTEXT_COUNT = original
+                            halves = max(1, int(REDUCE_CONTEXT_HALVES))
+                            target = original
+                            for _ in range(halves):
+                                target = max(1, target // 2)
+                            reduced_cfg["context_window_size"] = target
+                            print(Fore.CYAN + f"Applying halve context (x{halves}) for this step: {original} → {target} parts." + Style.RESET_ALL)
+                            print(Fore.CYAN + f"Context in use now: {target} previous theme(s)." + Style.RESET_ALL)
+                            prompt = create_theme_prompt(reduced_cfg, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history[-target:], current_theme_index)
                     except Exception:
                         pass
                     REDUCE_CONTEXT_THIS_STEP = False
+                    REDUCE_CONTEXT_HALVES = 0
                 response = model.generate_content(effective_prompt, safety_settings=safety_settings)
                 
                 # --- Robust Response Validation ---
@@ -1732,24 +1845,38 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
             except Exception as e:
                 error_message = str(e).lower()
                 if "429" in error_message and "quota" in error_message:
-                    print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: API quota exceeded for key #{CURRENT_KEY_INDEX + 1}." + Style.RESET_ALL)
+                    qtype = _classify_quota_error(error_message)
+                    print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: API quota exceeded for key #{CURRENT_KEY_INDEX + 1} ({qtype})." + Style.RESET_ALL)
+                    # Apply cooldown based on detected window
+                    # For daily quotas: retry hourly to probe reset windows
+                    if qtype == "per-day":
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
+                    elif qtype == "per-hour":
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
+                    else:  # per-minute, rate-limit, unknown
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS)
                     
                     if len(API_KEYS) > 1 and not keys_have_rotated_fully:
-                        new_key = get_next_api_key()
-                        genai.configure(api_key=new_key)
-                        
-                        if CURRENT_KEY_INDEX == start_key_index:
-                            print(Fore.RED + "All available API keys have been tried and have exceeded their quota.")
-                            keys_have_rotated_fully = True
-                        else:
-                            print(Fore.CYAN + "Retrying immediately with the next key...")
+                        nxt = _next_available_key()
+                        if nxt is not None:
+                            CURRENT_KEY_INDEX = nxt
+                            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                            print(Fore.CYAN + f"Retrying immediately with available key #{CURRENT_KEY_INDEX + 1}...")
                             continue
+                        else:
+                            print(Fore.RED + "All available API keys are cooling down or have exceeded their quota.")
+                            keys_have_rotated_fully = True
                     elif len(API_KEYS) <= 1:
                         print(Fore.RED + "The only available API key has exceeded its quota.")
                     # 429 does not count as an attempt; after all keys are exhausted: long backoff up to 1h
                     quota_rotation_count += 1
                     base = 3
-                    wait_time = base * (2 ** max(0, quota_rotation_count - 1))
+                    # if all keys cooling down and we have per-minute, show countdown to first available
+                    if _all_keys_cooling_down():
+                        wait_time = max(5.0, _seconds_until_first_available())
+                        print(Fore.CYAN + f"All keys cooling down. Next available in ~{wait_time:.1f}s." + Style.RESET_ALL)
+                    else:
+                        wait_time = base * (2 ** max(0, quota_rotation_count - 1))
                     jitter = random.uniform(0, 5.0)
                     wait_time = min(3600, wait_time + jitter)
                     print(Fore.YELLOW + f"All available API keys exhausted. Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
@@ -2100,11 +2227,15 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
         traceback.print_exc()
         return None
 
-def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dict, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict],   current_theme_index: int, user_optimization_prompt: str) -> str:
+def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dict | None, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict],   current_theme_index: int, user_optimization_prompt: str = "") -> str:
     """
     Creates a prompt for optimizing a single track within a themed song structure.
     It now normalizes the context themes' timestamps to be relative.
     """
+    # Defensive defaults
+    if track_to_optimize is None or not isinstance(track_to_optimize, dict):
+        track_to_optimize = {"instrument_name": "track", "program_num": 0, "role": "complementary", "notes": []}
+    user_optimization_prompt = user_optimization_prompt or ""
     scale_notes = get_scale_notes(config["root_note"], config["scale_type"])
     
     # --- CRITICAL: Compress the JSON for the prompt to save space ---
@@ -2115,7 +2246,7 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"**Tempo:** {config['bpm']} BPM\n"
         f"**Time Signature:** {config['time_signature']['beats_per_bar']}/{config['time_signature']['beat_value']}\n"
         f"**Key/Scale:** {config['key_scale'].title()} (Available notes: {scale_notes})\n"
-        f"**Instrument:** {get_instrument_name(track_to_optimize)} (MIDI Program: {track_to_optimize['program_num']})\n"
+        f"**Instrument:** {get_instrument_name(track_to_optimize)} (MIDI Program: {track_to_optimize.get('program_num', 0)})\n"
     )
 
     # --- Context from tracks WITHIN the CURRENT theme ---
@@ -2145,9 +2276,16 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     )
 
     optimization_instruction = (
-        "**Your Task: Surgically Optimize The Provided Part**\n"
-        f"You are currently working on a section labeled: **'{theme_label}'**. Your main goal is to **improve and refine** the original part provided below, keeping its core identity while enhancing it to better fit the creative directions. You MUST return the complete, updated JSON for the entire track.\n"
-        f"**IMPORTANT DURATION REQUIREMENT:** You MUST generate a complete musical phrase that spans the entire **{length} bars**. Do not just create a short 4-bar loop. The musical ideas must evolve and be present throughout the full {length}-bar duration. The composition must actively fill the entire **{length} bars**. Intentional silence for musical effect (like rests between phrases or a build-up) is encouraged, but avoid leaving the end of the track empty simply because the generation was incomplete.\n"
+        "**Your Task: Make Minimal, Targeted Improvements (No Rewrite)**\n"
+        f"You are working on the section **'{theme_label}'**. Your job is to **preserve the identity** of the original part and apply **small, surgical fixes only**.\n"
+        "- Fix obvious problems (timing clashes, muddiness, unplayable overlaps per role rules).\n"
+        "- Improve feel and clarity with tiny changes (velocities, micro‑timing, short fills), but **do not create new motifs or rewrite phrases**.\n"
+        "- Prefer removing or slightly adjusting notes over adding many new notes.\n"
+        f"- Keep structure, phrasing and coverage intact across the full **{length} bars**.\n"
+        "\n**Change Budget (Hard Limits):**\n"
+        "1) Replace, add or delete at most ~10–15% of notes.\n"
+        "2) Do not change harmony/key, and do not alter the main motif.\n"
+        "3) Only add subtle automation if it clearly solves a musical issue.\n"
     )
     
     # --- NEW: Dynamically create the primary goal based on user input ---
@@ -2273,6 +2411,11 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         start_theme_num = offset_into_original + context_start_index + 1
         end_theme_num = start_theme_num + used_themes_count - 1
         print(Fore.CYAN + f"Context Info: Using {used_themes_count}/{total_previous_themes} previous themes (original indices {start_theme_num} to {end_theme_num}) for optimization context ({limit_source})." + Style.RESET_ALL)
+        try:
+            globals()['LAST_CONTEXT_COUNT'] = int(used_themes_count)
+            globals()['PLANNED_CONTEXT_COUNT'] = int(used_themes_count)
+        except Exception:
+            pass
     
     # --- Context from PREVIOUS themes (with normalized timestamps) ---
     previous_themes_prompt_part = ""
@@ -2318,16 +2461,12 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"{role_instructions}\n"
         f"{drum_map_instructions}"
         f"--- Your Producer's Checklist for Optimization ---\n\n"
-        f"1.  **Seam Awareness:** If this section combines multiple {length}-bar segments (e.g., boundary between consecutive parts), evaluate each seam. If the transition already supports the narrative, keep changes minimal. If it feels unintentionally abrupt, add a small fill/tie; if contrast is intended (drop/break), sharpen it musically.\n\n"
-        f"2.  **Continuity vs. Contrast:** Base the decision on genre, part descriptions, and surrounding context.\n\n"
-        f"3.  **Preserve Identity:** Keep motifs/register; avoid full rewrites unless clearly necessary.\n\n"
-        f"4.  **Analyze Musical Density:** First, assess the original part. \n"
-        f"    - If it's too crowded and sounds cluttered, your main goal is to **simplify**. Create space by adding more rests or removing less important notes.\n"
-        f"    - Conversely, if the part is too sparse or overly repetitive, your goal is to **add interest**. Introduce subtle 'ear candy' like short melodic fills, quick arpeggios, or an occasional, unexpected note to keep the listener engaged.\n\n"
-        f"2.  **Exaggerate Dynamics:** Don't just copy the velocity of the original. Give the part life by exaggerating its dynamics. Make quiet notes quieter and loud notes louder. Use velocity to create clear accents and a sense of human performance.\n\n"
-        f"3.  **Enhance the Groove:** If the original rhythm feels stiff, improve its groove. You can achieve this by adding subtle syncopation or by slightly shifting notes off the strict grid (micro-timing) to make them 'push' or 'pull' against the beat.\n\n"
-        f"4.  **Tell a Story Over Time:** A great part evolves. Avoid simply looping a 4-bar phrase for 16 bars. Introduce subtle variations as the part progresses. For example, you could add or alter a note in the second half, or transpose a key phrase up or down an octave to build intensity.\n\n"
-        f"5.  **Play with the Ensemble:** Always remember the context of the other instruments. Listen to their phrasing and find pockets of space for your musical statements without cluttering the overall arrangement.\n\n"
+        f"1.  **Seam Awareness:** If this section joins consecutive parts, keep transitions natural. If already fine, **change nothing**. If slightly abrupt, use a **tiny** connective gesture; avoid large fills.\n\n"
+        f"2.  **Continuity First:** Prefer continuity over contrast for optimization; respect genre and the part description.\n\n"
+        f"3.  **Preserve Identity:** Keep motifs, register, and rhythm shape. **No full rewrites.**\n\n"
+        f"4.  **Density:** If cluttered, remove or shorten a few low‑value notes. If too sparse or robotic, add **very few** supportive notes (≤ change budget).\n\n"
+        f"5.  **Dynamics & Feel:** Tweak velocities and micro‑timing **subtly**. Avoid large timing shifts or drastic accents.\n\n"
+        f"6.  **Ensemble Fit:** Leave space for other instruments; avoid stepping on primary elements.\n\n"
 
         f"**--- OUTPUT FORMAT: JSON ---**\n"
         f"Your response MUST be a single, valid JSON object with ONLY these top-level keys: `notes` (required), `track_automations` (optional), `sustain_pedal` (optional), `pattern_blocks` (optional). No other top-level keys. No prose, no markdown.\n\n"
@@ -2355,11 +2494,16 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     )
     return prompt
 
-def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dict, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict], current_theme_index: int, user_optimization_prompt: str) -> Tuple[Dict, int]:
+def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dict | None, role: str, theme_label: str, theme_detailed_description: str, historical_themes_context: List[Dict], inner_context_tracks: List[Dict], current_theme_index: int, user_optimization_prompt: str = "") -> Tuple[Dict, int]:
     """
     Generates an optimized version of a single track's notes using the generative model.
     """
     global CURRENT_KEY_INDEX, SESSION_MODEL_OVERRIDE
+    # Defensive defaults
+    if track_to_optimize is None or not isinstance(track_to_optimize, dict):
+        track_to_optimize = {"instrument_name": "track", "program_num": 0, "role": role or "complementary", "notes": []}
+    user_optimization_prompt = user_optimization_prompt or ""
+
     prompt = create_optimization_prompt(
         config, length, track_to_optimize, role, theme_label, theme_detailed_description,
         historical_themes_context, inner_context_tracks, current_theme_index, user_optimization_prompt
@@ -2375,13 +2519,15 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
     max_tokens_fail_flash = 0
     max_tokens_fail_pro = 0
     # Reset custom prompt guard for this step and show hint
-    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK, REDUCE_CONTEXT_THIS_STEP
+    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK, REDUCE_CONTEXT_THIS_STEP, REDUCE_CONTEXT_HALVES, LAST_CONTEXT_COUNT
     PROMPTED_CUSTOM_THIS_STEP = False
     REQUESTED_SWITCH_MODEL = None
     REQUEST_SET_SESSION_DEFAULT = False
     ABORT_CURRENT_STEP = False
     DEFER_CURRENT_TRACK = False
     REDUCE_CONTEXT_THIS_STEP = False
+    REDUCE_CONTEXT_HALVES = 0
+    LAST_CONTEXT_COUNT = 0
     # Show hotkey hint before attempts
     print_hotkey_hint(config, context=f"Optimize: {track_to_optimize.get('instrument_name','track')}")
     global HOTKEY_MONITOR_STARTED
@@ -2398,7 +2544,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
         
         while True: # Inner loop for API key rotation
             try:
-                instrument_name = track_to_optimize['instrument_name']
+                instrument_name = (track_to_optimize or {}).get('instrument_name', 'track')
                 print(Fore.BLUE + f"Attempt {attempt + 1}/{max_retries}: Generating optimization for {instrument_name}..." + Style.RESET_ALL)
                 
                 generation_config = {
@@ -2538,32 +2684,40 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
             except Exception as e:
                 error_message = str(e).lower()
                 if "429" in error_message and "quota" in error_message:
-                    print(Fore.YELLOW + f"Warning: API quota exceeded for key #{CURRENT_KEY_INDEX + 1}." + Style.RESET_ALL)
+                    qtype = _classify_quota_error(error_message)
+                    print(Fore.YELLOW + f"Warning: API quota exceeded for key #{CURRENT_KEY_INDEX + 1} ({qtype})." + Style.RESET_ALL)
+                    # For daily quotas: retry hourly to probe reset windows
+                    if qtype == "per-day":
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
+                    elif qtype == "per-hour":
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
+                    else:
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS)
                     
                     if len(API_KEYS) > 1:
-                        new_key = get_next_api_key()
-                        genai.configure(api_key=new_key)
-                        
-                        if CURRENT_KEY_INDEX == start_key_index:
-                            print(Fore.RED + "All available API keys have been tried and have exceeded their quota.")
-                            # Long backoff without increasing outer attempt; keep trying indefinitely up to 1h caps
+                        nxt = _next_available_key()
+                        if nxt is not None:
+                            CURRENT_KEY_INDEX = nxt
+                            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                            print(Fore.CYAN + f"Retrying immediately with available key #{CURRENT_KEY_INDEX + 1}...")
+                            continue # Retry the API call with the new key
+                        else:
+                            print(Fore.RED + "All available API keys are cooling down or have exceeded their quota.")
+                            # Long backoff while waiting for first key to free up
                             quota_rotation_count += 1
                             base = 3
-                            wait_time = base * (2 ** max(0, quota_rotation_count - 1))
+                            wait_time = max(5.0, _seconds_until_first_available())
                             jitter = random.uniform(0, 5.0)
                             wait_time = min(3600, wait_time + jitter)
-                            print(Fore.YELLOW + f"All available API keys exhausted. Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
+                            print(Fore.CYAN + f"Next available key in ~{wait_time:.1f}s. Waiting before retry..." + Style.RESET_ALL)
                             time.sleep(wait_time)
                             continue
-                        else:
-                            print(Fore.CYAN + "Retrying immediately with the next key...")
-                            continue # Retry the API call with the new key
                     else:
                         print(Fore.RED + "The only available API key has exceeded its quota.")
                         # Long backoff for single-key setups
                         quota_rotation_count += 1
                         base = 3
-                        wait_time = base * (2 ** max(0, quota_rotation_count - 1))
+                        wait_time = max(5.0, _seconds_until_first_available())
                         jitter = random.uniform(0, 5.0)
                         wait_time = min(3600, wait_time + jitter)
                         print(Fore.YELLOW + f"API key exhausted. Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
@@ -2619,7 +2773,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
             time.sleep(wait_time)
 
     # If all 3 main retries fail, ask the user what to do.
-    instrument_name = track_to_optimize['instrument_name']
+    instrument_name = (track_to_optimize or {}).get('instrument_name', 'track')
     print(Fore.RED + f"Failed to generate a valid optimization for {instrument_name} after {max_retries} full attempts." + Style.RESET_ALL)
     
     print(Fore.CYAN + "Automatic retry in 60 seconds..." + Style.RESET_ALL)
@@ -2639,7 +2793,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
     # Decide action
     if user_action is None or user_action == 'y':
         print(Fore.CYAN + "Retrying now..." + Style.RESET_ALL)
-        return generate_optimization_data(config, length, track_to_optimize, role, theme_label, theme_detailed_description, historical_themes_context, inner_context_tracks, current_theme_index, user_optimization_prompt)
+        return generate_optimization_data(config, length, (track_to_optimize or {"instrument_name":"track","program_num":0,"role":(role or "complementary"),"notes":[]}), role, theme_label, theme_detailed_description, historical_themes_context, inner_context_tracks, current_theme_index, (user_optimization_prompt or ""))
     elif user_action == 'n':
         print(Fore.RED + f"Aborting optimization for '{instrument_name}'." + Style.RESET_ALL)
         return None, 0
@@ -2648,7 +2802,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
         while True:
             manual_choice = input(Fore.YELLOW + f"Retry for '{instrument_name}'? (y/n): " + Style.RESET_ALL).strip().lower()
             if manual_choice in ['y', 'yes']:
-                return generate_optimization_data(config, length, track_to_optimize, role, theme_label, theme_detailed_description, historical_themes_context, inner_context_tracks, current_theme_index, user_optimization_prompt)
+                return generate_optimization_data(config, length, (track_to_optimize or {"instrument_name":"track","program_num":0,"role":(role or "complementary"),"notes":[]}), role, theme_label, theme_detailed_description, historical_themes_context, inner_context_tracks, current_theme_index, (user_optimization_prompt or ""))
             elif manual_choice in ['n', 'no']:
                 print(Fore.RED + f"Aborting optimization for '{instrument_name}'." + Style.RESET_ALL)
                 return None, 0
@@ -2864,16 +3018,23 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                         reduced_cfg = json.loads(json.dumps(config))
                         source = historical_themes_context or []
                         if isinstance(source, list) and source:
-                            half = max(1, len(source)//2)
-                            reduced_cfg["context_window_size"] = half
-                            print(Fore.CYAN + f"Halving optimization context for this step to {half}." + Style.RESET_ALL)
-                            prompt = create_optimization_prompt(
-                                reduced_cfg, length, track_to_optimize, role, theme_label, theme_detailed_description,
-                                source[-half:], inner_context_tracks, current_theme_index, user_optimization_prompt
+                            original = len(source)
+                            LAST_CONTEXT_COUNT = original
+                            halves = max(1, int(REDUCE_CONTEXT_HALVES))
+                            target = original
+                            for _ in range(halves):
+                                target = max(1, target // 2)
+                            reduced_cfg["context_window_size"] = target
+                            print(Fore.CYAN + f"Applying halve optimization context (x{halves}) for this step: {original} → {target} parts." + Style.RESET_ALL)
+                            print(Fore.CYAN + f"Context in use now: {target} previous theme(s)." + Style.RESET_ALL)
+                            prompt = create_automation_prompt(
+                                reduced_cfg, length, base_track, role, theme_label, theme_detailed_description,
+                                source[-target:], inner_context_tracks, current_theme_index, enhancement_mode=enhancement_mode
                             )
                     except Exception:
                         pass
                     REDUCE_CONTEXT_THIS_STEP = False
+                    REDUCE_CONTEXT_HALVES = 0
                 response = model.generate_content(effective, safety_settings=safety_settings, generation_config=generation_config)
 
                 # Mid-call hotkey: if requested, restart this attempt with new model
@@ -4786,95 +4947,83 @@ def get_role_instructions_for_generation(role: str, config: Dict) -> str:
 
 def get_role_instructions_for_optimization(role: str, config: Dict) -> str:
     """
-    Returns ENHANCED, detailed role instructions for optimization, encouraging
-    the AI to proactively add/refine automations to improve the track.
+    Returns concise, conservative role guidance for optimization.
+    The intent is minimal edits: fix issues and polish, not rewrite.
     """
     base_instructions = (
-        "**Proactively enhance with automation:** Even if the original part had none, add subtle, genre-appropriate automations "
-        "to improve the musicality. Your goal is to make the part more expressive and human."
+        "**Edit Budget:** Change at most ~10–15% of notes. Prefer deletions/shortenings over additions.\n"
+        "**Automation:** Only add subtle automation if it clearly fixes an issue; otherwise keep existing."
     )
 
     if role == "drums":
         return (
             "**Your Role: The Rhythmic Foundation**\n"
-            "Improve the groove and dynamics. Vary hi-hat velocities more. Add subtle pan (CC10) automation to fills or crashes to create a wider stereo image."
+            "Tighten groove minimally. Tweak velocities for feel, remove clutter. Avoid adding many new hits."
         )
     elif role == "kick_and_snare":
         return (
             "**Your Role: The Core Beat (Kick & Snare)**\n"
-            f"Refine the core {config['genre']} groove. Exaggerate the velocity differences between strong and weak hits to make the beat punchier and more dynamic."
+            f"Keep pattern intact; make small velocity balance tweaks for a punchier {config['genre']} groove."
         )
     elif role == "percussion":
         return (
             "**Your Role: Rhythmic Texture**\n"
-            "Add rhythmic complexity. If the part is static, introduce more variation. Use pan (CC10) automation more deliberately to create a sense of movement and space."
+            "Reduce masking, add tiny syncopation if needed. Prefer subtraction over new layers."
         )
     elif role == "bass":
         return (
             "**Your Role: The Rhythmic and Harmonic Anchor**\n"
-            "Enhance the groove. **Proactively add or refine automations:** Introduce short, tasteful pitch bends to slide into notes. "
-            "If the sound is static, add a slow filter sweep (CC74) to create timbral movement."
+            "Tighten timing with kick, tame boomy notes, and adjust a few velocities. Minimal note changes."
         )
     elif role == "sub_bass":
         return (
             "**Your Role: The Low-End Anchor**\n"
-            "Ensure the low-end is powerful and clean. Your rhythm must be tight with the kick. "
-            "Add or refine volume swells using Expression (CC11) to enhance the track's dynamics."
+            "Keep it clean and supportive. Subtle level/duration tweaks only; avoid extra notes."
         )
     elif role in ["pads", "atmosphere"]:
         return (
             "**Your Role: The Emotional Core and Harmonic Glue**\n"
-            "Make the atmosphere more immersive. **Proactively add or refine automations:** "
-            "The part MUST evolve. Enhance it with very slow, subtle filter sweeps (CC74), panning (CC10), or expression (CC11) swells. "
-            "Ensure the sustain pedal is used effectively to create seamless chord transitions."
+            "Smooth voice leading; reduce mud. Very subtle swells allowed; avoid big evolutions."
         )
     elif role == "lead":
         return (
             "**Your Role: The Storyteller and Main Hook**\n"
-            "Make the melody more memorable and human. **Proactively add or refine automations:** "
-            "Add expressive pitch bends for slides and vibrato. Use Expression (CC11) to create dynamic swells on long, sustained notes. "
-            "Use the sustain pedal to create a more legato, connected performance."
+            "Keep motif intact. Nudge phrasing and dynamics slightly; avoid new licks or runs."
         )
     elif role == "melody":
         return (
             "**Your Role: The Supporting Melody**\n"
-            "Ensure this melody perfectly complements the lead. **Proactively add or refine automations:** "
-            "Add subtle pitch bends to make it more lyrical, and use volume swells (CC11) to ensure it sits well in the mix."
+            "Fit under the lead. Minor timing/velocity tweaks; minimal added notes if necessary."
         )
     elif role == "chords":
         return (
             "**Your Role: The Harmonic Core**\n"
-            "Improve the harmonic movement. **Proactively use or refine sustain pedal** usage for better voice leading. "
-            "For rhythmic parts, enhance the groove by adding subtle filter (CC74) or volume (CC11) automation."
+            "Tighten chord voicings and rhythm feel slightly. Keep progression and pattern intact."
         )
     elif role == "arp":
         return (
             "**Your Role: The Hypnotic Arpeggio**\n"
-            "Make the arpeggio more dynamic and evolving. **Proactively add or refine automations:** "
-            "Introduce a slow, rising filter cutoff (CC74) or subtle volume swell (CC11) to build tension across the phrase."
+            "Preserve pattern. Slight velocity shaping and rare grace notes only if needed."
         )
     elif role == "guitar":
         return (
             "**Your Role: Guitar**\n"
-            "Make the performance more realistic and expressive. **Proactively add or refine automations:** "
-            "Add pitch bends for string bends and vibrato. Use the sustain pedal for ringing notes or chords. Use CC11 for dynamics."
+            "Keep riff/voicings. Minor timing/velocity polish; avoid new lines or dense ornaments."
         )
     elif role == "vocal":
         return (
             "**Your Role: Vocal Line**\n"
-            "Enhance the vocal-like quality. **Proactively add or refine automations:** "
-            "Use pitch bends extensively for slides and vibrato to emulate a human singer. Shape phrases with Expression (CC11)."
+            "Maintain melody shape. Subtle dynamics and phrasing tweaks; avoid new melismas."
         )
     elif role in ["fx", "riser"]:
         return (
             "**Your Role: Sound Effects & Transitions**\n"
-            "Make the transitions more impactful. **Proactively add or refine automations:** "
-            "This role is defined by automation. Ensure risers have smooth pitch bend ramps and that sweeps use filter (CC74) or pan (CC10) automation effectively."
+            "Use existing gestures; only smooth obvious bumps. Avoid larger new sweeps/risers."
         )
     else:
         return (
             f"**Your Role: {role.title()}**\n"
-            f"Refine this part so it better enhances the overall composition. {base_instructions}"
+            f"Polish minimally to better fit the mix. {base_instructions}"
         )
 
 def get_progress_filename(config: Dict, run_timestamp: str) -> str:
