@@ -31,7 +31,8 @@ AUTO_ESCALATE_TO_PRO = False      # If True and using flash, auto-switch to pro 
 AUTO_ESCALATE_THRESHOLD = 6
 DEFER_CURRENT_TRACK = False       # If True, immediately defer the current track (skip and push to end)
 HOTKEY_DEBOUNCE_SEC = 0.8         # Debounce window for hotkeys
-_LAST_HOTKEY_TS = {'1': 0.0, '2': 0.0, '3': 0.0, '0': 0.0, 'a': 0.0, 'd': 0.0}
+_LAST_HOTKEY_TS = {'1': 0.0, '2': 0.0, '3': 0.0, '0': 0.0, 'a': 0.0, 'd': 0.0, 'h': 0.0}
+REDUCE_CONTEXT_THIS_STEP = False  # If True, halve historical context for the current step
 
 def _hotkey_monitor_loop(config: Dict):
     """Background loop to catch hotkeys continuously while long API calls run."""
@@ -97,6 +98,13 @@ def _hotkey_monitor_loop(config: Dict):
                     global DEFER_CURRENT_TRACK
                     DEFER_CURRENT_TRACK = True
                     print(Fore.MAGENTA + "\nDeferred: current track will be moved to the end of the queue." + Style.RESET_ALL)
+                elif ch == 'h':
+                    if now - _LAST_HOTKEY_TS.get('h', 0.0) < HOTKEY_DEBOUNCE_SEC:
+                        continue
+                    _LAST_HOTKEY_TS['h'] = now
+                    globals()['REDUCE_CONTEXT_THIS_STEP'] = True
+                    globals()['ABORT_CURRENT_STEP'] = True
+                    print(Fore.CYAN + "\nRequested: halve historical context for THIS step (will restart current step)." + Style.RESET_ALL)
             time.sleep(0.05)
     except Exception:
         pass
@@ -284,10 +292,11 @@ def print_hotkey_hint(config: Dict, context: str = "") -> None:
             Style.DIM
             + Fore.CYAN
             + (
-                f"Hotkeys{ctx}: 1=gemini-2.5-pro, 2=gemini-2.5-flash, 3={custom}, 0=set session default, "
-                f"a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails{escalate_state}), d=defer track"
+                f"Hotkeys{ctx}: 1=pro (this step), 2=flash (this step), 3={custom} (this step), 0=set session default, "
+                f"h=halve context (this step), a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails{escalate_state}), d=defer track"
             )
-            + "\n  Note: Changes take effect immediately after the current request or backoff is interrupted."
+            + "\n  Note: 1/2/3 switch only this step. Press 0 to keep current as session default."
+            + "\n        Changes take effect after the current request/backoff is interrupted (press any hotkey to interrupt waits)."
             + Style.RESET_ALL
         )
     except Exception:
@@ -1342,6 +1351,11 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
     prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history, current_theme_index)
     # Local model override for this step (interactive switch on repeated failures)
     local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
+    try:
+        origin = "session default" if SESSION_MODEL_OVERRIDE else "config default"
+        print(Fore.CYAN + f"Model for this step: {local_model_name} ({origin}). Press 1/2/3 to switch for THIS step only; press 0 to set current as session default." + Style.RESET_ALL)
+    except Exception:
+        pass
     json_failure_count = 0
     failure_for_escalation_count = 0
     # MAX_TOKENS phase counters
@@ -1357,12 +1371,13 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
             pass
     
     # Reset runtime hotkey guards/state for this step and show hint
-    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK
+    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK, REDUCE_CONTEXT_THIS_STEP
     PROMPTED_CUSTOM_THIS_STEP = False
     REQUESTED_SWITCH_MODEL = None
     REQUEST_SET_SESSION_DEFAULT = False
     ABORT_CURRENT_STEP = False
     DEFER_CURRENT_TRACK = False
+    REDUCE_CONTEXT_THIS_STEP = False
     # Show hotkey hint once before we start attempts
     print_hotkey_hint(config, context=f"Generate: {instrument_name}")
     # Start background hotkey monitor once per process
@@ -1458,10 +1473,20 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                         DEFER_CURRENT_TRACK = False
                         return None, 0
                     ABORT_CURRENT_STEP = False
-                response = model.generate_content(
-                    effective_prompt,
-                    safety_settings=safety_settings
-                )
+                # Apply on-demand context halving (hotkey 'h')
+                if REDUCE_CONTEXT_THIS_STEP:
+                    try:
+                        reduced_cfg = json.loads(json.dumps(config))
+                        prev_ctx = previous_themes_full_history
+                        if isinstance(prev_ctx, list) and prev_ctx:
+                            half = max(1, len(prev_ctx)//2)
+                            reduced_cfg["context_window_size"] = half
+                            print(Fore.CYAN + f"Halving historical context for this step to {half}." + Style.RESET_ALL)
+                            prompt = create_theme_prompt(reduced_cfg, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history[-half:], current_theme_index)
+                    except Exception:
+                        pass
+                    REDUCE_CONTEXT_THIS_STEP = False
+                response = model.generate_content(effective_prompt, safety_settings=safety_settings)
                 
                 # --- Robust Response Validation ---
                 # 1. Check if the response was blocked or is otherwise invalid before accessing .text
@@ -1828,6 +1853,8 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
         if 'user_optimization_prompt' in resume_data:
             effective_prompt = resume_data['user_optimization_prompt']
             print(f"Using saved optimization prompt: '{effective_prompt}'")
+        # Restore deferred queue for the theme we resume in (if present)
+        resume_deferred_tracks = resume_data.get('deferred_tracks', []) or []
     
     print() # Spacer for readability
 
@@ -1841,6 +1868,13 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
             tracks = theme_to_optimize.get('tracks', [])
             optimized_tracks_for_theme = tracks[:] # Start with a copy
             theme_deferred_tracks = []  # (track_index, failure_count)
+            # If resuming inside this theme, restore its deferred queue
+            try:
+                if 'resume_deferred_tracks' in locals() and theme_index == start_theme_index and resume_deferred_tracks:
+                    theme_deferred_tracks = list(resume_deferred_tracks)
+                    print(Fore.CYAN + f"Restored {len(theme_deferred_tracks)} deferred track(s) for this theme from resume." + Style.RESET_ALL)
+            except Exception:
+                pass
             
             # Define the historical context for the AI (all previously processed themes)
             historical_context = optimized_themes[:theme_index]
@@ -1930,6 +1964,22 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
                 else:
                     # Track failed (e.g., MAX_TOKENS deferral): push to deferred queue for this theme
                     theme_deferred_tracks.append([track_index, 1])
+                    # Persist progress including current deferred queue
+                    try:
+                        progress_data_to_save = {
+                            'type': 'optimization', 'config': config, 'theme_length': theme_length,
+                            'themes_to_optimize': optimized_themes, 'opt_iteration_num': opt_iteration_num,
+                            'final_optimized_themes': optimized_themes, 'current_theme_index': theme_index,
+                            'current_track_index': track_index + 1,
+                            'user_optimization_prompt': effective_prompt,
+                            'total_optimization_tokens': total_optimization_tokens,
+                            'total_tokens_used': total_optimization_tokens,
+                            'deferred_tracks': theme_deferred_tracks,
+                            'timestamp': run_timestamp
+                        }
+                        save_progress(progress_data_to_save, script_dir, run_timestamp)
+                    except Exception:
+                        pass
             # Retry deferred tracks for this theme until success or cap
             round_counter = 0
             while theme_deferred_tracks and round_counter < 10:
@@ -1984,6 +2034,23 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
                     else:
                         print(Fore.RED + f"Giving up on track '{instrument_name}' in theme {theme_index+1} after 10 failure cycles." + Style.RESET_ALL)
                 print(Fore.CYAN + f"Cumulative optimization tokens so far: {total_optimization_tokens:,}" + Style.RESET_ALL)
+
+            # After finishing retries for this theme, clear deferred queue in saved progress
+            try:
+                progress_data_to_save = {
+                    'type': 'optimization', 'config': config, 'theme_length': theme_length,
+                    'themes_to_optimize': optimized_themes, 'opt_iteration_num': opt_iteration_num,
+                    'final_optimized_themes': optimized_themes, 'current_theme_index': theme_index,
+                    'current_track_index': 0,
+                    'user_optimization_prompt': effective_prompt,
+                    'total_optimization_tokens': total_optimization_tokens,
+                    'total_tokens_used': total_optimization_tokens,
+                    'deferred_tracks': [],
+                    'timestamp': run_timestamp
+                }
+                save_progress(progress_data_to_save, script_dir, run_timestamp)
+            except Exception:
+                pass
 
             # Export this theme's final part MIDI now that all its retries are done
             try:
@@ -2246,6 +2313,7 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
         f"{inner_context_prompt_part}"
         f"{original_part_prompt}"
         f"{optimization_instruction}\n"
+        f"**Motif Coherence:** Reprise the main motif where musically appropriate, and prefer transformations (inversion, octave shift, rhythm augmentation) over new ideas.\n\n"
         f"{optimization_goal_prompt}"
         f"{role_instructions}\n"
         f"{drum_map_instructions}"
@@ -2263,6 +2331,10 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
 
         f"**--- OUTPUT FORMAT: JSON ---**\n"
         f"Your response MUST be a single, valid JSON object with ONLY these top-level keys: `notes` (required), `track_automations` (optional), `sustain_pedal` (optional), `pattern_blocks` (optional). No other top-level keys. No prose, no markdown.\n\n"
+        f"Minimal example (structure only):\n"
+        f"```json\n"
+        f"{{\n  \"notes\": [{{\"pitch\": 60, \"start_beat\": 0.0, \"duration_beats\": 1.0, \"velocity\": 100}}],\n  \"track_automations\": {{\"cc\": [{{\"type\": \"curve\", \"cc\": 11, \"start_beat\": 0.0, \"end_beat\": 4.0, \"start_value\": 60, \"end_value\": 80, \"bias\": 1.0}}]}},\n  \"sustain_pedal\": [{{\"beat\": 0.0, \"action\": \"down\"}}, {{\"beat\": 3.5, \"action\": \"up\"}}]\n}}\n"
+        f"```\n\n"
         f'1.  **Notes Array:** The JSON object MUST have a key named `"notes"` containing an array of note objects. Each note object MUST have these keys:\n'
         f'    - **"pitch"**: MIDI note number (integer 0-127).\n'
         f'    - **"start_beat"**: The beat on which the note begins (float, relative to the start of this part).\n'
@@ -2294,16 +2366,22 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
     )
     max_retries = 6
     local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
+    try:
+        origin = "session default" if SESSION_MODEL_OVERRIDE else "config default"
+        print(Fore.CYAN + f"Model for this step: {local_model_name} ({origin}). Press 1/2/3 to switch for THIS step only; press 0 to set current as session default." + Style.RESET_ALL)
+    except Exception:
+        pass
     json_failure_count = 0
     max_tokens_fail_flash = 0
     max_tokens_fail_pro = 0
     # Reset custom prompt guard for this step and show hint
-    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK
+    global PROMPTED_CUSTOM_THIS_STEP, REQUESTED_SWITCH_MODEL, REQUEST_SET_SESSION_DEFAULT, ABORT_CURRENT_STEP, DEFER_CURRENT_TRACK, REDUCE_CONTEXT_THIS_STEP
     PROMPTED_CUSTOM_THIS_STEP = False
     REQUESTED_SWITCH_MODEL = None
     REQUEST_SET_SESSION_DEFAULT = False
     ABORT_CURRENT_STEP = False
     DEFER_CURRENT_TRACK = False
+    REDUCE_CONTEXT_THIS_STEP = False
     # Show hotkey hint before attempts
     print_hotkey_hint(config, context=f"Optimize: {track_to_optimize.get('instrument_name','track')}")
     global HOTKEY_MONITOR_STARTED
@@ -2406,6 +2484,21 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                     if AUTO_ESCALATE_TO_PRO and local_model_name == 'gemini-2.5-flash' and json_failure_count >= AUTO_ESCALATE_THRESHOLD:
                         local_model_name = 'gemini-2.5-pro'
                         print(Fore.CYAN + f"Auto-escalate: switching to {local_model_name} for this track after {json_failure_count} failures." + Style.RESET_ALL)
+                    # After two MAX_TOKENS or repeated truncation symptoms, reduce context window by half
+                    try:
+                        if (('flash' in (local_model_name or '')) and max_tokens_fail_flash >= 2) or (('pro' in (local_model_name or '')) and max_tokens_fail_pro >= 2):
+                            reduced_cfg = json.loads(json.dumps(config))
+                            source = historical_themes_context or []
+                            if isinstance(source, list) and source:
+                                half = max(1, len(source)//2)
+                                reduced_cfg["context_window_size"] = half
+                                print(Fore.CYAN + f"Reducing optimization context window to {half} due to repeated token issues." + Style.RESET_ALL)
+                                prompt = create_optimization_prompt(
+                                    reduced_cfg, length, track_to_optimize, role, theme_label, theme_detailed_description,
+                                    source[-half:], inner_context_tracks, current_theme_index, user_optimization_prompt
+                                )
+                    except Exception:
+                        pass
                     continue
                 parsed_data = json.loads(json_payload)
                 
@@ -2765,6 +2858,22 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                         DEFER_CURRENT_TRACK = False
                         return None, 0
                     ABORT_CURRENT_STEP = False
+                # Apply on-demand context halving (hotkey 'h')
+                if REDUCE_CONTEXT_THIS_STEP:
+                    try:
+                        reduced_cfg = json.loads(json.dumps(config))
+                        source = historical_themes_context or []
+                        if isinstance(source, list) and source:
+                            half = max(1, len(source)//2)
+                            reduced_cfg["context_window_size"] = half
+                            print(Fore.CYAN + f"Halving optimization context for this step to {half}." + Style.RESET_ALL)
+                            prompt = create_optimization_prompt(
+                                reduced_cfg, length, track_to_optimize, role, theme_label, theme_detailed_description,
+                                source[-half:], inner_context_tracks, current_theme_index, user_optimization_prompt
+                            )
+                    except Exception:
+                        pass
+                    REDUCE_CONTEXT_THIS_STEP = False
                 response = model.generate_content(effective, safety_settings=safety_settings, generation_config=generation_config)
 
                 # Mid-call hotkey: if requested, restart this attempt with new model
@@ -3019,6 +3128,8 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                             duration = pb_end_beat - pb_start_beat
                             if duration <= 0: continue
                             num_steps = int(duration / resolution)
+                            if num_steps == 0:
+                                num_steps = 1
                             if num_steps > MAX_AUTOMATION_STEPS:
                                 num_steps = MAX_AUTOMATION_STEPS
                             for step in range(num_steps + 1):
@@ -3046,6 +3157,8 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                             duration = cc_end_beat - cc_start_beat
                             if duration <= 0: continue
                             num_steps = int(duration / resolution)
+                            if num_steps == 0:
+                                num_steps = 1
                             if num_steps > MAX_AUTOMATION_STEPS:
                                 num_steps = MAX_AUTOMATION_STEPS
                             for step in range(num_steps + 1):
