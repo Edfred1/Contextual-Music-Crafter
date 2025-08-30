@@ -580,8 +580,8 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
             suffix = f"_win{window_bars}" + ("_seam" if seam_mode else "")
             final_path = os.path.join(script_dir, f"{base}{suffix}.mid")
             create_midi_from_json(final_song_data, config, final_path)
-        except Exception:
-            pass
+        except Exception as e:
+            print(Fore.YELLOW + f"Warning: Could not create final combined MIDI after windowed optimization: {e}" + Style.RESET_ALL)
         return themes
     window_parts = window_bars // theme_length_bars
     if window_parts <= 1:
@@ -2219,9 +2219,12 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
         except Exception:
             pass
 
-        # Create the final optimized MIDI file
-        final_base = build_final_song_basename(config, optimized_themes, run_timestamp, resumed=True, opt_iteration=opt_iteration_num)
-        create_midi_from_json(merge_themes_to_song_data(optimized_themes, config, theme_length), config, os.path.join(script_dir, f"{final_base}.mid"))
+        # Create the final optimized MIDI file (always)
+        try:
+            final_base = build_final_song_basename(config, optimized_themes, run_timestamp, resumed=True, opt_iteration=opt_iteration_num)
+            create_midi_from_json(merge_themes_to_song_data(optimized_themes, config, theme_length), config, os.path.join(script_dir, f"{final_base}.mid"))
+        except Exception as e:
+            print(Fore.YELLOW + f"Warning: Could not create final optimized MIDI: {e}" + Style.RESET_ALL)
 
         # Return the optimized themes
         return optimized_themes
@@ -3154,14 +3157,14 @@ def create_automation_enhancement(config: Dict, theme_length: int, themes_to_enh
                     }, script_dir, run_timestamp)
                 except Exception:
                     pass
-        # After enhancement, write a combined final MIDI for this pass
+        # After enhancement, always write a combined final MIDI for this pass
         try:
             final_song_data = merge_themes_to_song_data(optimized, config, theme_length)
             base = build_final_song_basename(config, optimized, run_timestamp, resumed=True)
             final_path = os.path.join(script_dir, f"{base}_automation.mid")
             create_midi_from_json(final_song_data, config, final_path)
-        except Exception:
-            pass
+        except Exception as e:
+            print(Fore.YELLOW + f"Warning: Could not create final MIDI after automation enhancement: {e}" + Style.RESET_ALL)
         return optimized
     except Exception as e:
         print(Fore.RED + f"Automation enhancement failed: {e}" + Style.RESET_ALL)
