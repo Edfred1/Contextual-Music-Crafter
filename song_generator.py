@@ -573,6 +573,15 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
             create_midi_from_json(final_song_data, config, final_path)
         except Exception:
             pass
+        # After all windows processed, always export a final combined MIDI for this pass
+        try:
+            final_song_data = merge_themes_to_song_data(themes, config, theme_length_bars)
+            base = build_final_song_basename(config, themes, run_timestamp, resumed=True)
+            suffix = f"_win{window_bars}" + ("_seam" if seam_mode else "")
+            final_path = os.path.join(script_dir, f"{base}{suffix}.mid")
+            create_midi_from_json(final_song_data, config, final_path)
+        except Exception:
+            pass
         return themes
     window_parts = window_bars // theme_length_bars
     if window_parts <= 1:
