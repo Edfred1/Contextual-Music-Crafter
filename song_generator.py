@@ -608,7 +608,7 @@ def create_windowed_optimization(config: Dict, themes: List[Dict], theme_length_
             try:
                 rf_list = find_progress_files(script_dir)
                 for rf in rf_list:
-                    pdata = load_progress(rf)
+                    pdata = _load_progress_silent(rf)
                     if pdata and pdata.get('type') == 'window_optimization' and pdata.get('window_bars') == window_bars and int(pdata.get('current_window_start_index', -1)) == start:
                         track_resume_index = int(pdata.get('current_track_in_window', 0))
                         break
