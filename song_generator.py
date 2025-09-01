@@ -4241,12 +4241,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 
                 if optimized_themes:
                     time.sleep(2)
-                    base_name = re.sub(r'_opt_\d+$', '', final_song_basename)
-                    opt_fname = os.path.join(script_dir, f"{base_name}_opt_{opt_iter}.mid")
-                    
+                    # Build merged song data for session state, but avoid duplicate final MIDI export here
                     final_song_data = merge_themes_to_song_data(optimized_themes, config, theme_len)
-                    create_midi_from_json(final_song_data, config, opt_fname)
-                    
                     last_generated_themes = optimized_themes
                     last_generated_song_data = final_song_data
                     
