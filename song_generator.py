@@ -2221,7 +2221,8 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
 
         # Create the final optimized MIDI file (always)
         try:
-            final_base = build_final_song_basename(config, optimized_themes, run_timestamp, resumed=True, opt_iteration=opt_iteration_num)
+            # Use non-resumed base so numbering (_opt_N) aligns with menu's base detection
+            final_base = build_final_song_basename(config, optimized_themes, run_timestamp, resumed=False, opt_iteration=opt_iteration_num)
             create_midi_from_json(merge_themes_to_song_data(optimized_themes, config, theme_length), config, os.path.join(script_dir, f"{final_base}.mid"))
         except Exception as e:
             print(Fore.YELLOW + f"Warning: Could not create final optimized MIDI: {e}" + Style.RESET_ALL)
