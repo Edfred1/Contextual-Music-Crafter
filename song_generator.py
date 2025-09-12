@@ -831,6 +831,19 @@ def load_config(config_file):
                 config["automation_settings"][key] = default
         if "allowed_cc_numbers" not in config["automation_settings"]: config["automation_settings"]["allowed_cc_numbers"] = []
 
+        # --- NEW: MPE defaults ---
+        if "mpe" not in config or not isinstance(config.get("mpe"), dict):
+            config["mpe"] = {}
+        mpe_cfg = config["mpe"]
+        mpe_cfg.setdefault("enabled", 0)
+        mpe_cfg.setdefault("zone", "lower")
+        mpe_cfg.setdefault("master_channel", 1)
+        mpe_cfg.setdefault("member_channels_start", 2)
+        mpe_cfg.setdefault("member_channels_end", 16)
+        mpe_cfg.setdefault("pitch_bend_range_semitones", 48)
+        mpe_cfg.setdefault("max_voices", 10)
+        mpe_cfg.setdefault("voice_steal_policy", "last_note")
+
         for field in required_fields:
             if field not in config:
                 if field == "time_signature":
@@ -2221,7 +2234,6 @@ def create_song_optimization(config: Dict, theme_length: int, themes_to_optimize
 
         # Create the final optimized MIDI file (always)
         try:
-            # Use non-resumed base so numbering (_opt_N) aligns with menu's base detection
             final_base = build_final_song_basename(config, optimized_themes, run_timestamp, resumed=False, opt_iteration=opt_iteration_num)
             create_midi_from_json(merge_themes_to_song_data(optimized_themes, config, theme_length), config, os.path.join(script_dir, f"{final_base}.mid"))
         except Exception as e:
@@ -3227,6 +3239,331 @@ def generate_one_theme(config, length: int, theme_def: dict, previous_themes: Li
 
     return True, {"theme_label": theme_def['label'], "tracks": generated_tracks}, total_tokens
 
+# --- NEW: Single-Track Prompting (Standalone) ---
+def create_single_track_prompt(config: Dict, length_bars: int, instrument_name: str, program_num: int, role: str, description: str, *, mpe_enabled: bool) -> str:
+    """A compact, role- and expression-focused prompt for standalone tracks (no song context)."""
+    beats_per_bar = config["time_signature"]["beats_per_bar"]
+    total_beats = length_bars * beats_per_bar
+    scale_notes = get_scale_notes(config.get("root_note", 60), config.get("scale_type", "minor"))
+    # FREE MODE: No hard role binding. Role is only an intent tag.
+
+    a = config.get("automation_settings", {})
+    use_pb = a.get("use_pitch_bend", 0) == 1
+    use_cc = a.get("use_cc_automation", 0) == 1
+    allowed_ccs = a.get("allowed_cc_numbers", [])
+
+    mpe_text = ""
+    if mpe_enabled:
+        mpe_text = (
+            "\n**MPE Focus:**\n"
+            "- Prefer per-note pitch_bend curves (one curve per note).\n"
+            "- Favor glides/slides on transitions and light vibrato on sustained notes.\n"
+            "- Do not use track_automations for pitch bend; keep it per note.\n"
+            "- Keep curve density moderate (~0.1 beat resolution) and only where musically meaningful.\n"
+        )
+    else:
+        if use_pb or use_cc:
+            mpe_text = (
+                "\n**Expression (optional):**\n"
+                "- You MAY use per-note pitch_bend or CC (only allowed: " + ", ".join(map(str, allowed_ccs)) + ") sparingly and musically.\n"
+            )
+
+    prompt = (
+        f"You are an expert MIDI musician. Compose a single standalone track.\n\n"
+        f"**Context**\n"
+        f"- Genre: {config.get('genre','')}\n"
+        f"- Tempo: {config.get('bpm',120)} BPM\n"
+        f"- Time Signature: {beats_per_bar}/{config['time_signature'].get('beat_value',4)}\n"
+        f"- Key/Scale: {config.get('key_scale','')} (Notes: {scale_notes})\n"
+        f"- Track Length: {length_bars} bars ({total_beats} beats)\n"
+        f"- Instrument: {instrument_name} (Program: {program_num})\n"
+        f"- Intent (optional): {role or 'free'}\n\n"
+        f"**Creative Direction**\n{description}\n\n"
+        f"**Guidelines**\n"
+        f"1. Freedom: You MAY combine chords, single-note melodies, long sustains, and overlaps.\n"
+        f"2. Voice-leading & texture: Alternate between dense chord moments and sparse single notes; use overlaps for legato/tension.\n"
+        f"3. Pitch material: Use the scale notes {scale_notes} predominantly, with occasional passing tones as tasteful exceptions.\n"
+        f"4. Timing: 'start_beat' is relative to the start of this {length_bars}-bar clip.\n"
+        f"5. Dynamics & groove: Shape phrases with velocity contours; use micro-timing subtly.\n"
+        f"6. Density: Aim for < 300 notes; include intentional rests for clarity.\n"
+        f"7. Sorting: sort notes by 'start_beat' ascending; use dot decimals.\n"
+        f"8. Optional 'pattern_blocks' for very fast grids; notes may overlap.\n"
+        f"{mpe_text}\n\n"
+        f"**Output (strict JSON):**\n"
+        f"Return a single JSON object with top-level keys: 'notes' (required), optional 'track_automations', 'sustain_pedal', 'pattern_blocks'.\n"
+        f"Each note: pitch (0-127), start_beat (float), duration_beats (float), velocity (1-127).\n"
+        f"Note-level automations (if any): 'automations': {{ 'pitch_bend': [{{type:'curve', start_beat:..., end_beat:..., start_value:..., end_value:..., bias:1.0}}], 'cc': [...] }}.\n"
+        f"Output ONLY the JSON object, no prose.\n"
+    )
+    return prompt
+
+def generate_single_track_data(config: Dict, length_bars: int, instrument_name: str, program_num: int, role: str, description: str, mpe_enabled: bool) -> Tuple[Dict, int]:
+    """Generates a single standalone track using a compact prompt tailored to role/MPE."""
+    global CURRENT_KEY_INDEX, SESSION_MODEL_OVERRIDE
+    prompt = create_single_track_prompt(config, length_bars, instrument_name, program_num, role, description, mpe_enabled=mpe_enabled)
+    local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
+    json_failure_count = 0
+    total_token_count = 0
+    print_hotkey_hint(config, context=f"Single: {instrument_name}")
+    max_retries = 6
+    last_resp_preview = ""
+    last_error_msg = ""
+    for attempt in range(max_retries):
+        try:
+            generation_config = {
+                "temperature": config["temperature"],
+                "response_mime_type": "application/json",
+                "max_output_tokens": config.get("max_output_tokens", 8192)
+            }
+            model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+            safety_settings=[
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ]
+            effective_prompt = prompt + "\nOutput: Return a single JSON object with a 'notes' key only; no prose.\n"
+            response = model.generate_content(effective_prompt, safety_settings=safety_settings, generation_config=generation_config)
+            # Safety block check (diagnostic)
+            try:
+                if hasattr(response, 'prompt_feedback') and getattr(response.prompt_feedback, 'block_reason', None):
+                    reason = None
+                    try:
+                        reason = response.prompt_feedback.block_reason.name
+                    except Exception:
+                        reason = str(getattr(response.prompt_feedback, 'block_reason', 'UNKNOWN'))
+                    print(Fore.RED + f"Attempt {attempt+1}: Prompt was blocked by safety filter: {reason}" + Style.RESET_ALL)
+                    json_failure_count += 1
+                    continue
+            except Exception:
+                pass
+
+            resp_text = _extract_text_from_response(response)
+            if hasattr(response, 'usage_metadata'):
+                total_token_count = response.usage_metadata.total_token_count or 0
+            if not resp_text:
+                json_failure_count += 1
+                continue
+            json_payload = _extract_json_object(resp_text)
+            if not json_payload:
+                json_failure_count += 1
+                last_resp_preview = (resp_text or "")[-240:]
+                continue
+            try:
+                data = json.loads(json_payload)
+            except Exception:
+                json_failure_count += 1
+                last_resp_preview = (resp_text or "")[-240:]
+                continue
+
+            # --- Robust fallbacks for various response shapes ---
+            def _looks_like_note(obj: Dict) -> bool:
+                try:
+                    return (
+                        isinstance(obj, dict)
+                        and 'pitch' in obj
+                        and 'start_beat' in obj
+                        and ('duration_beats' in obj or 'duration' in obj)
+                    )
+                except Exception:
+                    return False
+
+            if isinstance(data, list):
+                if all(_looks_like_note(n) for n in data):
+                    data = {"notes": data}
+                else:
+                    json_failure_count += 1
+                    last_resp_preview = (resp_text or "")[-240:]
+                    continue
+            elif isinstance(data, dict):
+                if "notes" not in data:
+                    # Common wrapper keys
+                    for k in ["track", "data", "midi", "result"]:
+                        try:
+                            if isinstance(data.get(k), dict) and isinstance(data[k].get("notes"), list):
+                                data = data[k]
+                                break
+                        except Exception:
+                            pass
+                # Alternate key name
+                if "notes" not in data and isinstance(data.get("events"), list):
+                    data["notes"] = data.get("events")
+                if "notes" not in data:
+                    json_failure_count += 1
+                    last_resp_preview = (resp_text or "")[-240:]
+                    continue
+            else:
+                json_failure_count += 1
+                last_resp_preview = (resp_text or "")[-240:]
+                continue
+            # Expand pattern blocks if present
+            try:
+                if isinstance(data.get("pattern_blocks"), list):
+                    expanded = _expand_pattern_blocks(data.get("pattern_blocks"), length_bars, config["time_signature"]["beats_per_bar"])
+                    if expanded:
+                        if isinstance(data.get("notes"), list):
+                            data["notes"].extend(expanded)
+                        else:
+                            data["notes"] = expanded
+                # Ensure notes are sorted by start_beat
+                if isinstance(data.get("notes"), list):
+                    try:
+                        data["notes"].sort(key=lambda n: float(n.get("start_beat", 0.0)))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return {
+                "instrument_name": instrument_name,
+                "program_num": program_num,
+                "role": role,
+                "notes": data.get("notes", []),
+                **({"sustain_pedal": data.get("sustain_pedal", [])} if isinstance(data.get("sustain_pedal"), list) else {}),
+                **({"track_automations": data.get("track_automations", {})} if isinstance(data.get("track_automations"), dict) else {})
+            }, total_token_count
+        except Exception as e:
+            json_failure_count += 1
+            try:
+                last_error_msg = str(e) or last_error_msg
+            except Exception:
+                pass
+            # Handle 429 / quota with key rotation & cooldown
+            try:
+                err_text = str(e)
+                if '429' in err_text or 'quota' in err_text.lower() or 'rate limit' in err_text.lower():
+                    error_message = err_text
+                    qtype = _classify_quota_error(error_message)
+                    cooldown = PER_MINUTE_COOLDOWN_SECONDS
+                    if qtype in ('per-hour', 'rate-limit'):
+                        cooldown = PER_HOUR_COOLDOWN_SECONDS
+                    elif qtype == 'per-day':
+                        cooldown = PER_DAY_COOLDOWN_SECONDS
+                    _set_key_cooldown(CURRENT_KEY_INDEX, cooldown)
+                    nxt = _next_available_key(CURRENT_KEY_INDEX)
+                    if nxt is not None:
+                        CURRENT_KEY_INDEX = nxt
+                        try:
+                            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                        except Exception:
+                            pass
+                        print(Fore.CYAN + f"Retrying with API key #{CURRENT_KEY_INDEX+1} after quota classification: {qtype}" + Style.RESET_ALL)
+                        continue
+                    else:
+                        if _all_keys_cooling_down():
+                            wait_s = max(5.0, _seconds_until_first_available())
+                            print(Fore.YELLOW + f"All API keys cooling down ({qtype}). Waiting {int(wait_s)}s before retry..." + Style.RESET_ALL)
+                            _interruptible_backoff(wait_s, config, context_label="SingleTrack 429 cooldown")
+                            continue
+            except Exception:
+                pass
+            time.sleep(1.0)
+            continue
+    print(Fore.RED + f"All attempts failed to produce valid JSON for single track (failures: {json_failure_count})." + Style.RESET_ALL)
+    if last_resp_preview:
+        print(Fore.YELLOW + "Response tail (debug): " + Style.DIM + last_resp_preview + Style.RESET_ALL)
+    if last_error_msg:
+        print(Fore.YELLOW + f"Last error: {last_error_msg}" + Style.RESET_ALL)
+    return None, 0
+
+# --- NEW: MPE Single-Track Optimization Prompt ---
+def create_mpe_single_track_optimization_prompt(config: Dict, length_bars: int, base_track: Dict, description: str, *, mpe_enabled: bool) -> str:
+    beats_per_bar = config["time_signature"]["beats_per_bar"]
+    total_beats = length_bars * beats_per_bar
+    scale_notes = get_scale_notes(config.get("root_note", 60), config.get("scale_type", "minor"))
+    original_part_str = json.dumps({
+        'instrument_name': get_instrument_name(base_track),
+        'program_num': base_track.get('program_num', 0),
+        'role': base_track.get('role', 'free'),
+        'notes': base_track.get('notes', [])
+    }, separators=(',', ':'))
+
+    mpe_block = (
+        "**MPE Optimization:**\n"
+        "- Prefer per-note pitch_bend curves (glides; light vibrato on sustained notes).\n"
+        "- Place curves sparingly at musical inflection points (chord changes, ornaments, suspensions).\n"
+        "- Do not use track-wide pitch bends.\n"
+        "- Keep density moderate (~0.1 beat resolution) and add a reset to 0 after curves.\n"
+    ) if mpe_enabled else (
+        "**Expression (optional):** You MAY use per-note pitch_bend and CC (allowed CCs per config) sparingly.\n"
+    )
+
+    prompt = (
+        f"You are an expert MIDI musician. Refine the given standalone track to increase musical interest and expression.\n\n"
+        f"**Context**\n"
+        f"- Genre: {config.get('genre','')} | Tempo: {config.get('bpm',120)} BPM | Signature: {beats_per_bar}/{config['time_signature'].get('beat_value',4)} | Length: {length_bars} bars ({total_beats} beats)\n"
+        f"- Key/Scale: {config.get('key_scale','')} (Notes: {scale_notes})\n\n"
+        f"**Creative Direction (goal):**\n{description}\n\n"
+        f"**Original Part (JSON):**\n```json\n{original_part_str}\n```\n\n"
+        f"**Your Task (Conservative Changes):**\n"
+        f"- Preserve the musical identity and structure.\n"
+        f"- Create interesting motion via good voice-leading, occasional overlaps, and tasteful ornaments.\n"
+        f"- Small, targeted note edits allowed (split/merge, subtle duration/position tweaks, < 15% note changes).\n"
+        f"- Use rests deliberately; avoid clutter.\n\n"
+        f"{mpe_block}\n\n"
+        f"**Output (strict JSON):** Return a single object with 'notes' (required), optional 'sustain_pedal', 'track_automations', 'pattern_blocks'.\n"
+        f"Each note: pitch, start_beat (relative to the part start), duration_beats, velocity.\n"
+        f"Output ONLY the JSON object, no prose.\n"
+    )
+    return prompt
+
+def generate_mpe_single_track_optimization_data(config: Dict, length_bars: int, base_track: Dict, description: str, mpe_enabled: bool) -> Tuple[Dict, int]:
+    prompt = create_mpe_single_track_optimization_prompt(config, length_bars, base_track, description, mpe_enabled=mpe_enabled)
+    local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
+    total_token_count = 0
+    max_retries = 6
+    for attempt in range(max_retries):
+        try:
+            generation_config = {
+                "temperature": config["temperature"],
+                "response_mime_type": "application/json",
+                "max_output_tokens": config.get("max_output_tokens", 8192)
+            }
+            model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+            safety_settings=[
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ]
+            effective_prompt = prompt + "\nOutput: Return a single JSON object with a 'notes' key only; no prose.\n"
+            response = model.generate_content(effective_prompt, safety_settings=safety_settings, generation_config=generation_config)
+            resp_text = _extract_text_from_response(response)
+            if hasattr(response, 'usage_metadata'):
+                total_token_count = response.usage_metadata.total_token_count or 0
+            if not resp_text:
+                continue
+            json_payload = _extract_json_object(resp_text)
+            if not json_payload:
+                continue
+            data = json.loads(json_payload)
+            if not isinstance(data, dict) or "notes" not in data:
+                continue
+            # Expand pattern blocks if present
+            try:
+                if isinstance(data.get("pattern_blocks"), list):
+                    expanded = _expand_pattern_blocks(data.get("pattern_blocks"), length_bars, config["time_signature"]["beats_per_bar"])
+                    if expanded:
+                        if isinstance(data.get("notes"), list):
+                            data["notes"].extend(expanded)
+                        else:
+                            data["notes"] = expanded
+            except Exception:
+                pass
+            merged = {
+                "instrument_name": get_instrument_name(base_track),
+                "program_num": base_track.get("program_num", 0),
+                "role": base_track.get("role", "free"),
+                "notes": data.get("notes", base_track.get("notes", []))
+            }
+            if isinstance(data.get("sustain_pedal"), list):
+                merged["sustain_pedal"] = data.get("sustain_pedal", [])
+            if isinstance(data.get("track_automations"), dict):
+                merged["track_automations"] = data.get("track_automations", {})
+            return merged, total_token_count
+        except Exception:
+            continue
+    return None, 0
+
 def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_offset_beats: float = 0.0, resolution: float = 0.1) -> bool:
     """
     Creates a MIDI file from the generated song data structure, including automations.
@@ -3266,6 +3603,25 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
         midi_file.addTempo(track=tempo_track, time=0, tempo=bpm)
         midi_file.addTimeSignature(track=tempo_track, time=0, numerator=time_signature_beats, denominator=4, clocks_per_tick=24)
 
+        # --- MPE export parameters ---
+        mpe_cfg = config.get('mpe', {}) if isinstance(config.get('mpe'), dict) else {}
+        mpe_enabled_globally = int(mpe_cfg.get('enabled', 0)) == 1
+        member_start = int(mpe_cfg.get('member_channels_start', 2))
+        member_end = int(mpe_cfg.get('member_channels_end', 16))
+        master_ch = int(mpe_cfg.get('master_channel', 1))
+        pbr = int(mpe_cfg.get('pitch_bend_range_semitones', 48))
+        max_voices = int(mpe_cfg.get('max_voices', 10))
+        voice_policy = str(mpe_cfg.get('voice_steal_policy', 'last_note')).lower()
+
+        def _clamp_ch(ch: int) -> int:
+            return max(0, min(15, ch))
+
+        member_start = _clamp_ch(member_start)
+        member_end = _clamp_ch(member_end)
+        master_ch = _clamp_ch(master_ch)
+        if member_end < member_start:
+            member_start, member_end = 2, 16
+
         next_melodic_channel = 0
         for i, track_data in enumerate(song_data["tracks"]):
             track_name = get_instrument_name(track_data)
@@ -3284,13 +3640,36 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
             if channel > 15: channel = 15
             
             midi_file.addTrackName(midi_track_num, 0, track_name)
-            midi_file.addProgramChange(midi_track_num, channel, 0, program_num)
+
+            # Determine if this track should use MPE (compute early so channel/program changes can respect it)
+            track_mpe = False
+            try:
+                track_mpe = bool(track_data.get('mpe_enabled')) or (mpe_enabled_globally and role in ["mpe_lead","mpe_chords","mpe_pads","mpe_arp"]) or str(role).lower().startswith('mpe_')
+            except Exception:
+                track_mpe = False
+            # If MPE, use master channel as base channel
+            base_channel = master_ch if (track_mpe and role not in ["drums","percussion","kick_and_snare"]) else channel
+            try:
+                program_num = int(program_num)
+            except Exception:
+                program_num = 0
+            if program_num < 0 or program_num > 127:
+                program_num = max(0, min(127, program_num))
+            midi_file.addProgramChange(midi_track_num, base_channel, 0, program_num)
+            # For MPE, also send ProgramChange on all member channels to ensure consistent timbre
+            if track_mpe and role not in ["drums","percussion","kick_and_snare"]:
+                try:
+                    for mch in range(member_start, member_end + 1):
+                        if mch == 9: continue
+                        midi_file.addProgramChange(midi_track_num, mch, 0, program_num)
+                except Exception:
+                    pass
             
             # --- NEW: Process TRACK-LEVEL (Sound Design) Automations ---
             DRUM_ROLES = {"drums", "percussion", "kick_and_snare"}
             if "track_automations" in track_data and role not in DRUM_ROLES:
-                # Process Pitch Bend
-                if allow_pitch_bend and "pitch_bend" in track_data["track_automations"]:
+                # Process Pitch Bend (skip for MPE to avoid global channel bends)
+                if allow_pitch_bend and "pitch_bend" in track_data["track_automations"] and not ("mpe_enabled" in track_data or str(role).lower().startswith('mpe_') or (mpe_enabled_globally and role in ["mpe_lead","mpe_chords","mpe_pads","mpe_arp"])):
                     for pb in track_data["track_automations"]["pitch_bend"]:
                         if pb.get("type") == "curve":
                             pb_start_beat = time_offset_beats + pb.get("start_beat", 0)
@@ -3342,10 +3721,25 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                                 progress = 0.0 if t <= 0.0 else t ** safe_bias
                                 current_val = int(cc_start_val + (cc_end_val - cc_start_val) * progress)
                                 current_time = cc_start_beat + t * duration
-                                midi_file.addControllerEvent(midi_track_num, channel, current_time, cc_num, current_val)
+                                # If MPE track, fan out CC to all member channels; else, use the track channel
+                                if ("mpe_enabled" in track_data or str(role).lower().startswith('mpe_') or (mpe_enabled_globally and role in ["mpe_lead","mpe_chords","mpe_pads","mpe_arp"])):
+                                    try:
+                                        for mch in mpe_member_channels:
+                                            midi_file.addControllerEvent(midi_track_num, mch, current_time, cc_num, current_val)
+                                    except Exception:
+                                        midi_file.addControllerEvent(midi_track_num, channel, current_time, cc_num, current_val)
+                                else:
+                                    midi_file.addControllerEvent(midi_track_num, channel, current_time, cc_num, current_val)
                             # Enforce neutral reset (0) at curve end if needed
                             if cc_end_val != 0:
-                                midi_file.addControllerEvent(midi_track_num, channel, cc_end_beat, cc_num, 0)
+                                if ("mpe_enabled" in track_data or str(role).lower().startswith('mpe_') or (mpe_enabled_globally and role in ["mpe_lead","mpe_chords","mpe_pads","mpe_arp"])):
+                                    try:
+                                        for mch in mpe_member_channels:
+                                            midi_file.addControllerEvent(midi_track_num, mch, cc_end_beat, cc_num, 0)
+                                    except Exception:
+                                        midi_file.addControllerEvent(midi_track_num, channel, cc_end_beat, cc_num, 0)
+                                else:
+                                    midi_file.addControllerEvent(midi_track_num, channel, cc_end_beat, cc_num, 0)
             
             # --- Sustain Pedal --- (skip for drums)
             if allow_sustain and "sustain_pedal" in track_data and role not in DRUM_ROLES:
@@ -3354,10 +3748,44 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                         sustain_time = float(sustain_event["beat"]) + time_offset_beats
                         sustain_action = sustain_event["action"].lower()
                         sustain_value = 127 if sustain_action == "down" else 0
-                        midi_file.addControllerEvent(midi_track_num, channel, sustain_time, 64, sustain_value)
+                        if track_mpe:
+                            # fan-out sustain across all member channels
+                            try:
+                                for mch in range(member_start, member_end + 1):
+                                    if mch == 9: continue
+                                    midi_file.addControllerEvent(midi_track_num, mch, sustain_time, 64, sustain_value)
+                            except Exception:
+                                midi_file.addControllerEvent(midi_track_num, base_channel, sustain_time, 64, sustain_value)
+                        else:
+                            midi_file.addControllerEvent(midi_track_num, base_channel, sustain_time, 64, sustain_value)
                     except (ValueError, TypeError, KeyError) as e:
                         print(Fore.YELLOW + f"Warning: Skipping invalid sustain event in track '{track_name}': {sustain_event}. Reason: {e}" + Style.RESET_ALL)
             
+            # Initialize MPE member channels if needed (set Pitch Bend Range via RPN 0)
+            mpe_member_channels = []
+            if track_mpe and role not in ["drums","percussion","kick_and_snare"]:
+                mpe_member_channels = [ch for ch in range(member_start, member_end + 1) if ch != 9 and ch != master_ch]
+                if max_voices > 0:
+                    mpe_member_channels = mpe_member_channels[:max_voices]
+                # RPN 0 (Pitch Bend Sensitivity)
+                try:
+                    # Also set RPN on master channel for completeness
+                    midi_file.addControllerEvent(midi_track_num, master_ch, 0, 101, 0)
+                    midi_file.addControllerEvent(midi_track_num, master_ch, 0, 100, 0)
+                    midi_file.addControllerEvent(midi_track_num, master_ch, 0, 6, max(0, min(127, pbr)))
+                    midi_file.addControllerEvent(midi_track_num, master_ch, 0, 38, 0)
+                    for mch in mpe_member_channels:
+                        midi_file.addControllerEvent(midi_track_num, mch, 0, 101, 0)  # RPN MSB
+                        midi_file.addControllerEvent(midi_track_num, mch, 0, 100, 0)  # RPN LSB
+                        # Data Entry: semitones in MSB (LSB=0)
+                        midi_file.addControllerEvent(midi_track_num, mch, 0, 6, max(0, min(127, pbr)))
+                        midi_file.addControllerEvent(midi_track_num, mch, 0, 38, 0)
+                except Exception:
+                    pass
+
+            # Simple voice allocator for MPE
+            active_voices = []  # list of dicts: {ch, start, end}
+
             for note in track_data["notes"]:
                 try:
                     pitch = int(note["pitch"])
@@ -3366,14 +3794,49 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                     velocity = int(note["velocity"])
                     
                     if 0 <= pitch <= 127 and 1 <= velocity <= 127 and duration_beats > 0:
-                        midi_file.addNote(
-                            track=midi_track_num,
-                            channel=channel,
-                            pitch=pitch,
-                            time=start_beat + time_offset_beats,
-                            duration=duration_beats,
-                            volume=velocity
-                        )
+                        if track_mpe and mpe_member_channels:
+                            # allocate voice channel
+                            ev_start = start_beat + time_offset_beats
+                            ev_end = ev_start + duration_beats
+                            # free finished voices
+                            active_voices = [v for v in active_voices if v['end'] > ev_start - 1e-9]
+                            use_ch = None
+                            # find free channel
+                            used = {v['ch'] for v in active_voices}
+                            for mch in mpe_member_channels:
+                                if mch not in used:
+                                    use_ch = mch
+                                    break
+                            if use_ch is None:
+                                # voice stealing
+                                if voice_policy == 'oldest' and active_voices:
+                                    steal = min(active_voices, key=lambda v: v['start'])
+                                else:
+                                    # last_note or fallback
+                                    steal = max(active_voices, key=lambda v: v['start']) if active_voices else None
+                                if steal:
+                                    use_ch = steal['ch']
+                                    active_voices = [v for v in active_voices if v is not steal]
+                                else:
+                                    use_ch = mpe_member_channels[0]
+                            active_voices.append({'ch': use_ch, 'start': ev_start, 'end': ev_end})
+                            midi_file.addNote(
+                                track=midi_track_num,
+                                channel=use_ch,
+                                pitch=pitch,
+                                time=ev_start,
+                                duration=duration_beats,
+                                volume=velocity
+                            )
+                        else:
+                            midi_file.addNote(
+                                track=midi_track_num,
+                                channel=channel,
+                                pitch=pitch,
+                                time=start_beat + time_offset_beats,
+                                duration=duration_beats,
+                                volume=velocity
+                            )
                     
                     # --- NEW: Process Automations ---
                     if "automations" in note and (allow_pitch_bend or allow_cc):
@@ -3410,14 +3873,48 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
 
                                         current_val = int(pb_start_val + (pb_end_val - pb_start_val) * progress)
                                         current_time = pb_start_beat + t * duration
-                                        midi_file.addPitchWheelEvent(midi_track_num, channel, current_time, current_val)
+                                        # Route pitchbend either zu einer MPE-Voice oder Basis-Kanal
+                                        target_ch = None
+                                        if track_mpe and mpe_member_channels:
+                                            # finde Voice, die diesen Zeitpunkt überlappt
+                                            for v in active_voices:
+                                                if v['start'] - 1e-9 <= current_time <= v['end'] + 1e-9:
+                                                    target_ch = v['ch']
+                                                    break
+                                            if target_ch is None and active_voices:
+                                                # fallback: nimm Voice mit kleinster Zeitdistanz
+                                                target_ch = min(active_voices, key=lambda v: min(abs(current_time - v['start']), abs(current_time - v['end'])) )['ch']
+                                            if target_ch is not None:
+                                                midi_file.addPitchWheelEvent(midi_track_num, target_ch, current_time, current_val)
+                                            # kein weiterer Fallback auf Basis-Kanal → vermeidet globale Bend
+                                        else:
+                                            midi_file.addPitchWheelEvent(midi_track_num, base_channel, current_time, current_val)
                                     # Enforce neutral reset (0) at curve end if needed
                                     if pb_end_val != 0:
-                                        midi_file.addPitchWheelEvent(midi_track_num, channel, pb_end_beat, 0)
+                                        if track_mpe and mpe_member_channels:
+                                            target_ch = None
+                                            for v in active_voices:
+                                                if v['start'] - 1e-9 <= pb_end_beat <= v['end'] + 1e-9:
+                                                    target_ch = v['ch']
+                                                    break
+                                            if target_ch is None and active_voices:
+                                                target_ch = min(active_voices, key=lambda v: min(abs(pb_end_beat - v['start']), abs(pb_end_beat - v['end'])) )['ch']
+                                            if target_ch is not None:
+                                                midi_file.addPitchWheelEvent(midi_track_num, target_ch, pb_end_beat, 0)
+                                        else:
+                                            midi_file.addPitchWheelEvent(midi_track_num, base_channel, pb_end_beat, 0)
                                 else: # Fallback for single points (legacy)
                                     pb_time = start_beat + time_offset_beats + pb.get("beat", 0)
                                     pb_value = int(pb.get("value", 0))
-                                    midi_file.addPitchWheelEvent(midi_track_num, channel, pb_time, pb_value)
+                                    if track_mpe and mpe_member_channels:
+                                        target_ch = channel
+                                        for v in active_voices:
+                                            if v['start'] - 1e-9 <= pb_time <= v['end'] + 1e-9:
+                                                target_ch = v['ch']
+                                                break
+                                        midi_file.addPitchWheelEvent(midi_track_num, target_ch, pb_time, pb_value)
+                                    else:
+                                        midi_file.addPitchWheelEvent(midi_track_num, channel, pb_time, pb_value)
 
                         # --- CURVE ENGINE FOR CC ---
                         if allow_cc and "cc" in note["automations"]:
@@ -3460,7 +3957,14 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
                                     cc_time = start_beat + time_offset_beats + cc.get("beat", 0)
                                     cc_num = int(cc.get("cc", 0))
                                     cc_val = int(cc.get("value", 0))
-                                    midi_file.addControllerEvent(midi_track_num, channel, cc_time, cc_num, cc_val)
+                                    if ("mpe_enabled" in track_data or str(role).lower().startswith('mpe_') or (mpe_enabled_globally and role in ["mpe_lead","mpe_chords","mpe_pads","mpe_arp"])):
+                                        try:
+                                            for mch in mpe_member_channels:
+                                                midi_file.addControllerEvent(midi_track_num, mch, cc_time, cc_num, cc_val)
+                                        except Exception:
+                                            midi_file.addControllerEvent(midi_track_num, channel, cc_time, cc_num, cc_val)
+                                    else:
+                                        midi_file.addControllerEvent(midi_track_num, channel, cc_time, cc_num, cc_val)
 
                 except (ValueError, TypeError) as e:
                     print(Fore.YELLOW + f"Warning: Skipping invalid note/automation data in track '{track_name}': {note}. Reason: {e}" + Style.RESET_ALL)
@@ -3596,21 +4100,9 @@ def create_part_midi_from_theme(theme_data: Dict, config: Dict, output_file: str
             if "notes" in track:
                 for note in track["notes"]:
                     note["start_beat"] = max(0, float(note.get("start_beat", 0)) - time_offset_beats)
-                    if "automations" in note:
-                        if "pitch_bend" in note["automations"]:
-                            for pb in note["automations"]["pitch_bend"]:
-                                if pb.get("type") == "curve":
-                                    pb["start_beat"] = max(0, pb.get("start_beat", 0) - time_offset_beats)
-                                    pb["end_beat"] = max(0, pb.get("end_beat", 0) - time_offset_beats)
-                                else: # Legacy single point
-                                    pb["beat"] = max(0, pb.get("beat", 0) - time_offset_beats)
-                        if "cc" in note["automations"]:
-                             for cc in note["automations"]["cc"]:
-                                if cc.get("type") == "curve":
-                                    cc["start_beat"] = max(0, cc.get("start_beat", 0) - time_offset_beats)
-                                    cc["end_beat"] = max(0, cc.get("end_beat", 0) - time_offset_beats)
-                                else: # Legacy single point
-                                    cc["beat"] = max(0, cc.get("beat", 0) - time_offset_beats)
+                    # IMPORTANT: Do NOT shift note-level automation times by time_offset_beats here,
+                    # because they are defined relative to the note's own start time.
+                    # They will be converted to absolute times at emission.
 
             # Normalize Sustain Pedal Events
             if "sustain_pedal" in track:
@@ -3636,6 +4128,68 @@ def create_part_midi_from_theme(theme_data: Dict, config: Dict, output_file: str
             for tr in normalized_theme_data.get("tracks", []):
                 clamped_tracks.append(_clamp_track_to_section_length(tr, float(section_length_beats)))
             normalized_theme_data["tracks"] = clamped_tracks
+
+            # Additionally clamp note-level automations (relative) so absolute times don't exceed the section
+            try:
+                max_len = float(section_length_beats)
+                for tr in normalized_theme_data.get("tracks", []):
+                    for note in tr.get("notes", []):
+                        nstart = float(note.get("start_beat", 0))
+                        # Clamp per-note pitch_bend curves
+                        if isinstance(note.get("automations"), dict) and isinstance(note["automations"].get("pitch_bend"), list):
+                            new_pbs = []
+                            for pb in note["automations"]["pitch_bend"]:
+                                try:
+                                    if pb.get("type") == "curve":
+                                        rel_sb = float(pb.get("start_beat", 0))
+                                        rel_eb = float(pb.get("end_beat", 0))
+                                        abs_sb = nstart + rel_sb
+                                        abs_eb = nstart + rel_eb
+                                        abs_sb = max(0.0, min(max_len, abs_sb))
+                                        abs_eb = max(0.0, min(max_len, abs_eb))
+                                        if abs_eb <= abs_sb:
+                                            continue
+                                        pb_out = dict(pb)
+                                        pb_out["start_beat"] = max(0.0, abs_sb - nstart)
+                                        pb_out["end_beat"] = max(0.0, abs_eb - nstart)
+                                        new_pbs.append(pb_out)
+                                    else:
+                                        # single point: pb['beat'] is relative to note
+                                        rel_b = float(pb.get("beat", 0))
+                                        abs_b = nstart + rel_b
+                                        if 0.0 <= abs_b <= max_len:
+                                            new_pbs.append(pb)
+                                except Exception:
+                                    continue
+                            note["automations"]["pitch_bend"] = new_pbs
+                        # Clamp per-note CC curves similarly
+                        if isinstance(note.get("automations"), dict) and isinstance(note["automations"].get("cc"), list):
+                            new_ccs = []
+                            for cc in note["automations"]["cc"]:
+                                try:
+                                    if cc.get("type") == "curve":
+                                        rel_sb = float(cc.get("start_beat", 0))
+                                        rel_eb = float(cc.get("end_beat", 0))
+                                        abs_sb = nstart + rel_sb
+                                        abs_eb = nstart + rel_eb
+                                        abs_sb = max(0.0, min(max_len, abs_sb))
+                                        abs_eb = max(0.0, min(max_len, abs_eb))
+                                        if abs_eb <= abs_sb:
+                                            continue
+                                        cc_out = dict(cc)
+                                        cc_out["start_beat"] = max(0.0, abs_sb - nstart)
+                                        cc_out["end_beat"] = max(0.0, abs_eb - nstart)
+                                        new_ccs.append(cc_out)
+                                    else:
+                                        rel_b = float(cc.get("beat", 0))
+                                        abs_b = nstart + rel_b
+                                        if 0.0 <= abs_b <= max_len:
+                                            new_ccs.append(cc)
+                                except Exception:
+                                    continue
+                            note["automations"]["cc"] = new_ccs
+            except Exception:
+                pass
 
         # Call the main MIDI creation function with the now fully normalized data and a zero offset
         return create_midi_from_json(normalized_theme_data, config, output_file, time_offset_beats=0, resolution=resolution)
@@ -3731,6 +4285,15 @@ def main():
     parser.add_argument('--resume-file', type=str, help="Path to a progress file to resume directly.")
     parser.add_argument('--resume', type=str, help="Alias for --resume-file (compatibility with older callers).")
     parser.add_argument('user_opt_prompt', nargs='*', help="Optional user prompt for optimization.")
+    # --- NEW: Single Track Standalone Mode ---
+    parser.add_argument('--single-track', action='store_true', help="Generate a single standalone track (no song context).")
+    parser.add_argument('--st-name', type=str, help="Standalone track instrument name (e.g., 'Lead Synth').")
+    parser.add_argument('--st-role', type=str, help="Standalone track role (e.g., lead, chords, pads, mpe_lead, mpe_chords).")
+    parser.add_argument('--st-program', type=int, default=80, help="MIDI program number for the instrument (0-127).")
+    parser.add_argument('--st-length', type=int, default=16, help="Length in bars for the standalone track.")
+    parser.add_argument('--st-desc', type=str, help="Creative description for the standalone track.")
+    parser.add_argument('--st-mpe', action='store_true', help="Enable MPE mode for this standalone track (channel-per-voice pitchbend).")
+    parser.add_argument('--st-pbr', type=int, default=48, help="MPE pitch-bend range in semitones (default 48).")
 
     args = parser.parse_args()
     
@@ -3750,6 +4313,59 @@ def main():
         config["context_window_size"] = -1
     if "max_output_tokens" not in config:
         config["max_output_tokens"] = 8192
+
+    # --- Direct Action Mode: --single-track ---
+    if args.single_track:
+        try:
+            st_name = args.st_name or "Standalone_Instrument"
+            st_role = args.st_role or "lead"
+            st_prog = max(0, min(127, int(args.st_program)))
+            st_len_bars = max(1, int(args.st_length))
+            st_desc = (args.st_desc or "An expressive standalone musical part.").strip()
+            run_timestamp = time.strftime("%Y%m%d-%H%M%S")
+            output_path = os.path.join(script_dir, f"Single_{_sanitize_filename_component(st_name)}_{st_len_bars}bars_{int(config.get('bpm',120))}bpm_{run_timestamp}.mid")
+
+            # Use the specialized standalone prompting
+            track, _ = generate_single_track_data(
+                config, st_len_bars, st_name, st_prog, st_role, st_desc, mpe_enabled=(args.st_mpe or str(st_role).lower().startswith('mpe_'))
+            )
+            if not track:
+                print(Fore.RED + "Failed to generate standalone track." + Style.RESET_ALL)
+                return
+
+            # Flag MPE on track if requested or role indicates MPE
+            try:
+                if args.st_mpe or str(st_role).lower().startswith('mpe_'):
+                    track['mpe_enabled'] = True
+            except Exception:
+                pass
+
+            # Inject per-run MPE export settings (non-destructive defaults)
+            try:
+                cfg_mpe = config.setdefault('mpe', {})
+                if args.st_mpe or str(st_role).lower().startswith('mpe_'):
+                    cfg_mpe.setdefault('enabled', 1)
+                cfg_mpe.setdefault('zone', 'lower')
+                cfg_mpe.setdefault('master_channel', 1)
+                cfg_mpe.setdefault('member_channels_start', 2)
+                cfg_mpe.setdefault('member_channels_end', 16)
+                cfg_mpe.setdefault('pitch_bend_range_semitones', int(args.st_pbr or 48))
+                cfg_mpe.setdefault('max_voices', 10)
+                cfg_mpe.setdefault('voice_steal_policy', 'last_note')
+            except Exception:
+                pass
+
+            theme_data = {"tracks": [track]}
+            part_len_beats = st_len_bars * config["time_signature"]["beats_per_bar"]
+            ok = create_part_midi_from_theme(theme_data, config, output_path, time_offset_beats=0, section_length_beats=part_len_beats)
+            if ok:
+                print(Fore.GREEN + f"Standalone track saved: {output_path}" + Style.RESET_ALL)
+            else:
+                print(Fore.RED + "Failed to write standalone MIDI." + Style.RESET_ALL)
+            return
+        except Exception as e:
+            print(Fore.RED + f"Standalone mode failed: {e}" + Style.RESET_ALL)
+            return
 
     # --- Direct Action Mode: --run ---
     if args.run:
@@ -4231,23 +4847,43 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 # normalized_themes = normalize_themes(themes_to_opt, theme_len, config)
                 # themes_to_opt = normalized_themes
 
-                opt_iter = get_next_available_file_number(os.path.join(script_dir, final_song_basename + ".mid"))
-                
-                print(Fore.CYAN + f"\n--- Starting Optimization (Version {opt_iter}) ---" + Style.RESET_ALL)
-                
-                optimized_themes = create_song_optimization(
-                    config, theme_len, themes_to_opt, script_dir, 
-                    opt_iter, run_timestamp, user_opt_prompt
-                )
-                
-                if optimized_themes:
+                # Determine how many optimization cycles to run
+                try:
+                    opt_cycles = int(config.get('optimization_iterations', config.get('number_of_iterations', 1)))
+                    if opt_cycles < 1:
+                        opt_cycles = 1
+                except Exception:
+                    opt_cycles = 1
+
+                print(Fore.CYAN + f"Optimization cycles (menu 3): {opt_cycles} (from config: optimization_iterations/number_of_iterations)" + Style.RESET_ALL)
+
+                current_themes = themes_to_opt
+                for cycle in range(opt_cycles):
+                    # Compute next available opt index based on base filename
+                    try:
+                        base_no_opt = build_final_song_basename(config, current_themes, run_timestamp, resumed=False)
+                        opt_iter = get_next_available_file_number(os.path.join(script_dir, base_no_opt + ".mid"))
+                    except Exception:
+                        opt_iter = get_next_available_file_number(os.path.join(script_dir, final_song_basename + ".mid"))
+
+                    print(Fore.CYAN + f"\n--- Starting Optimization (Version {opt_iter}, cycle {cycle+1}/{opt_cycles}) ---" + Style.RESET_ALL)
+
+                    optimized_themes = create_song_optimization(
+                        config, theme_len, current_themes, script_dir,
+                        opt_iter, run_timestamp, user_opt_prompt
+                    )
+
+                    if not optimized_themes:
+                        print(Fore.RED + "Optimization failed for this cycle. Stopping further cycles." + Style.RESET_ALL)
+                        break
+
                     time.sleep(2)
-                    # Build merged song data for session state, but avoid duplicate final MIDI export here
                     final_song_data = merge_themes_to_song_data(optimized_themes, config, theme_len)
                     last_generated_themes = optimized_themes
                     last_generated_song_data = final_song_data
-                    
-                    # Save meta artifact for this optimized result so it can be selected later
+                    current_themes = optimized_themes
+
+                    # Save meta artifact for this optimized result
                     try:
                         defs_for_artifact = session_settings.get('theme_definitions', []) if session_settings else []
                         save_final_artifact(config, optimized_themes, theme_len, defs_for_artifact, script_dir, run_timestamp)
@@ -4262,9 +4898,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     except Exception as e:
                         print(Fore.YELLOW + f"Could not remove progress file: {e}" + Style.RESET_ALL)
 
-                    print(Fore.GREEN + "\nOptimization cycle complete. Returning to menu." + Style.RESET_ALL)
-                else:
-                    print(Fore.RED + "Optimization failed. Returning to menu." + Style.RESET_ALL)
+                print(Fore.GREEN + "\nOptimization cycle complete. Returning to menu." + Style.RESET_ALL)
             
             elif action == 'optimize_artifact':
                 print_header("Optimize Existing Song (Artifacts)")
@@ -4294,18 +4928,36 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     continue
                 user_opt_prompt = input(f"{Fore.CYAN}\nEnter an optional English prompt for this optimization (or press Enter to skip):\n> {Style.RESET_ALL}").strip()
                 run_timestamp = time.strftime("%Y%m%d-%H%M%S")
-                opt_iter = get_next_available_file_number(os.path.join(script_dir, build_final_song_basename(config, themes_to_opt, run_timestamp) + ".mid"))
-                print(Fore.CYAN + f"\n--- Starting Optimization (Version {opt_iter}) ---" + Style.RESET_ALL)
-                optimized_themes = create_song_optimization(
-                    config, art_length, themes_to_opt, script_dir,
-                    opt_iter, run_timestamp, user_opt_prompt
-                )
-                if optimized_themes:
-                    print(Fore.GREEN + "\nOptimization complete." + Style.RESET_ALL)
+
+                # Determine cycles from config
+                try:
+                    opt_cycles = int(config.get('optimization_iterations', config.get('number_of_iterations', 1)))
+                    if opt_cycles < 1:
+                        opt_cycles = 1
+                except Exception:
+                    opt_cycles = 1
+                print(Fore.CYAN + f"Optimization cycles (menu 4): {opt_cycles} (from config: optimization_iterations/number_of_iterations)" + Style.RESET_ALL)
+
+                current_themes = themes_to_opt
+                for cycle in range(opt_cycles):
+                    try:
+                        base_no_opt = build_final_song_basename(config, current_themes, run_timestamp, resumed=False)
+                        opt_iter = get_next_available_file_number(os.path.join(script_dir, base_no_opt + ".mid"))
+                    except Exception:
+                        opt_iter = get_next_available_file_number(os.path.join(script_dir, "final_song_" + run_timestamp + ".mid"))
+
+                    print(Fore.CYAN + f"\n--- Starting Optimization (Version {opt_iter}, cycle {cycle+1}/{opt_cycles}) ---" + Style.RESET_ALL)
+                    optimized_themes = create_song_optimization(
+                        config, art_length, current_themes, script_dir,
+                        opt_iter, run_timestamp, user_opt_prompt
+                    )
+                    if not optimized_themes:
+                        print(Fore.RED + "Optimization failed for this cycle. Stopping further cycles." + Style.RESET_ALL)
+                        break
                     # Save new artifact so it can be selected later (do not remove old; keep history)
                     save_final_artifact(config, optimized_themes, art_length, defs, script_dir, run_timestamp)
-                else:
-                    print(Fore.RED + "Optimization failed." + Style.RESET_ALL)
+                    current_themes = optimized_themes
+                print(Fore.GREEN + "\nOptimization complete." + Style.RESET_ALL)
 
             elif action == 'advanced_opt':
                 print_header("Advanced Optimization Options")

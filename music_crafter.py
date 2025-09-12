@@ -63,9 +63,13 @@ def _sanitize_instruments_for_yaml(inst_list):
             # preserve order: name, program_num, role
             m["name"] = inst.get("name", "Instrument")
             try:
-                m["program_num"] = int(inst.get("program_num", 1))
+                pn = int(inst.get("program_num", 0))
             except Exception:
-                m["program_num"] = 1
+                pn = 0
+            # Clamp to valid GM range 0..127
+            if pn < 0 or pn > 127:
+                pn = max(0, min(127, pn))
+            m["program_num"] = pn
             m["role"] = inst.get("role", "complementary")
             seq.append(m)
     return seq
@@ -107,6 +111,14 @@ def save_config(config_data):
             try:
                 if not isinstance(doc, CommentedMap):
                     return doc
+                # Global guard: if the reference block already exists anywhere in the file, don't add it again
+                try:
+                    with open(CONFIG_FILE, 'r', encoding='utf-8') as _rf_check:
+                        _raw = _rf_check.read()
+                    if "MIDI Technical Reference (informational)" in _raw or "Troubleshooting (quick reference)" in _raw:
+                        return doc
+                except Exception:
+                    pass
                 keys = list(doc.keys())
                 if not keys:
                     return doc
@@ -118,7 +130,7 @@ def save_config(config_data):
                     # entry: [pre, eol, post, ...], 'post' at index 1 holds after-comment lines
                     if entry and len(entry) > 1 and entry[1]:
                         existing_after = "\n".join([t.value if hasattr(t, 'value') else str(t) for t in entry[1]])
-                if "Troubleshooting (quick reference)" not in existing_after:
+                if "Troubleshooting (quick reference)" not in existing_after and "MIDI Technical Reference (informational)" not in existing_after:
                     block = """
 ----------------------------------------------------------------------------- 
 Troubleshooting (quick reference)
@@ -504,13 +516,13 @@ def validate_instruments(instruments, config_details):
                 inst["name"] = f"Instrument_{idx+1}"
                 print(Fore.YELLOW + f"Warning: Missing/invalid instrument name at index {idx}. Using '{inst['name']}'." + Style.RESET_ALL)
             # Program number
-            prog = inst.get("program_num", 1)
+            prog = inst.get("program_num", 0)
             try:
                 prog_int = int(prog)
             except Exception:
-                prog_int = 1
-            if prog_int < 1 or prog_int > 128:
-                clamped = min(128, max(1, prog_int))
+                prog_int = 0
+            if prog_int < 0 or prog_int > 127:
+                clamped = min(127, max(0, prog_int))
                 print(Fore.YELLOW + f"Warning: program_num {prog} out of range at index {idx}. Clamped to {clamped}." + Style.RESET_ALL)
                 prog_int = clamped
             inst["program_num"] = prog_int
@@ -552,6 +564,12 @@ def initialize_api_keys(config):
         print(Fore.RED + "Error: No valid API key found in 'config.yaml'. Please add your key(s).")
         return False
     
+    try:
+        genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+    except Exception as e:
+        print(Fore.RED + f"Error configuring API key: {e}")
+        return False
+
     print(Fore.CYAN + f"Found {len(API_KEYS)} API key(s). Starting with key #1.")
     return True
 
@@ -706,7 +724,7 @@ def generate_instrument_list_with_ai(genre, inspiration, num_instruments, config
 
     Your response MUST be a valid JSON array of objects. Each object must have the following keys:
     - "name": A creative, descriptive name for the instrument (e.g., "Rolling Bass", "Ethereal Pad").
-    - "program_num": An appropriate General MIDI program number (integer between 1 and 128).
+    - "program_num": An appropriate General MIDI program number (integer between 0 and 127).
     - "role": The musical role of the instrument. {roles_prompt_part}
 
     Example for 2 instruments:
@@ -995,8 +1013,10 @@ def main():
         if progress_files:
             prompt_lines.append("2. Resume In-Progress Song")
             prompt_lines.append("3. Single Part Generator")
+            prompt_lines.append("4. MPE Single Track (Standalone)")
         else:
             prompt_lines.append("2. Single Part Generator")
+            prompt_lines.append("3. MPE Single Track (Standalone)")
 
         mode = get_user_input("Choose an option:\n" + "\n".join(prompt_lines) + "\n> ", "1")
 
@@ -1008,6 +1028,8 @@ def main():
             action = 'resume'
         elif (mode == '2' and not progress_files) or (mode == '3' and progress_files):
             action = 'part_generator'
+        elif (mode == '3' and not progress_files) or (mode == '4' and progress_files):
+            action = 'mpe_single_track'
         else:
             print(Fore.YELLOW + "Invalid choice. Restarting.")
             continue
@@ -1107,6 +1129,157 @@ def main():
                  print(Fore.GREEN + "\nSingle Part Generator finished.")
             
             continue # Go back to mode selection
+
+        if action == 'mpe_single_track':
+            print_header("MPE SINGLE TRACK (STANDALONE)")
+            print("Create one expressive standalone track with optional MPE (per-note pitch bends).")
+            confirm = get_user_input("Continue? (y/n):", "y").lower()
+            if confirm != 'y':
+                continue
+
+            # Load last settings if available
+            last_path = os.path.join(script_dir, "last_mpe_single_track.json")
+            last_settings = None
+            if os.path.exists(last_path):
+                try:
+                    with open(last_path, 'r') as f:
+                        last_settings = json.load(f)
+                    print("\nFound previous MPE Single Track settings:")
+                    try:
+                        print(f"  Name: {last_settings.get('name','')} | Intent: {last_settings.get('role','')} | Program: {last_settings.get('program',80)}")
+                        print(f"  Length: {last_settings.get('length_bars',16)} bars | MPE: {bool(last_settings.get('use_mpe',True))} | PBR: {last_settings.get('pbr',48)}")
+                        print(f"  Desc: {(last_settings.get('desc','') or '')[:100]}{'...' if last_settings.get('desc') and len(last_settings.get('desc'))>100 else ''}")
+                    except Exception:
+                        pass
+                    reuse = get_user_input("Reuse these settings? (y/n):", "y").lower()
+                    if reuse == 'y':
+                        name = last_settings.get('name', "Lead Synth")
+                        role = last_settings.get('role', "free")
+                        program_num = int(last_settings.get('program', 80))
+                        length_bars = int(last_settings.get('length_bars', 16))
+                        use_mpe = bool(last_settings.get('use_mpe', True))
+                        pbr_semi = int(last_settings.get('pbr', 48))
+                        desc = last_settings.get('desc', '')
+                    else:
+                        last_settings = None
+                except Exception:
+                    last_settings = None
+
+            if not last_settings:
+                # Inputs
+                genre = get_user_input("Genre (for AI description enrichment, optional):", config.get('genre', ''))
+                idea = get_user_input("Short creative idea/goal for this track:")
+                name = get_user_input("Instrument name (e.g., 'Lead Synth'):", "Lead Synth")
+                role_options = ["free","mpe_lead","mpe_chords","mpe_pads","mpe_arp","lead","chords","pads","arp"]
+                print("Choose intent (optional, 'free' allows maximum freedom):")
+                for idx, r in enumerate(role_options):
+                    print(f"  {idx+1}. {r}")
+                role_sel = get_user_input("Role number:", "1")
+                try:
+                    role = role_options[max(1, min(len(role_options), int(role_sel))) - 1]
+                except Exception:
+                    role = role_options[0]
+                prog = get_user_input("MIDI Program (0-127, default 80):", "80")
+                length_str = get_user_input("Length in bars (e.g., 8/16/32, default 16):", "16")
+                try:
+                    program_num = max(0, min(127, int(prog)))
+                except Exception:
+                    program_num = 80
+                try:
+                    length_bars = max(1, int(length_str))
+                except Exception:
+                    length_bars = 16
+                use_mpe = get_user_input("Enable MPE enrichment? (y/n, default y):", "y").lower() == 'y'
+                pbr = get_user_input("MPE Pitch Bend Range in semitones (default 48):", "48")
+                try:
+                    pbr_semi = int(pbr)
+                except Exception:
+                    pbr_semi = 48
+
+                # Optional AI expansion of description
+                desc = idea
+                if genre and idea:
+                    print("\nExpanding your idea with AI...")
+                    expanded, tokens_used = expand_inspiration_with_ai(genre, idea, config)
+                    total_tokens_used += tokens_used
+                    if expanded:
+                        print(Fore.CYAN + f"Tokens used: {tokens_used:,}" + Style.RESET_ALL)
+                        print("Preview (first 240 chars):")
+                        print((expanded or '')[:240] + ("..." if expanded and len(expanded) > 240 else ""))
+                        accept = get_user_input("Use expanded description? (y/n):", "y").lower()
+                        if accept == 'y':
+                            desc = expanded
+
+            # Launch song_generator in single-track mode
+            print("\nStarting standalone generation...\n")
+            try:
+                cmd = [sys.executable, SONG_GENERATOR_SCRIPT, '--single-track',
+                       '--st-name', name,
+                       '--st-role', role,
+                       '--st-program', str(program_num),
+                       '--st-length', str(length_bars),
+                       '--st-desc', desc]
+                if use_mpe:
+                    cmd += ['--st-mpe', '--st-pbr', str(pbr_semi)]
+                subprocess.run(cmd, check=True)
+                # Save last settings for reuse
+                try:
+                    with open(last_path, 'w') as f:
+                        json.dump({
+                            'name': name,
+                            'role': role,
+                            'program': program_num,
+                            'length_bars': length_bars,
+                            'use_mpe': use_mpe,
+                            'pbr': pbr_semi,
+                            'desc': desc
+                        }, f, indent=2)
+                except Exception:
+                    pass
+                print(Fore.GREEN + "\nStandalone track process finished." + Style.RESET_ALL)
+
+                # Ask for optimization loop
+                do_opt = get_user_input("Optimize this track now using MPE-aware refinement? (y/n):", "y").lower()
+                if do_opt == 'y':
+                    try:
+                        # Load just created track by reusing last settings to reconstruct generation context
+                        # For simplicity, re-run a lightweight single-track generation to get track JSON, then iterate optimization
+                        import copy
+                        tmp_cfg = copy.deepcopy(config)
+                        # Use the same parameters
+                        from song_generator import generate_single_track_data, generate_mpe_single_track_optimization_data
+                        st_track, _tok = generate_single_track_data(tmp_cfg, length_bars, name, program_num, role, desc, use_mpe)
+                        if st_track:
+                            iterations = int(tmp_cfg.get('optimization_iterations', tmp_cfg.get('number_of_iterations', 1)) or 1)
+                            # Use a stable run timestamp and version suffix to avoid overwriting files within the same second
+                            run_ts = time.strftime("%Y%m%d-%H%M%S")
+                            for it in range(iterations):
+                                print(Fore.CYAN + f"Optimization iteration {it+1}/{iterations}..." + Style.RESET_ALL)
+                                opt_track, _tok2 = generate_mpe_single_track_optimization_data(tmp_cfg, length_bars, st_track, desc, use_mpe)
+                                if opt_track:
+                                    st_track = opt_track
+                                else:
+                                    print(Fore.YELLOW + "Optimization step returned no changes; stopping early." + Style.RESET_ALL)
+                                    break
+                                # Export result for this iteration (versioned filename _opt_v{it+1})
+                                out_base = f"Single_{name.replace(' ','_')}_{length_bars}bars_{int(tmp_cfg.get('bpm',120))}bpm_{run_ts}_opt_v{it+1}.mid"
+                                out_path = os.path.join(script_dir, out_base)
+                                part_len_beats = length_bars * tmp_cfg["time_signature"]["beats_per_bar"]
+                                ok = False
+                                try:
+                                    from song_generator import create_part_midi_from_theme
+                                    ok = create_part_midi_from_theme({"tracks":[st_track]}, tmp_cfg, out_path, time_offset_beats=0, section_length_beats=part_len_beats)
+                                except Exception:
+                                    pass
+                                if ok:
+                                    print(Fore.GREEN + f"Optimized standalone track saved: {out_path}" + Style.RESET_ALL)
+                    except Exception as e:
+                        print(Fore.RED + f"Optimization flow failed: {e}" + Style.RESET_ALL)
+            except subprocess.CalledProcessError as e:
+                print(Fore.RED + f"\nError during standalone generation: {e}" + Style.RESET_ALL)
+            except FileNotFoundError:
+                print(Fore.RED + f"\nError: Could not find '{SONG_GENERATOR_SCRIPT}'." + Style.RESET_ALL)
+            continue
 
         if action == 'resume':
             print_header("Resume In-Progress Song")
