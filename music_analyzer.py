@@ -1,0 +1,744 @@
+import os
+import sys
+import json
+import time
+import math
+import glob
+from typing import List, Dict, Tuple
+
+import mido
+from colorama import Fore, Style, init
+
+# Prefer reusing existing helpers from music_crafter when possible
+try:
+    import music_crafter as mc
+except Exception:
+    mc = None
+
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+
+# --- Paths ---
+script_dir = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(script_dir, "config.yaml")
+SONG_GENERATOR_SCRIPT = os.path.join(script_dir, "song_generator.py")
+
+
+# --- Console ---
+init(autoreset=True)
+
+
+# --- Local fallbacks if music_crafter is not importable ---
+def _print_header(title: str) -> None:
+    print("\n" + "=" * 50)
+    print(f"--- {title.upper()} ---")
+    print("=" * 50 + "\n")
+
+
+def _get_user_input(prompt: str, default: str | None = None) -> str:
+    try:
+        response = input(f"{Fore.GREEN}{prompt}{Style.RESET_ALL} ").strip()
+        return response or (default or "")
+    except (KeyboardInterrupt, EOFError):
+        print(Fore.RED + "\nCancelled by user." + Style.RESET_ALL)
+        sys.exit(1)
+
+
+def _load_config_roundtrip() -> Dict:
+    if mc and hasattr(mc, "load_config"):
+        return mc.load_config()
+    # Minimal fallback loader
+    import yaml
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _initialize_api_keys(config: Dict) -> Tuple[List[str], int]:
+    # Prefer music_crafter's initialization
+    if mc and hasattr(mc, "initialize_api_keys") and hasattr(mc, "API_KEYS") and hasattr(mc, "CURRENT_KEY_INDEX"):
+        ok = mc.initialize_api_keys(config)
+        if not ok:
+            return [], 0
+        try:
+            if genai:
+                genai.configure(api_key=mc.API_KEYS[mc.CURRENT_KEY_INDEX])
+        except Exception:
+            pass
+        return list(getattr(mc, "API_KEYS", [])), int(getattr(mc, "CURRENT_KEY_INDEX", 0))
+
+    # Fallback
+    api_key_cfg = config.get("api_key")
+    keys: List[str] = []
+    if isinstance(api_key_cfg, list):
+        keys = [k for k in api_key_cfg if isinstance(k, str) and k and "YOUR_" not in k]
+    elif isinstance(api_key_cfg, str) and "YOUR_" not in api_key_cfg:
+        keys = [api_key_cfg]
+    if not keys:
+        print(Fore.RED + "Error: No valid API key found in 'config.yaml'." + Style.RESET_ALL)
+        return [], 0
+    if genai:
+        try:
+            genai.configure(api_key=keys[0])
+        except Exception:
+            pass
+    return keys, 0
+
+
+def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tuple[str, int]:
+    # Prefer centralized call in music_crafter (handles rotation/retries)
+    if mc and hasattr(mc, "call_generative_model"):
+        return mc.call_generative_model(prompt_text, config)
+
+    # Minimal fallback
+    if not genai:
+        print(Fore.RED + "google.generativeai not available. Install and configure to use AI features." + Style.RESET_ALL)
+        return "", 0
+    try:
+        generation_config = {
+            "temperature": config.get("temperature", 1.0)
+        }
+        if expects_json:
+            generation_config["response_mime_type"] = "application/json"
+        if isinstance(config.get("max_output_tokens"), int):
+            generation_config["max_output_tokens"] = config.get("max_output_tokens")
+
+        model = genai.GenerativeModel(
+            model_name=config.get("model_name", "gemini-2.5-pro"),
+            generation_config=generation_config,
+        )
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        response = model.generate_content(prompt_text, safety_settings=safety_settings)
+        return (getattr(response, "text", "") or ""), int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
+    except Exception as e:
+        print(Fore.RED + f"LLM call failed: {e}" + Style.RESET_ALL)
+        return "", 0
+
+
+# --- MIDI Analysis ---
+def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict]:
+    """
+    Extracts tracks with absolute-beat note timing, initial BPM and time signature.
+    Returns: (tracks, bpm, total_bars, time_signature)
+    """
+    midi = mido.MidiFile(file_path)
+    ticks_per_beat = midi.ticks_per_beat or 480
+
+    bpm = 120.0
+    time_signature = {"beats_per_bar": 4, "beat_value": 4}
+
+    # Use first track meta as global
+    for msg in midi.tracks[0]:
+        if msg.is_meta and msg.type == "set_tempo":
+            bpm = float(mido.tempo2bpm(msg.tempo))
+        if msg.is_meta and msg.type == "time_signature":
+            time_signature["beats_per_bar"] = msg.numerator
+            time_signature["beat_value"] = msg.denominator
+
+    tracks: List[Dict] = []
+    total_ticks = 0
+    for i, track in enumerate(midi.tracks):
+        current_ticks = 0
+        notes_on: Dict[int, Tuple[int, int]] = {}
+        note_list: List[Dict] = []
+        tname = f"Track {i+1}"
+        is_drums = False
+        program = 0
+
+        for msg in track:
+            current_ticks += msg.time
+            if msg.is_meta and msg.type == "track_name":
+                tname = msg.name
+            if msg.type == "program_change":
+                program = msg.program
+            if hasattr(msg, "channel") and msg.channel == 9:
+                is_drums = True
+
+            if msg.type == "note_on" and msg.velocity > 0:
+                notes_on[msg.note] = (current_ticks, msg.velocity)
+            elif (msg.type == "note_off") or (msg.type == "note_on" and msg.velocity == 0):
+                if msg.note in notes_on:
+                    start_ticks, vel = notes_on.pop(msg.note)
+                    dur_ticks = current_ticks - start_ticks
+                    note_list.append({
+                        "pitch": int(msg.note),
+                        "start_beat": float(start_ticks / ticks_per_beat),
+                        "duration_beats": float(max(0, dur_ticks) / ticks_per_beat),
+                        "velocity": int(vel)
+                    })
+
+        if note_list:
+            role = "drums" if is_drums else "context"
+            tracks.append({
+                "instrument_name": tname,
+                "program_num": int(program),
+                "role": role,
+                "notes": note_list
+            })
+        total_ticks = max(total_ticks, current_ticks)
+
+    if total_ticks <= 0:
+        return [], bpm, 0, time_signature
+
+    total_beats = total_ticks / float(ticks_per_beat)
+    total_bars = int(math.ceil(total_beats / float(time_signature["beats_per_bar"])))
+    return tracks, bpm, total_bars, time_signature
+
+
+def summarize_track_features(tracks: List[Dict], beats_per_bar: int) -> List[Dict]:
+    """
+    Build compact, LLM-friendly summaries for each track to avoid huge context.
+    """
+    summaries: List[Dict] = []
+
+    def _percentiles(values: List[float], ps: List[float]) -> List[float]:
+        if not values:
+            return [0.0 for _ in ps]
+        xs = sorted(values)
+        out = []
+        for p in ps:
+            if p <= 0:
+                out.append(xs[0])
+                continue
+            if p >= 1:
+                out.append(xs[-1])
+                continue
+            k = (len(xs) - 1) * p
+            f = int(math.floor(k))
+            c = min(f + 1, len(xs) - 1)
+            if f == c:
+                out.append(xs[f])
+            else:
+                out.append(xs[f] + (xs[c] - xs[f]) * (k - f))
+        return out
+
+    def _compute_polyphony_metrics(notes: List[Dict]) -> Tuple[float, float, float]:
+        # Returns: (avg_voices, overlap_ratio, polyphony_score)
+        if not notes:
+            return 1.0, 0.0, 0.0
+        events = []
+        for n in notes:
+            s = float(n.get("start_beat", 0.0))
+            d = max(0.0, float(n.get("duration_beats", 0.0)))
+            e = s + d
+            events.append((s, 1))
+            events.append((e, -1))
+        events.sort()
+        voices = 0
+        last_t = events[0][0]
+        time_weighted_voices = 0.0
+        overlapping_time = 0.0
+        for t, delta in events:
+            dt = max(0.0, t - last_t)
+            if dt > 0:
+                time_weighted_voices += voices * dt
+                if voices > 1:
+                    overlapping_time += dt
+            voices += delta
+            last_t = t
+        total_time = (events[-1][0] - events[0][0]) if events[-1][0] > events[0][0] else 0.0
+        avg_voices = (time_weighted_voices / total_time) if total_time > 0 else 1.0
+        overlap_ratio = (overlapping_time / total_time) if total_time > 0 else 0.0
+        # polyphony_score normalized: (avg_voices - 1) / 3 clipped to 0..1 (assume up to 4 voices typical)
+        polyphony_score = max(0.0, min(1.0, (avg_voices - 1.0) / 3.0))
+        # Also compute note-level overlap ratio (any overlap against previous)
+        return avg_voices, overlap_ratio, polyphony_score
+
+    def _compute_ioi_stats(starts: List[float]) -> Tuple[float, float]:
+        if len(starts) < 2:
+            return 0.0, 0.0
+        s = sorted(starts)
+        iois = [s[i+1] - s[i] for i in range(len(s) - 1)]
+        if not iois:
+            return 0.0, 0.0
+        mean = sum(iois) / len(iois)
+        var = sum((x - mean) ** 2 for x in iois) / len(iois)
+        return mean, var
+
+    def _onset_grid_histogram(starts: List[float]) -> Dict[str, int]:
+        buckets = {"0": 0, "0.25": 0, "0.5": 0, "0.75": 0, "other": 0}
+        for s in starts:
+            frac = s - math.floor(s)
+            q = round(frac * 4) / 4.0
+            if abs(q - 0.0) < 1e-3:
+                buckets["0"] += 1
+            elif abs(q - 0.25) < 1e-3:
+                buckets["0.25"] += 1
+            elif abs(q - 0.5) < 1e-3:
+                buckets["0.5"] += 1
+            elif abs(q - 0.75) < 1e-3:
+                buckets["0.75"] += 1
+            else:
+                buckets["other"] += 1
+        return buckets
+
+    for t in tracks:
+        notes = t.get("notes", [])
+        if not notes:
+            continue
+        starts = [n["start_beat"] for n in notes]
+        durs = [n["duration_beats"] for n in notes]
+        pitches = [n["pitch"] for n in notes]
+        vels = [n["velocity"] for n in notes]
+        if not starts:
+            continue
+        min_pitch = min(pitches)
+        max_pitch = max(pitches)
+        mean_vel = sum(vels) / max(1, len(vels))
+        mean_dur = sum(durs) / max(1, len(durs))
+        total_beats = max(starts) + (durs[pitches.index(max(pitches))] if durs else 0)
+        bars_span = max(1.0, total_beats / float(beats_per_bar))
+        density_per_bar = len(notes) / bars_span
+        on_integer_grid = sum(1 for s in starts if abs(s - round(s)) < 1e-3)
+        syncopation_ratio = 1.0 - (on_integer_grid / max(1, len(starts)))
+
+        # Pitch class histogram (12 bins)
+        pch = [0] * 12
+        for p in pitches:
+            pch[p % 12] += 1
+
+        # Advanced metrics
+        avg_voices, overlap_ratio, polyphony_score = _compute_polyphony_metrics(notes)
+        ioi_mean, ioi_var = _compute_ioi_stats(starts)
+        dur_p50, dur_p90 = _percentiles(durs, [0.5, 0.9])
+        onset_hist = _onset_grid_histogram(starts)
+        register_center = sum(pitches) / max(1, len(pitches))
+        drum_hits = {}
+        if t.get("role") == "drums":
+            for dp in (36, 38, 42, 46):
+                drum_hits[str(dp)] = sum(1 for p in pitches if p == dp)
+
+        summaries.append({
+            "instrument_name": t.get("instrument_name", "Track"),
+            "program_num": t.get("program_num", 0),
+            "is_drums": t.get("role") == "drums",
+            "pitch_range": [int(min_pitch), int(max_pitch)],
+            "note_count": len(notes),
+            "density_per_bar": round(density_per_bar, 3),
+            "mean_duration_beats": round(mean_dur, 3),
+            "duration_p50": round(dur_p50, 3),
+            "duration_p90": round(dur_p90, 3),
+            "mean_velocity": round(mean_vel, 1),
+            "syncopation_ratio": round(syncopation_ratio, 3),
+            "avg_voices": round(avg_voices, 3),
+            "overlap_ratio": round(overlap_ratio, 3),
+            "polyphony_score": round(polyphony_score, 3),
+            "ioi_mean": round(ioi_mean, 3),
+            "ioi_var": round(ioi_var, 3),
+            "onset_grid_histogram": onset_hist,
+            "register_center": round(register_center, 2),
+            "pitch_class_histogram": pch,
+            **({"drum_hits": drum_hits} if drum_hits else {}),
+        })
+    return summaries
+
+
+# --- Role assignment via LLM ---
+def assign_roles_with_llm(config: Dict, genre: str, user_inspiration: str, track_summaries: List[Dict], allowed_roles: List[str]) -> List[Dict]:
+    roles_list = ", ".join([f'"{r}"' for r in allowed_roles]) if allowed_roles else ""
+
+    def _build_prompt(error_hint: str | None = None) -> str:
+        hint = f"\nVALIDATION ERROR: {error_hint}\nPlease fix the JSON and follow the rules exactly.\n" if error_hint else ""
+        return (
+            "You are a meticulous music analyst. Assign a musical role to each track based on compact MIDI-derived features and the genre context.\n\n"
+            f"Allowed roles (choose one): [{roles_list}]\n"
+            "Rules:\n"
+            "- Output ONE JSON array only (no markdown). Same order/length as input tracks.\n"
+            "- Each object: {\"instrument_name\": string (copy input), \"role\": string (from list), \"confidence\": number 0..1, \"rationale\": string (<=20 words)}.\n"
+            "- Do not invent/rename/reorder/drop tracks.\n"
+            "- Heuristics: kick_and_snare if drum ch.9 with dominant 36/38; percussion if 42/46 dominant without 36/38; bass if low register (<= 57) & high density; pads/chords if long durations & polyphony.\n\n"
+            f"Global: Genre={genre}; User Notes={user_inspiration or ''}\n\n"
+            "Track summaries (JSON):\n" + json.dumps(track_summaries) + "\n\n"
+            + hint +
+            "Return ONLY the JSON array."
+        )
+
+    def _validate(arr: List[Dict]) -> str | None:
+        # return None if valid, else error message
+        if not isinstance(arr, list):
+            return "Result is not a JSON array."
+        if len(arr) != len(track_summaries):
+            return f"Expected {len(track_summaries)} items, got {len(arr)}."
+        for i, (a, ts) in enumerate(zip(arr, track_summaries)):
+            if not isinstance(a, dict):
+                return f"Item {i+1} is not an object."
+            if a.get("instrument_name") != ts.get("instrument_name"):
+                return f"Item {i+1} instrument_name mismatch."
+            r = a.get("role")
+            if r not in allowed_roles:
+                return f"Item {i+1} role '{r}' not in allowed set."
+            conf = a.get("confidence")
+            if not isinstance(conf, (int, float)) or not (0 <= float(conf) <= 1):
+                return f"Item {i+1} confidence invalid."
+            if not isinstance(a.get("rationale", ""), str):
+                return f"Item {i+1} rationale missing or not a string."
+        return None
+
+    # First attempt
+    text, _ = _call_llm(_build_prompt(), config, expects_json=True)
+    def _try_parse(txt: str) -> List[Dict] | None:
+        try:
+            cleaned = (txt or "").strip().replace("```json", "").replace("```", "")
+            arr = json.loads(cleaned)
+            return arr if isinstance(arr, list) else None
+        except Exception:
+            return None
+
+    arr = _try_parse(text)
+    err = _validate(arr) if arr is not None else "Could not parse JSON."
+    if err is None:
+        return arr
+
+    # Retry once with validation hint
+    text2, _ = _call_llm(_build_prompt(err), config, expects_json=True)
+    arr2 = _try_parse(text2)
+    err2 = _validate(arr2) if arr2 is not None else "Could not parse JSON."
+    return arr2 if err2 is None else (arr if arr is not None else [])
+
+
+# --- Inspiration and per-section descriptions via LLM ---
+def generate_inspiration_with_llm(config: Dict, genre: str, user_inspiration: str, track_summaries: List[Dict], bpm: float | int = 120, ts: Dict | None = None, bars_per_section: int | None = None, instruments_for_ref: List[Dict] | None = None) -> str:
+    ts = ts or {"beats_per_bar": 4, "beat_value": 4}
+    instruments_for_ref = instruments_for_ref or []
+    prompt = (
+        "Write ONE English paragraph of MIDI-focused creative direction.\n\n"
+        f"Must include: tempo {round(float(bpm))} BPM, time signature {ts.get('beats_per_bar','?')}/{ts.get('beat_value','?')}, section length {bars_per_section or '?'} bars.\n"
+        "Describe rhythm, melody, harmony, phrasing, and energy over bars; avoid audio/synthesis FX terms.\n"
+        "Reference each instrument by name and intended role; if silent, say 'silent'.\n\n"
+        f"Genre: {genre}\n"
+        f"User Notes: {user_inspiration or ''}\n"
+        "Instruments (name, role):\n" + json.dumps(instruments_for_ref) + "\n\n"
+        "Output: plain text paragraph only."
+    )
+    text, _ = _call_llm(prompt, config)
+    return (text or "").strip().replace("```", "")
+
+
+def generate_section_descriptions_with_llm(config: Dict, genre: str, bars_per_section: int, section_count: int, assigned_tracks: List[Dict]) -> List[Dict]:
+    basic_tracks = [
+        {
+            "instrument_name": t.get("instrument_name"),
+            "role": t.get("role", "complementary"),
+            "program_num": t.get("program_num", 0),
+        }
+        for t in assigned_tracks
+    ]
+    prompt = (
+        "Design structured section descriptions for a MIDI generator.\n\n"
+        f"Context: Genre={genre}; Sections={section_count} of {bars_per_section} bars (fixed).\n"
+        "Instruments (name, role):\n" + json.dumps(basic_tracks) + "\n\n"
+        f"Output: JSON array of exactly {section_count} objects. Each: {{\"label\": string, \"description\": string}}.\n"
+        "Constraints:\n"
+        "- In description, state for EACH instrument what it plays or 'silent'.\n"
+        "- Use beats/bars phrasing (e.g., 'on beats 2 and 4', 'every 2 bars').\n"
+        "- No synthesis/FX words.\n\n"
+        "Return ONLY the JSON array."
+    )
+    text, _ = _call_llm(prompt, config, expects_json=True)
+    try:
+        cleaned = (text or "").strip().replace("```json", "").replace("```", "")
+        arr = json.loads(cleaned)
+        if isinstance(arr, list) and len(arr) == section_count:
+            return arr
+    except Exception:
+        pass
+    # Simple fallback labels
+    return [{"label": f"Part_{i+1}", "description": f"Section {i+1} ({bars_per_section} bars)."} for i in range(section_count)]
+
+
+# --- Helpers ---
+def select_midi_file() -> str:
+    print(Fore.CYAN + "Searching for MIDI files..." + Style.RESET_ALL)
+    midi_files = glob.glob("**/*.mid", recursive=True) + glob.glob("**/*.midi", recursive=True)
+    if not midi_files:
+        print(Fore.RED + "No MIDI files found in current tree." + Style.RESET_ALL)
+        sys.exit(1)
+    print(Fore.GREEN + "Found these MIDI files:" + Style.RESET_ALL)
+    for i, p in enumerate(midi_files):
+        print(f"  {i+1}: {p}")
+    while True:
+        sel = _get_user_input("Enter number to analyze:")
+        try:
+            idx = int(sel) - 1
+            if 0 <= idx < len(midi_files):
+                print(Fore.CYAN + f"Selected: {midi_files[idx]}" + Style.RESET_ALL)
+                return midi_files[idx]
+        except Exception:
+            pass
+        print(Fore.YELLOW + "Invalid selection. Try again." + Style.RESET_ALL)
+
+
+def get_allowed_roles_from_config(config: Dict) -> List[str]:
+    # Try to extract from comments via music_crafter
+    if mc and hasattr(mc, "extract_config_details"):
+        try:
+            details = mc.extract_config_details(CONFIG_FILE)
+            roles = details.get("roles") or []
+            if roles:
+                return roles
+        except Exception:
+            pass
+    # Fallback canonical roles
+    return [
+        "drums", "kick_and_snare", "percussion", "sub_bass", "bass", "pads", "atmosphere",
+        "texture", "chords", "harmony", "arp", "guitar", "lead", "melody", "vocal", "fx", "complementary"
+    ]
+
+
+def interactive_role_review(assigned: List[Dict], allowed_roles: List[str]) -> List[Dict]:
+    print(Fore.CYAN + "\nProposed role assignments:" + Style.RESET_ALL)
+    for i, a in enumerate(assigned):
+        rn = a.get("instrument_name", f"Track {i+1}")
+        print(f"  {i+1}. {rn} -> {Fore.YELLOW}{a.get('role','?')}{Style.RESET_ALL} (conf {a.get('confidence', 0):.2f})")
+    resp = _get_user_input("Change any? Enter indices like '2,5' or press Enter to accept:", "").strip()
+    if not resp:
+        return assigned
+    try:
+        indices = sorted({int(x.strip()) - 1 for x in resp.split(',') if x.strip()})
+    except Exception:
+        print(Fore.YELLOW + "Invalid input. Skipping changes." + Style.RESET_ALL)
+        return assigned
+    role_set = set(allowed_roles)
+    for idx in indices:
+        if not (0 <= idx < len(assigned)):
+            continue
+        current = assigned[idx].get("role", "complementary")
+        print(f"Track {idx+1} current role: {current}")
+        new_role = _get_user_input(f"Enter new role (allowed: {', '.join(allowed_roles)}):", current).strip()
+        if new_role and new_role in role_set:
+            assigned[idx]["role"] = new_role
+        else:
+            print(Fore.YELLOW + "Invalid role. Keeping previous." + Style.RESET_ALL)
+    return assigned
+
+
+def save_analysis_artifact(path: str, data: Dict) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(Fore.GREEN + f"Analysis saved to: {os.path.basename(path)}" + Style.RESET_ALL)
+    except Exception as e:
+        print(Fore.RED + f"Failed to save analysis: {e}" + Style.RESET_ALL)
+
+
+def preview_settings_then_confirm(config_update: Dict, theme_definitions: List[Dict]) -> bool:
+    try:
+        print("\n" + "-" * 60)
+        print(Style.BRIGHT + "Settings Preview (no files written yet)" + Style.RESET_ALL)
+        print("-" * 60)
+
+        print(f"{Fore.CYAN}Genre:{Style.RESET_ALL} {Style.BRIGHT}{config_update.get('genre','N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}BPM:{Style.RESET_ALL} {Style.BRIGHT}{config_update.get('bpm','N/A')}{Style.RESET_ALL}")
+        ts = config_update.get('time_signature', {}) or {}
+        print(f"{Fore.CYAN}Time Signature:{Style.RESET_ALL} {Style.BRIGHT}{ts.get('beats_per_bar','?')}/{ts.get('beat_value','?')}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Length per Part:{Style.RESET_ALL} {Style.BRIGHT}{config_update.get('part_length', 'N/A')}{Style.RESET_ALL} bars")
+
+        insp = (config_update.get('inspiration') or '').strip()
+        insp_prev = (insp[:160] + '...') if len(insp) > 163 else insp
+        print(f"{Fore.CYAN}Inspiration (preview):{Style.RESET_ALL} {Style.DIM}{insp_prev}{Style.RESET_ALL}")
+
+        instruments = config_update.get('instruments') or []
+        print(f"\n{Fore.CYAN}Instruments ({len(instruments)}):{Style.RESET_ALL}")
+        for i, inst in enumerate(instruments):
+            name = inst.get('name', f'Instrument {i+1}')
+            role = inst.get('role', 'complementary')
+            pn = inst.get('program_num', 0)
+            print(f"  {i+1}. {Fore.GREEN}{name}{Style.RESET_ALL} (Role: {Fore.YELLOW}{role}{Style.RESET_ALL}, Program: {pn})")
+
+        print(f"\n{Fore.CYAN}Song Structure ({len(theme_definitions)} parts):{Style.RESET_ALL}")
+        for i, th in enumerate(theme_definitions):
+            label = th.get('label', f'Part_{i+1}')
+            desc = (th.get('description') or '').strip()
+            desc_prev = (desc[:90] + '...') if len(desc) > 93 else desc
+            print(f"  Part {i+1}: {Fore.GREEN}{label}{Style.RESET_ALL} - {Style.DIM}{desc_prev}{Style.RESET_ALL}")
+
+        confirm = _get_user_input("\nProceed to save these settings to config.yaml and song_settings.json? (y/n):", "y").lower()
+        return confirm == 'y'
+    except Exception as e:
+        print(Fore.YELLOW + f"Preview failed (continuing without save): {e}" + Style.RESET_ALL)
+        return False
+
+def apply_to_song_generator(config_update: Dict, theme_definitions: List[Dict]) -> None:
+    # Save into config.yaml and song_settings.json using music_crafter helpers if available
+    if mc and hasattr(mc, "save_config") and hasattr(mc, "save_song_settings"):
+        try:
+            mc.save_config(config_update)
+        except Exception as e:
+            print(Fore.YELLOW + f"Warning: save_config failed: {e}" + Style.RESET_ALL)
+        try:
+            settings = {"length": config_update.get("part_length", 16), "theme_definitions": theme_definitions}
+            mc.save_song_settings(settings)
+        except Exception as e:
+            print(Fore.YELLOW + f"Warning: save_song_settings failed: {e}" + Style.RESET_ALL)
+    else:
+        # Minimal fallback: write JSON alongside for manual use
+        try:
+            with open(os.path.join(script_dir, "song_settings.json"), "w", encoding="utf-8") as f:
+                json.dump({"length": config_update.get("part_length", 16), "theme_definitions": theme_definitions}, f, indent=2)
+        except Exception:
+            pass
+
+    # Only saving here; launching is handled by post-save action menu in main
+    print(Fore.GREEN + "Settings saved. Choose next action from the menu." + Style.RESET_ALL)
+
+
+def offer_post_save_actions() -> None:
+    print("\n" + "-" * 60)
+    print(Style.BRIGHT + "What would you like to do next?" + Style.RESET_ALL)
+    print("-" * 60)
+    print("  1) Generate a new MIDI now (auto run)")
+    print("  2) Open Song Generator menu (choose Optimization cycle there)")
+    print("  3) Do nothing")
+    choice = _get_user_input("Select 1/2/3:", "1").strip()
+    try:
+        import subprocess
+        if choice == "1":
+            print(Fore.CYAN + "Launching song_generator (auto run)..." + Style.RESET_ALL)
+            subprocess.run([sys.executable, SONG_GENERATOR_SCRIPT, "--run"], check=False)
+        elif choice == "2":
+            print(Fore.CYAN + "Opening Song Generator main menu..." + Style.RESET_ALL)
+            subprocess.run([sys.executable, SONG_GENERATOR_SCRIPT], check=False)
+        else:
+            print(Fore.YELLOW + "No action selected." + Style.RESET_ALL)
+    except Exception as e:
+        print(Fore.YELLOW + f"Could not launch song_generator: {e}" + Style.RESET_ALL)
+
+
+# --- Main ---
+def main():
+    _print_header("Music Analyzer")
+
+    # Load config and LLM setup
+    config = _load_config_roundtrip()
+    allowed_roles = get_allowed_roles_from_config(config)
+    api_keys, _ = _initialize_api_keys(config)
+    if not api_keys:
+        return
+
+    # File selection
+    midi_path = select_midi_file()
+
+    # Ask for genre and mode
+    print(Fore.CYAN + "\nGenre options:" + Style.RESET_ALL)
+    print("- Enter a genre manually (recommended).")
+    print("- Or type 'ai' to let the model infer genre from features (compact).")
+    raw_genre = _get_user_input("Enter genre (or 'ai'):", "")
+    user_inspiration = _get_user_input("Optional: Additional notes about the MIDI (press Enter to skip):", "")
+
+    # Fixed segmentation length
+    seg_str = _get_user_input("Analyze in fixed sections of 8, 16, or 32 bars? (8/16/32):", "16").strip()
+    if seg_str not in {"8", "16", "32"}:
+        seg_str = "16"
+    bars_per_section = int(seg_str)
+
+    # MIDI analysis
+    tracks, bpm, total_bars, ts = analyze_midi_file(midi_path)
+    if not tracks or total_bars == 0:
+        print(Fore.RED + "No note data found. Aborting." + Style.RESET_ALL)
+        return
+    print(Fore.CYAN + f"Analyzed MIDI: {bpm:.2f} BPM, {ts['beats_per_bar']}/{ts['beat_value']}, ~{total_bars} bars" + Style.RESET_ALL)
+
+    # Summaries for LLM
+    summaries = summarize_track_features(tracks, ts["beats_per_bar"])
+
+    # Optional AI genre guess from summaries
+    genre = raw_genre
+    if raw_genre.lower() == "ai":
+        g_prompt = (
+            "From the following compact track summaries, return ONE concise genre label (<=4 words).\n"
+            "No punctuation or prose, one line only.\n\n" + json.dumps(summaries)
+        )
+        g_text, _ = _call_llm(g_prompt, config)
+        genre = (g_text or "").strip().splitlines()[0]
+        # Trim to <=4 words
+        words = [w for w in genre.split() if w]
+        genre = " ".join(words[:4]) if words else "Electronic"
+
+    # Role assignment
+    assigned = assign_roles_with_llm(config, genre, user_inspiration, summaries, allowed_roles) or []
+    # Merge assigned roles back to track list (by instrument_name)
+    name_to_role = {a.get("instrument_name"): a.get("role", "complementary") for a in assigned}
+    merged_tracks = []
+    for t in tracks:
+        role = name_to_role.get(t.get("instrument_name"), t.get("role", "context"))
+        mt = dict(t)
+        mt["role"] = role
+        merged_tracks.append(mt)
+
+    # Review & override
+    assigned = [
+        {
+            "instrument_name": t.get("instrument_name"),
+            "role": t.get("role", "complementary"),
+            "confidence": next((a.get("confidence", 0.7) for a in assigned if a.get("instrument_name") == t.get("instrument_name")), 0.7)
+        }
+        for t in merged_tracks
+    ]
+    assigned = interactive_role_review(assigned, allowed_roles)
+
+    # Build instruments list proposal for config
+    instruments_cfg = [
+        {"name": a["instrument_name"], "program_num": next((t.get("program_num", 0) for t in merged_tracks if t.get("instrument_name") == a["instrument_name"]), 0), "role": a.get("role", "complementary")}
+        for a in assigned
+    ]
+
+    # Inspiration text (English)
+    inspiration_text = generate_inspiration_with_llm(
+        config, genre, user_inspiration, summaries, bpm=bpm, ts=ts, bars_per_section=bars_per_section, instruments_for_ref=instruments_cfg
+    )
+
+    # Sections
+    section_count = max(1, total_bars // bars_per_section)
+    sections = generate_section_descriptions_with_llm(config, genre, bars_per_section, section_count, instruments_cfg)
+
+    # Timestamp and artifact
+    run_ts = time.strftime("%Y%m%d_%H%M%S")
+    analysis = {
+        "type": "analysis",
+        "timestamp": run_ts,
+        "source_midi": os.path.relpath(midi_path, script_dir),
+        "genre": genre,
+        "bars_per_section": bars_per_section,
+        "bpm": round(float(bpm), 2),
+        "time_signature": ts,
+        "inspiration": inspiration_text,
+        "tracks": instruments_cfg,
+        "structure": sections,
+    }
+    out_path = os.path.join(script_dir, f"analysis_run_{run_ts}.json")
+    save_analysis_artifact(out_path, analysis)
+
+    # Build potential settings and show a full preview BEFORE asking to write
+    config_update = {
+        "genre": genre,
+        "inspiration": inspiration_text,
+        "bpm": round(float(bpm)),
+        # Keep existing key/scale unless user wants AI suggestion later
+        "instruments": instruments_cfg,
+        "time_signature": ts,
+        # retain existing model fields automatically via merge
+    }
+    theme_defs = [{"label": s.get("label", f"Part_{i+1}"), "description": s.get("description", "")} for i, s in enumerate(sections)]
+    config_update["part_length"] = bars_per_section
+
+    # Full preview and single confirmation prompt
+    if preview_settings_then_confirm(config_update, theme_defs):
+        apply_to_song_generator(config_update, theme_defs)
+        offer_post_save_actions()
+    else:
+        print(Fore.YELLOW + "Skipped saving settings." + Style.RESET_ALL)
+
+    print(Fore.GREEN + "\nDone." + Style.RESET_ALL)
+
+
+if __name__ == "__main__":
+    main()
+
+
