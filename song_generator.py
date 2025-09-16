@@ -79,8 +79,12 @@ def _is_key_available(idx: int) -> bool:
     until = KEY_COOLDOWN_UNTIL.get(idx, 0)
     return time.time() >= until
 
-def _set_key_cooldown(idx: int, seconds: float) -> None:
-    KEY_COOLDOWN_UNTIL[idx] = max(KEY_COOLDOWN_UNTIL.get(idx, 0), time.time() + max(1.0, seconds))
+def _set_key_cooldown(idx: int, seconds: float, *, force: bool = False) -> None:
+    target_until = time.time() + max(1.0, seconds)
+    if force:
+        KEY_COOLDOWN_UNTIL[idx] = target_until
+    else:
+        KEY_COOLDOWN_UNTIL[idx] = max(KEY_COOLDOWN_UNTIL.get(idx, 0), target_until)
 
 def _next_available_key(start_idx: int | None = None) -> int | None:
     if not API_KEYS:
@@ -397,7 +401,7 @@ def _interruptible_backoff(wait_time: float, config: Dict, context_label: str = 
             time.sleep(max(0.0, wait_time))
             return
         print(Fore.CYAN + (f"Waiting {wait_time:.1f}s" + (f" [{context_label}]" if context_label else "") + 
-              "; press 1/2/3/0 (model), 'h' (halve context), 'd' (defer), 'a' (auto-escalate)...") + Style.RESET_ALL)
+              "; press 1/2/3/0 (model), 'h' (halve context), 'd' (defer), 'a' (auto-escalate), 's' (skip wait)...") + Style.RESET_ALL)
         while time.time() < end_t:
             if msvcrt.kbhit():
                 ch = msvcrt.getch().decode(errors='ignore').lower()
@@ -457,6 +461,10 @@ def _interruptible_backoff(wait_time: float, config: Dict, context_label: str = 
                             print(Fore.CYAN + f"\nRequested: halve context (#{globals()['REDUCE_CONTEXT_HALVES']}) for THIS step (will restart current step)." + Style.RESET_ALL)
                     except Exception:
                         print(Fore.CYAN + f"\nRequested: halve context (#{globals()['REDUCE_CONTEXT_HALVES']}) for THIS step (will restart current step)." + Style.RESET_ALL)
+                    return
+                if ch == 's':
+                    _LAST_HOTKEY_TS['s'] = now
+                    print(Fore.CYAN + "Skipping wait on user request." + Style.RESET_ALL)
                     return
             time.sleep(0.2)
     except Exception:
@@ -1532,7 +1540,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
             try:
                 # Offer one-key model switch without blocking
                 if sys.platform == "win32":
-                    print(Fore.CYAN + "Press 1=pro, 2=flash, 3=custom (config.custom_model_name) to switch model for THIS track; waiting..." + Style.RESET_ALL)
+                    print(Fore.CYAN + "Press 1=pro, 2=flash, 3=custom (custom_model_name), s=skip wait; waiting..." + Style.RESET_ALL)
                     end_t = time.time() + max(0.0, wait_time)
                     while time.time() < end_t:
                         if msvcrt.kbhit():
@@ -1545,6 +1553,8 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                                 custom = config.get('custom_model_name')
                                 if custom:
                                     local_model_name = custom; print(Fore.YELLOW + f"Switching to {custom} (this track)." + Style.RESET_ALL); break
+                            if ch == 's':
+                                print(Fore.CYAN + "Skipping wait on user request." + Style.RESET_ALL); break
                         time.sleep(0.25)
                 else:
                     time.sleep(wait_time)
@@ -1872,7 +1882,12 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     # Apply cooldown based on detected window
                     # For daily quotas: retry hourly to probe reset windows
                     if qtype == "per-day":
+                        # Probe hourly instead of locking 24h
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS, force=True)
+                    elif qtype == "per-hour":
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
+                    if qtype == "per-day":
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS, force=True)
                     elif qtype == "per-hour":
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
                     else:  # per-minute, rate-limit, unknown
@@ -1896,7 +1911,8 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     # if all keys cooling down and we have per-minute, show countdown to first available
                     if _all_keys_cooling_down():
                         wait_time = max(5.0, _seconds_until_first_available())
-                        print(Fore.CYAN + f"All keys cooling down. Next available in ~{wait_time:.1f}s." + Style.RESET_ALL)
+                        wait_time = min(wait_time, PER_HOUR_COOLDOWN_SECONDS)
+                        print(Fore.CYAN + f"All keys cooling down. Next probe in ~{wait_time:.1f}s." + Style.RESET_ALL)
                     else:
                         wait_time = base * (2 ** max(0, quota_rotation_count - 1))
                     jitter = random.uniform(0, 5.0)
@@ -3437,8 +3453,9 @@ def generate_single_track_data(config: Dict, length_bars: int, instrument_name: 
                     if qtype in ('per-hour', 'rate-limit'):
                         cooldown = PER_HOUR_COOLDOWN_SECONDS
                     elif qtype == 'per-day':
-                        cooldown = PER_DAY_COOLDOWN_SECONDS
-                    _set_key_cooldown(CURRENT_KEY_INDEX, cooldown)
+                        # Probe hourly instead of 24h lock
+                        cooldown = PER_HOUR_COOLDOWN_SECONDS
+                    _set_key_cooldown(CURRENT_KEY_INDEX, cooldown, force=(qtype=='per-day'))
                     nxt = _next_available_key(CURRENT_KEY_INDEX)
                     if nxt is not None:
                         CURRENT_KEY_INDEX = nxt
