@@ -9,6 +9,31 @@ Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music gener
 
 The entire creative direction of the music is guided through an interactive setup process, making it accessible to both developers and musicians.
 
+## Table of Contents
+
+- [Toolkit overview](#toolkit-overview)
+- [Features](#features)
+- [Installation & Setup](#installation--setup)
+- [How to Use](#how-to-use)
+  - [0. (Optional) Analyze an existing MIDI first](#0-optional-analyze-an-existing-midi-first)
+  - [1. Optional Legacy Tools (single parts & quick edits)](#1-optional-legacy-tools-single-parts--quick-edits)
+  - [2. Full Song Generation: The Creative Duo](#2-full-song-generation-the-creative-duo)
+- [Note on legacy scripts](#note-on-legacy-scripts)
+- [Advanced usage and notes](#advanced-usage-and-notes)
+- [Music Analyzer (optional)](#music-analyzer-optional)
+- [Artifact Builder (optional)](#artifact-builder-optional)
+- [Further advanced notes (addendum)](#further-advanced-notes-addendum)
+
+## 🧰 Toolkit overview
+
+- **music_crafter.py**: Interactive planner (co‑producer). Creates/updates `config.yaml` and `song_settings.json`, then launches the generator.
+- **song_generator.py**: Core engine that builds, optimizes, and resumes full songs from the plan.
+- **music_analyzer.py**: Optional pre‑step to analyze existing MIDI and derive a compact, LLM‑friendly plan.
+- **artifact_builder.py**: Utility to rebuild `.mid` from final artifacts or progress JSONs without re‑running generation.
+- **part_generator.py**: Legacy single‑part generator (quick loops).
+- **part_extender.py**: Legacy tool to append new parts to an existing MIDI.
+- **part_variator.py**: Legacy tool to create variations of selected tracks in a MIDI.
+
 ## ✨ Features
 
 -   **Go Beyond Loops:** Generate complete songs with multiple, distinct sections (intro, verse, chorus) to tell a musical story.
@@ -74,7 +99,7 @@ pip install -r requirements.txt
     Adjust the parameters in `config.yaml` to define your desired musical output.
 
     -   `api_key`: Your Google AI API Key.
-    -   `model_name`: The specific generative model to use (e.g., "gemini-2.5-flash-preview-05-20").
+    -   `model_name`: The specific generative model to use (e.g., "gemini-2.5-flash" or "gemini-2.5-pro").
     -   `temperature`: (0.0 to 2.0) Controls creativity. Lower values are more deterministic, higher values are more experimental. Default is 1.0.
     -   `context_window_size`: Defines how many previous musical parts are sent as context for the next generation. `-1` (dynamic) is recommended for quality, `0` disables context, and a positive number (e.g., `4`) sends a fixed amount of recent parts.
     -   `inspiration`: A detailed text prompt describing the style and mood. This is the most important creative input!
@@ -109,6 +134,10 @@ pip install -r requirements.txt
 ## 🎹 How to Use
 
 CMC provides a suite of tools for different creative needs, from low-cost loop creation to full-scale song composition. **We strongly recommend starting with the 'Core Generators'** to understand the process and conserve your API tokens before moving to the more advanced tools.
+
+### 0. (Optional) Analyze an existing MIDI first
+
+If you want to start from an existing MIDI structure, run a quick analysis first and derive a compact plan you can feed into the generator. See the section "Music Analyzer (optional)" below for details.
 
 ### 1. Optional Legacy Tools (single parts & quick edits)
 
@@ -205,6 +234,8 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
   python song_generator.py --resume-file path/to/progress_run_*.json
   ```
 
+- **Rebuilding from artifacts**: If you only need to export a `.mid` from an existing artifact or progress JSON without re-running generation, see the section "Artifact Builder (optional)" below.
+
 - **MIDI channel policy**: Drums/percussion use MIDI Channel 10 (index 9). Melodic instruments are assigned sequentially across remaining channels, skipping 10.
 
 - **Output filenames**:
@@ -213,3 +244,39 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
   - `part_variator.py`: `<OriginalName>_var_<N>.mid`.
 
 - **Dependencies**: See `requirements.txt` (google-generativeai, midiutil, PyYAML, colorama, ruamel.yaml, mido). Standard library modules are used for everything else.
+
+## 🧠 Music Analyzer (optional)
+
+`music_analyzer.py` helps analyze existing MIDI files and derive a clean, consistent plan that you can apply to CMC.
+
+- What it does:
+  - Extracts tracks, note timing in beats, initial BPM and time signature from a MIDI file.
+  - Builds compact, LLM‑friendly summaries of tracks to avoid oversized prompts.
+  - Can propose updates to `config.yaml`/`song_settings.json` and save them for use with the generators.
+- When to use:
+  - Use it when you want to use an existing MIDI structure as a starting point for generation or optimization.
+
+## 🧱 Artifact Builder (optional)
+
+`artifact_builder.py` can rebuild `.mid` files from existing final artifacts or progress files without re‑running a full generation.
+
+- What it does:
+  - Lists final artifacts and resumable progress JSONs and lets you pick one.
+  - Extracts `config`, `themes`, and `length` and performs a pure MIDI export.
+- When to use:
+  - Quickly render a `.mid` from a saved artifact (e.g., after manual JSON tweaks).
+  - Rebuild a partial song from a progress snapshot.
+
+## 📌 Further advanced notes (addendum)
+
+- Additional hotkeys (Windows, during waits):
+  - `h` = halve previous‑themes context for the current step only
+  - `d` = defer current track to the end of the queue
+  - `s` = skip current wait immediately
+  - `r` = reset all API key cooldown timers (forces an immediate probe)
+
+- Quota/backoff behavior (daily limits):
+  - If all API keys are classified as per‑day exhausted, CMC switches to an hourly probing cadence and tries all keys again each hour. As soon as any key works, normal operation resumes automatically.
+
+- Config reload behavior:
+  - `song_generator.py` reloads `config.yaml` before: Generate Again, Generate New, Optimize, and Optimize Existing Song. Changes to automation settings (pitch bend, sustain pedal/CC64, CC automation) and `use_call_and_response` take effect immediately.
