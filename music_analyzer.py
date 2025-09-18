@@ -839,6 +839,23 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
     print("  5) Finish")
     choice = _get_user_input("Choose 1/2/3/4/5:", "5").strip()
 
+    # Build an effective runtime config by merging current config.yaml with the proposed updates
+    try:
+        base_cfg = _load_config_roundtrip() or {}
+    except Exception:
+        base_cfg = {}
+    effective_config = dict(base_cfg)
+    try:
+        if isinstance(config_update, dict):
+            effective_config.update(config_update)
+    except Exception:
+        pass
+    # Ensure API keys/model configured for downstream generator helpers
+    try:
+        _initialize_api_keys(effective_config)
+    except Exception:
+        pass
+
     themes = list(themes_from_analysis)
     if choice == "1":
         if not themes:
@@ -846,13 +863,13 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
             return
         print(Fore.CYAN + "Select which tracks you want to optimize. Others will be left as-is." + Style.RESET_ALL)
         subset = _choose_tracks_subset(themes[0].get('tracks', []))
-        themes = _optimize_selected_tracks(config_update, themes, bars_per_section, subset)
+        themes = _optimize_selected_tracks(effective_config, themes, bars_per_section, subset)
         print(Fore.GREEN + "Done: optimized selected tracks across all parts." + Style.RESET_ALL)
     elif choice == "2":
         if not themes:
             print(Fore.YELLOW + "No themes available from analysis; skipping." + Style.RESET_ALL)
             return
-        themes = _add_new_track_across_parts(config_update, themes, bars_per_section)
+        themes = _add_new_track_across_parts(effective_config, themes, bars_per_section)
         print(Fore.GREEN + "Done: added the new track to every part." + Style.RESET_ALL)
     elif choice == "3":
         # Use current config_update + derived themes to build a new song via generator
@@ -860,10 +877,10 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
             print(Fore.YELLOW + "Generation helpers not available." + Style.RESET_ALL)
             return
         try:
-            song_data = merge_themes_to_song_data(themes, config_update, bars_per_section)
-            base = build_final_song_basename(config_update, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=False)
+            song_data = merge_themes_to_song_data(themes, effective_config, bars_per_section)
+            base = build_final_song_basename(effective_config, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=False)
             out_path = os.path.join(script_dir, f"{base}_generated_from_analysis.mid")
-            ok = create_midi_from_json(song_data, config_update, out_path)
+            ok = create_midi_from_json(song_data, effective_config, out_path)
             print((Fore.GREEN + f"Generated: {out_path}") if ok else (Fore.RED + "Generation/export failed."))
         except Exception as e:
             print(Fore.RED + f"Generation error: {e}" + Style.RESET_ALL)
@@ -877,13 +894,13 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
             print(Fore.YELLOW + "No tracks found to optimize." + Style.RESET_ALL)
             return
         print(Fore.CYAN + "Running full optimization across all parts and tracks..." + Style.RESET_ALL)
-        _ = _optimize_selected_tracks(config_update, themes, bars_per_section, subset_all)
+        _ = _optimize_selected_tracks(effective_config, themes, bars_per_section, subset_all)
         # Offer immediate export
         try:
-            song_data = merge_themes_to_song_data(themes, config_update, bars_per_section)
-            base = build_final_song_basename(config_update, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=True)
+            song_data = merge_themes_to_song_data(themes, effective_config, bars_per_section)
+            base = build_final_song_basename(effective_config, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=True)
             out_path = os.path.join(script_dir, f"{base}_fully_optimized.mid")
-            ok = create_midi_from_json(song_data, config_update, out_path)
+            ok = create_midi_from_json(song_data, effective_config, out_path)
             print((Fore.GREEN + f"Exported: {out_path}") if ok else (Fore.RED + "MIDI export failed."))
         except Exception as e:
             print(Fore.YELLOW + f"Export after optimization failed: {e}" + Style.RESET_ALL)
