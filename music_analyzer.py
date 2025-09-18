@@ -19,6 +19,22 @@ try:
     import google.generativeai as genai
 except Exception:
     genai = None
+# Reuse generation helpers from song_generator when available
+try:
+    from song_generator import (
+        merge_themes_to_song_data,
+        create_midi_from_json,
+        generate_optimization_data,
+        generate_instrument_track_data,
+        build_final_song_basename,
+    )
+except Exception:
+    merge_themes_to_song_data = None
+    create_midi_from_json = None
+    generate_optimization_data = None
+    generate_instrument_track_data = None
+    build_final_song_basename = None
+
 
 
 # --- Paths ---
@@ -191,6 +207,68 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict]:
     total_bars = int(math.ceil(total_beats / float(time_signature["beats_per_bar"])))
     return tracks, bpm, total_bars, time_signature
 
+
+def split_tracks_into_sections(tracks: List[Dict], bars_per_section: int, beats_per_bar: int) -> List[Dict]:
+    """Split analyzed absolute-beat tracks into sections (themes) of fixed length.
+    Returns a list of themes: [{"label", "description", "tracks": [...] }].
+    """
+    if bars_per_section <= 0 or beats_per_bar <= 0:
+        return []
+    section_len_beats = float(bars_per_section * beats_per_bar)
+    # Compute end in beats
+    max_end = 0.0
+    for t in tracks:
+        for n in t.get("notes", []):
+            try:
+                s = float(n.get("start_beat", 0.0))
+                d = float(n.get("duration_beats", 0.0))
+                max_end = max(max_end, s + max(0.0, d))
+            except Exception:
+                continue
+    if max_end <= 0:
+        return []
+    section_count = max(1, int(math.ceil(max_end / section_len_beats)))
+    themes: List[Dict] = []
+    for idx in range(section_count):
+        start_b = idx * section_len_beats
+        end_b = start_b + section_len_beats
+        theme_tracks = []
+        for tr in tracks:
+            rel_notes = []
+            for n in tr.get("notes", []):
+                try:
+                    s = float(n.get("start_beat", 0.0))
+                    d = float(n.get("duration_beats", 0.0))
+                    e = s + max(0.0, d)
+                    if e <= start_b or s >= end_b:
+                        continue
+                    ns = max(start_b, s)
+                    ne = min(end_b, e)
+                    nd = max(0.0, ne - ns)
+                    if nd <= 0:
+                        continue
+                    rel_notes.append({
+                        "pitch": int(n.get("pitch", 0)),
+                        "start_beat": round(ns - start_b, 6),
+                        "duration_beats": round(nd, 6),
+                        "velocity": int(n.get("velocity", 0)),
+                        **({"automations": n.get("automations")} if isinstance(n.get("automations"), dict) else {}),
+                    })
+                except Exception:
+                    continue
+            if rel_notes:
+                theme_tracks.append({
+                    "instrument_name": tr.get("instrument_name", "Track"),
+                    "program_num": int(tr.get("program_num", 0)),
+                    "role": tr.get("role", "context"),
+                    "notes": rel_notes,
+                })
+        themes.append({
+            "label": f"Part_{idx+1}",
+            "description": "Imported from analysis.",
+            "tracks": theme_tracks,
+        })
+    return themes
 
 def summarize_track_features(tracks: List[Dict], beats_per_bar: int) -> List[Dict]:
     """
@@ -589,7 +667,238 @@ def apply_to_song_generator(config_update: Dict, theme_definitions: List[Dict]) 
     print(Fore.GREEN + "Settings saved. Choose next action from the menu." + Style.RESET_ALL)
 
 
-def offer_post_save_actions() -> None:
+def _choose_tracks_subset(tracks: List[Dict]) -> List[int]:
+    """Ask user to select a subset of track indices (1-based) and return zero-based list."""
+    try:
+        print(Fore.CYAN + "\nTracks:" + Style.RESET_ALL)
+        for i, t in enumerate(tracks):
+            print(f"  {i+1}. {t.get('instrument_name','Track')} (role: {t.get('role','context')})")
+        resp = _get_user_input("Select tracks to process (e.g., '1,3,5') or Enter for all:", "").strip()
+        if not resp:
+            return list(range(len(tracks)))
+        ids = sorted({int(x.strip())-1 for x in resp.split(',') if x.strip().isdigit()})
+        return [i for i in ids if 0 <= i < len(tracks)]
+    except Exception:
+        return list(range(len(tracks)))
+
+
+def _optimize_selected_tracks(config: Dict, themes: List[Dict], bars_per_section: int, selected_track_indices: List[int]) -> List[Dict]:
+    """Optimize only selected tracks across all themes using generator's optimization step."""
+    if not generate_optimization_data:
+        print(Fore.YELLOW + "Optimization helper not available. Skipping." + Style.RESET_ALL)
+        return themes
+    updated = []
+    for theme_idx, th in enumerate(themes):
+        new_tracks = []
+        inner_ctx = [t for t in th.get('tracks', [])]
+        for i, tr in enumerate(th.get('tracks', [])):
+            if i in selected_track_indices:
+                role = tr.get('role', 'complementary')
+                label = th.get('label', f'Part_{theme_idx+1}')
+                desc = th.get('description', '')
+                try:
+                    opt_tr, _ = generate_optimization_data(
+                        config, bars_per_section, tr, role, label, desc, [], [t for j,t in enumerate(inner_ctx) if j!=i], theme_idx, user_optimization_prompt=""
+                    )
+                    new_tracks.append(opt_tr or tr)
+                except Exception:
+                    new_tracks.append(tr)
+            else:
+                new_tracks.append(tr)
+        updated.append({**th, 'tracks': new_tracks})
+    return updated
+
+
+def _add_new_track_across_parts(config: Dict, themes: List[Dict], bars_per_section: int) -> List[Dict]:
+    """Create a new track for each theme in context to the others. Allows user description or minimal prompt."""
+    if not generate_instrument_track_data:
+        print(Fore.YELLOW + "Track generation helper not available. Skipping." + Style.RESET_ALL)
+        return themes
+    # Explain modes briefly
+    print(Fore.CYAN + "\nTrack creation modes:" + Style.RESET_ALL)
+    print("  1) Manual: you enter a detailed description (full control).")
+    print("  2) Minimal guided: short auto-prompt; fast and simple.")
+    print("  3) Guided full spec: you choose role + minimal idea; AI expands and completes name/program/description.")
+    print("  4) Auto full spec: AI proposes name/program/description; you choose the role.")
+    # Mode selection
+    mode = _get_user_input(
+        "Track creation mode (1/2/3/4):",
+        "2"
+    ).strip()
+
+    def _auto_propose_track_spec(target_role: str | None, user_min_desc: str | None = None) -> Tuple[str, int, str, str]:
+        base_instrs = []
+        try:
+            base_instrs = [
+                {
+                    "instrument_name": t.get("instrument_name"),
+                    "role": t.get("role", "complementary"),
+                    "program_num": int(t.get("program_num", 0)),
+                }
+                for t in (themes[0].get("tracks", []) if themes else [])
+            ]
+        except Exception:
+            base_instrs = []
+        role_line = (f"Target role: {target_role}. The output role MUST be exactly this value.\n" if target_role else "")
+        min_line = (f"Minimal idea to elaborate: {user_min_desc}\n" if user_min_desc else "")
+        prompt = (
+            "Propose ONE new instrument for this MIDI arrangement. Return JSON only.\n"
+            "Schema: {\"name\": str, \"program_num\": int 0..127, \"role\": str, \"description\": str}.\n"
+            + role_line + min_line +
+            f"Context: part length = {bars_per_section} bars. Existing instruments: " + json.dumps(base_instrs)
+        )
+        text, _ = _call_llm(prompt, config, expects_json=True)
+        try:
+            cleaned = (text or "").strip().replace("```json", "").replace("```", "")
+            obj = json.loads(cleaned)
+            proposed_role = str(obj.get("role", "complementary"))
+            if target_role and proposed_role != target_role:
+                proposed_role = target_role
+            return (
+                str(obj.get("name", "New Track")),
+                int(obj.get("program_num", 0)),
+                proposed_role,
+                str(obj.get("description", "Add a complementary line that fits the style.")),
+            )
+        except Exception:
+            return ("New Track", 0, "complementary", f"Add a complementary line over {bars_per_section} bars.")
+
+    if mode == "4":
+        # Let user choose role from allowed list
+        roles = get_allowed_roles_from_config(config)
+        try:
+            print(Fore.CYAN + "\nAvailable roles:" + Style.RESET_ALL)
+            print("  " + ", ".join(roles))
+        except Exception:
+            pass
+        target_role = _get_user_input("Choose role for the new track:", (roles[0] if roles else "complementary")).strip() or (roles[0] if roles else "complementary")
+        name, program, role, custom_desc = _auto_propose_track_spec(target_role)
+    elif mode == "3":
+        # Guided full spec: user provides role + minimal description; AI completes the rest
+        roles = get_allowed_roles_from_config(config)
+        try:
+            print(Fore.CYAN + "\nAvailable roles:" + Style.RESET_ALL)
+            print("  " + ", ".join(roles))
+        except Exception:
+            pass
+        target_role = _get_user_input("Choose role for the new track:", (roles[0] if roles else "complementary")).strip() or (roles[0] if roles else "complementary")
+        user_min_desc = _get_user_input("Enter a minimal idea (1-2 sentences):", "A supportive line that enhances the groove without clutter.").strip()
+        name, program, role, custom_desc = _auto_propose_track_spec(target_role, user_min_desc)
+    else:
+        # For manual/minimal, also show allowed roles for clarity
+        roles = get_allowed_roles_from_config(config)
+        try:
+            print(Fore.CYAN + "\nAvailable roles:" + Style.RESET_ALL)
+            print("  " + ", ".join(roles))
+        except Exception:
+            pass
+        name = _get_user_input("New track name (e.g., 'New Lead'):", "New Track").strip() or "New Track"
+        try:
+            program = int(_get_user_input("MIDI program number (0-127):", "81").strip())
+        except Exception:
+            program = 0
+        role = _get_user_input("Role:", (roles[0] if roles else "complementary")).strip() or (roles[0] if roles else "complementary")
+        if mode == "1":
+            custom_desc = _get_user_input("Enter your detailed description (one paragraph):", "").strip()
+        elif mode == "2":
+            custom_desc = f"Add a {role} line that complements existing parts. Use clear phrasing over {bars_per_section} bars and leave space where needed."
+        else:
+            # Fallback to minimal guided if an unsupported mode was entered
+            custom_desc = f"Add a {role} line that complements existing parts. Use clear phrasing over {bars_per_section} bars and leave space where needed."
+
+    updated = []
+    for theme_idx, th in enumerate(themes):
+        ctx_tracks = [t for t in th.get('tracks', [])]
+        label = th.get('label', f'Part_{theme_idx+1}')
+        desc = th.get('description', '')
+        try:
+            tr_data, _ = generate_instrument_track_data(
+                config, bars_per_section, name, program, ctx_tracks, role, len(ctx_tracks), len(ctx_tracks)+1,
+                'none', label, custom_desc or desc, themes, theme_idx
+            )
+            new_tracks = list(ctx_tracks)
+            if tr_data:
+                tr_data['instrument_name'] = name
+                tr_data['program_num'] = program
+                tr_data['role'] = role
+                new_tracks.append(tr_data)
+            updated.append({**th, 'tracks': new_tracks})
+        except Exception:
+            updated.append(th)
+    return updated
+
+
+def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dict], bars_per_section: int) -> None:
+    print("\n" + "-" * 60)
+    print(Style.BRIGHT + "Integrated actions (after analysis)" + Style.RESET_ALL)
+    print("-" * 60)
+    print("  1) Optimize selected tracks only (keeps other tracks unchanged)")
+    print("  2) Add a new track to the whole song (context-aware)")
+    print("  3) Generate a NEW MIDI from the analyzed descriptions")
+    print("  4) Full optimization of the ORIGINAL imported MIDI")
+    print("  5) Finish")
+    choice = _get_user_input("Choose 1/2/3/4/5:", "5").strip()
+
+    themes = list(themes_from_analysis)
+    if choice == "1":
+        if not themes:
+            print(Fore.YELLOW + "No themes available from analysis; skipping." + Style.RESET_ALL)
+            return
+        print(Fore.CYAN + "Select which tracks you want to optimize. Others will be left as-is." + Style.RESET_ALL)
+        subset = _choose_tracks_subset(themes[0].get('tracks', []))
+        themes = _optimize_selected_tracks(config_update, themes, bars_per_section, subset)
+        print(Fore.GREEN + "Done: optimized selected tracks across all parts." + Style.RESET_ALL)
+    elif choice == "2":
+        if not themes:
+            print(Fore.YELLOW + "No themes available from analysis; skipping." + Style.RESET_ALL)
+            return
+        themes = _add_new_track_across_parts(config_update, themes, bars_per_section)
+        print(Fore.GREEN + "Done: added the new track to every part." + Style.RESET_ALL)
+    elif choice == "3":
+        # Use current config_update + derived themes to build a new song via generator
+        if not (merge_themes_to_song_data and create_midi_from_json and build_final_song_basename):
+            print(Fore.YELLOW + "Generation helpers not available." + Style.RESET_ALL)
+            return
+        try:
+            song_data = merge_themes_to_song_data(themes, config_update, bars_per_section)
+            base = build_final_song_basename(config_update, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=False)
+            out_path = os.path.join(script_dir, f"{base}_generated_from_analysis.mid")
+            ok = create_midi_from_json(song_data, config_update, out_path)
+            print((Fore.GREEN + f"Generated: {out_path}") if ok else (Fore.RED + "Generation/export failed."))
+        except Exception as e:
+            print(Fore.RED + f"Generation error: {e}" + Style.RESET_ALL)
+    elif choice == "4":
+        # Full-file optimization path: treat imported themes as baseline and run per-track optimization for all
+        if not themes:
+            print(Fore.YELLOW + "No themes available from analysis; skipping." + Style.RESET_ALL)
+            return
+        subset_all = list(range(len(themes[0].get('tracks', [])))) if themes and themes[0].get('tracks') else []
+        if not subset_all:
+            print(Fore.YELLOW + "No tracks found to optimize." + Style.RESET_ALL)
+            return
+        print(Fore.CYAN + "Running full optimization across all parts and tracks..." + Style.RESET_ALL)
+        _ = _optimize_selected_tracks(config_update, themes, bars_per_section, subset_all)
+        # Offer immediate export
+        try:
+            song_data = merge_themes_to_song_data(themes, config_update, bars_per_section)
+            base = build_final_song_basename(config_update, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=True)
+            out_path = os.path.join(script_dir, f"{base}_fully_optimized.mid")
+            ok = create_midi_from_json(song_data, config_update, out_path)
+            print((Fore.GREEN + f"Exported: {out_path}") if ok else (Fore.RED + "MIDI export failed."))
+        except Exception as e:
+            print(Fore.YELLOW + f"Export after optimization failed: {e}" + Style.RESET_ALL)
+    else:
+        print(Fore.YELLOW + "No action selected." + Style.RESET_ALL)
+
+    # Offer loop for multiple actions
+    if choice in {"1", "2"}:
+        try:
+            again = _get_user_input("Perform another integrated action? (y/n):", "n").strip().lower()
+            if again == 'y':
+                offer_integrated_actions(config_update, themes, bars_per_section)
+        except Exception:
+            pass
+
     print("\n" + "-" * 60)
     print(Style.BRIGHT + "What would you like to do next?" + Style.RESET_ALL)
     print("-" * 60)
@@ -728,10 +1037,14 @@ def main():
     theme_defs = [{"label": s.get("label", f"Part_{i+1}"), "description": s.get("description", "")} for i, s in enumerate(sections)]
     config_update["part_length"] = bars_per_section
 
+    # Build themes from analysis for integrated actions
+    themes_from_analysis = split_tracks_into_sections(merged_tracks, bars_per_section, ts["beats_per_bar"]) if 'beats_per_bar' in ts else []
+
     # Full preview and single confirmation prompt
     if preview_settings_then_confirm(config_update, theme_defs):
         apply_to_song_generator(config_update, theme_defs)
-        offer_post_save_actions()
+        # Offer integrated post-analysis actions
+        offer_integrated_actions(config_update, themes_from_analysis, bars_per_section)
     else:
         print(Fore.YELLOW + "Skipped saving settings." + Style.RESET_ALL)
 

@@ -137,7 +137,7 @@ CMC provides a suite of tools for different creative needs, from low-cost loop c
 
 ### 0. (Optional) Analyze an existing MIDI first
 
-If you want to start from an existing MIDI structure, run a quick analysis first and derive a compact plan you can feed into the generator. See the section "Music Analyzer (optional)" below for details.
+If you want to start from an existing MIDI structure, run a quick analysis first and derive a compact plan you can feed into the generator. After analysis, you can directly optimize a subset of tracks or add a new context‑aware track across all parts from within the analyzer. See the section "Music Analyzer (optional)" below for details.
 
 ### 1. Optional Legacy Tools (single parts & quick edits)
 
@@ -253,6 +253,14 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
   - Extracts tracks, note timing in beats, initial BPM and time signature from a MIDI file.
   - Builds compact, LLM‑friendly summaries of tracks to avoid oversized prompts.
   - Can propose updates to `config.yaml`/`song_settings.json` and save them for use with the generators.
+  - Integrated actions after analysis:
+    - Optimize selected tracks only (keeps other tracks unchanged).
+    - Add a new track to the whole song (context‑aware). Modes:
+      1) Manual (your detailed description), 2) Minimal guided (short auto‑prompt),
+      3) Guided full spec (you provide role + minimal idea; AI expands),
+      4) Auto full spec (you choose role; AI proposes name/program/description).
+    - Generate a NEW MIDI from the analyzed descriptions.
+    - Full optimization of the ORIGINAL imported MIDI.
 - When to use:
   - Use it when you want to use an existing MIDI structure as a starting point for generation or optimization.
 
