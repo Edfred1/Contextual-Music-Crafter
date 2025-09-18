@@ -37,6 +37,12 @@ REDUCE_CONTEXT_HALVES = 0        # Number of times to halve context for the curr
 LAST_CONTEXT_COUNT = 0           # Last known number of context themes (for hotkey preview)
 PLANNED_CONTEXT_COUNT = 0        # Planned context size after pending halvings (preview)
 
+# --- Quota state tracking (to improve cooldown reset behavior) ---
+KEY_QUOTA_TYPE: Dict[int, str] = {}  # index -> 'per-day' | 'per-hour' | 'per-minute' | 'rate-limit' | ...
+LAST_PER_DAY_SEEN_TS: float = 0.0
+LAST_PER_HOUR_SEEN_TS: float = 0.0
+NEXT_HOURLY_PROBE_TS: float = 0.0
+
 # --- Helper: classify 429 quota messages (best-effort) ---
 def _classify_quota_error(err_text: str) -> str:
     """Heuristic classification of quota type from error text.
@@ -106,6 +112,44 @@ def _seconds_until_first_available() -> float:
     if not API_KEYS:
         return 0.0
     return max(0.0, min(KEY_COOLDOWN_UNTIL.get(i, 0) - time.time() for i in range(len(API_KEYS))))
+
+def _all_keys_daily_exhausted() -> bool:
+    try:
+        if not API_KEYS:
+            return False
+        # Only consider keys we have seen quota for; if any key not per-day (or unknown), return False
+        for i in range(len(API_KEYS)):
+            if KEY_QUOTA_TYPE.get(i) != 'per-day':
+                return False
+        return True
+    except Exception:
+        return False
+
+def _schedule_hourly_probe_if_needed() -> None:
+    global NEXT_HOURLY_PROBE_TS
+    try:
+        now = time.time()
+        # If no probe scheduled or already passed, schedule next in one hour from now
+        if NEXT_HOURLY_PROBE_TS <= now:
+            NEXT_HOURLY_PROBE_TS = now + PER_HOUR_COOLDOWN_SECONDS
+    except Exception:
+        NEXT_HOURLY_PROBE_TS = time.time() + PER_HOUR_COOLDOWN_SECONDS
+
+def _seconds_until_hourly_probe() -> float:
+    try:
+        now = time.time()
+        if NEXT_HOURLY_PROBE_TS <= now:
+            return 1.0
+        return max(1.0, NEXT_HOURLY_PROBE_TS - now)
+    except Exception:
+        return PER_HOUR_COOLDOWN_SECONDS
+
+def _clear_all_cooldowns() -> None:
+    try:
+        for i in range(len(API_KEYS)):
+            KEY_COOLDOWN_UNTIL[i] = 0
+    except Exception:
+        pass
 
 def _hotkey_monitor_loop(config: Dict):
     """Background loop to catch hotkeys continuously while long API calls run."""
@@ -378,7 +422,7 @@ def print_hotkey_hint(config: Dict, context: str = "") -> None:
             + Fore.CYAN
             + (
                 f"Hotkeys{ctx}: 1=pro (this step), 2=flash (this step), 3={custom} (this step), 0=set session default, "
-                f"h=halve context (this step), a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails{escalate_state}), d=defer track"
+                f"h=halve context (this step), a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails{escalate_state}), d=defer track, r=reset cooldowns"
             )
             + "\n  Note: 1/2/3 switch only this step. Press 0 to keep current as session default."
             + "\n        Changes take effect after the current request/backoff is interrupted (press any hotkey to interrupt waits)."
@@ -401,7 +445,7 @@ def _interruptible_backoff(wait_time: float, config: Dict, context_label: str = 
             time.sleep(max(0.0, wait_time))
             return
         print(Fore.CYAN + (f"Waiting {wait_time:.1f}s" + (f" [{context_label}]" if context_label else "") + 
-              "; press 1/2/3/0 (model), 'h' (halve context), 'd' (defer), 'a' (auto-escalate), 's' (skip wait)...") + Style.RESET_ALL)
+              "; press 1/2/3/0 (model), 'h' (halve context), 'd' (defer), 'a' (auto-escalate), 's' (skip wait), 'r' (reset cooldowns)...") + Style.RESET_ALL)
         while time.time() < end_t:
             if msvcrt.kbhit():
                 ch = msvcrt.getch().decode(errors='ignore').lower()
@@ -444,6 +488,15 @@ def _interruptible_backoff(wait_time: float, config: Dict, context_label: str = 
                     globals()['AUTO_ESCALATE_TO_PRO'] = not globals().get('AUTO_ESCALATE_TO_PRO', False)
                     state = 'ON' if globals().get('AUTO_ESCALATE_TO_PRO', False) else 'OFF'
                     print(Fore.CYAN + f"Auto-escalate to pro after {AUTO_ESCALATE_THRESHOLD} failures: {state}" + Style.RESET_ALL)
+                    return
+                if ch == 'r':
+                    _LAST_HOTKEY_TS['r'] = now
+                    try:
+                        _clear_all_cooldowns()
+                        globals()['NEXT_HOURLY_PROBE_TS'] = 0.0
+                        print(Fore.CYAN + "All key cooldowns cleared by user (hotkey 'r')." + Style.RESET_ALL)
+                    except Exception:
+                        pass
                     return
                 if ch == 'h':
                     _LAST_HOTKEY_TS['h'] = now
@@ -1879,6 +1932,12 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                 if "429" in error_message and "quota" in error_message:
                     qtype = _classify_quota_error(error_message)
                     print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: API quota exceeded for key #{CURRENT_KEY_INDEX + 1} ({qtype})." + Style.RESET_ALL)
+                    # Track last seen quota classes
+                    KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
+                    if qtype == "per-day":
+                        globals()['LAST_PER_DAY_SEEN_TS'] = time.time()
+                    elif qtype == "per-hour":
+                        globals()['LAST_PER_HOUR_SEEN_TS'] = time.time()
                     # Apply cooldown based on detected window
                     # For daily quotas: retry hourly to probe reset windows
                     if qtype == "per-day":
@@ -1910,9 +1969,15 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     base = 3
                     # if all keys cooling down and we have per-minute, show countdown to first available
                     if _all_keys_cooling_down():
-                        wait_time = max(5.0, _seconds_until_first_available())
-                        wait_time = min(wait_time, PER_HOUR_COOLDOWN_SECONDS)
-                        print(Fore.CYAN + f"All keys cooling down. Next probe in ~{wait_time:.1f}s." + Style.RESET_ALL)
+                        if _all_keys_daily_exhausted():
+                            # All keys are per-day exhausted -> force hourly probe cadence
+                            _schedule_hourly_probe_if_needed()
+                            wait_time = _seconds_until_hourly_probe()
+                            print(Fore.CYAN + f"All keys daily-exhausted. Next hourly probe in ~{wait_time:.1f}s." + Style.RESET_ALL)
+                        else:
+                            wait_time = _seconds_until_first_available()
+                            wait_time = max(5.0, min(wait_time, PER_HOUR_COOLDOWN_SECONDS))
+                            print(Fore.CYAN + f"All keys cooling down. Next probe in ~{wait_time:.1f}s." + Style.RESET_ALL)
                     else:
                         wait_time = base * (2 ** max(0, quota_rotation_count - 1))
                     jitter = random.uniform(0, 5.0)
@@ -2727,6 +2792,11 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                 if "429" in error_message and "quota" in error_message:
                     qtype = _classify_quota_error(error_message)
                     print(Fore.YELLOW + f"Warning: API quota exceeded for key #{CURRENT_KEY_INDEX + 1} ({qtype})." + Style.RESET_ALL)
+                    KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
+                    if qtype == "per-day":
+                        globals()['LAST_PER_DAY_SEEN_TS'] = time.time()
+                    elif qtype == "per-hour":
+                        globals()['LAST_PER_HOUR_SEEN_TS'] = time.time()
                     # For daily quotas: retry hourly to probe reset windows
                     if qtype == "per-day":
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
@@ -3141,10 +3211,22 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                 err = str(e).lower()
                 if "429" in err and "quota" in err:
                     print(Fore.YELLOW + "Quota exceeded; rotating key..." + Style.RESET_ALL)
+                    try:
+                        qt = _classify_quota_error(err)
+                        KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qt
+                        if qt == "per-day":
+                            globals()['LAST_PER_DAY_SEEN_TS'] = time.time()
+                        elif qt == "per-hour":
+                            globals()['LAST_PER_HOUR_SEEN_TS'] = time.time()
+                    except Exception:
+                        pass
                     if len(API_KEYS) > 1:
                         new_key = get_next_api_key(); genai.configure(api_key=new_key); continue
                     base = 3; wait = min(3600, base * (2 ** quota_rotation_count) + random.uniform(0,5.0))
-                    time.sleep(wait); quota_rotation_count += 1; continue
+                    if _all_keys_daily_exhausted():
+                        _schedule_hourly_probe_if_needed(); wait = _seconds_until_hourly_probe()
+                    _interruptible_backoff(wait, config, context_label="Automation 429 cooldown")
+                    quota_rotation_count += 1; continue
                 # MAX_TOKENS quick non-blocking switch
                 if "max_tokens" in err and sys.platform == "win32":
                     print(Fore.CYAN + "Press 1=pro, 2=flash, 3=custom to switch model (this track)." + Style.RESET_ALL)
@@ -3456,6 +3538,11 @@ def generate_single_track_data(config: Dict, length_bars: int, instrument_name: 
                         # Probe hourly instead of 24h lock
                         cooldown = PER_HOUR_COOLDOWN_SECONDS
                     _set_key_cooldown(CURRENT_KEY_INDEX, cooldown, force=(qtype=='per-day'))
+                    KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
+                    if qtype == 'per-day':
+                        globals()['LAST_PER_DAY_SEEN_TS'] = time.time()
+                    elif qtype == 'per-hour':
+                        globals()['LAST_PER_HOUR_SEEN_TS'] = time.time()
                     nxt = _next_available_key(CURRENT_KEY_INDEX)
                     if nxt is not None:
                         CURRENT_KEY_INDEX = nxt
@@ -3467,8 +3554,13 @@ def generate_single_track_data(config: Dict, length_bars: int, instrument_name: 
                         continue
                     else:
                         if _all_keys_cooling_down():
-                            wait_s = max(5.0, _seconds_until_first_available())
-                            print(Fore.YELLOW + f"All API keys cooling down ({qtype}). Waiting {int(wait_s)}s before retry..." + Style.RESET_ALL)
+                            if _all_keys_daily_exhausted():
+                                _schedule_hourly_probe_if_needed()
+                                wait_s = _seconds_until_hourly_probe()
+                                print(Fore.YELLOW + f"All API keys daily-exhausted. Waiting {int(wait_s)}s before hourly probe..." + Style.RESET_ALL)
+                            else:
+                                wait_s = max(5.0, min(_seconds_until_first_available(), PER_HOUR_COOLDOWN_SECONDS))
+                                print(Fore.YELLOW + f"All API keys cooling down ({qtype}). Waiting {int(wait_s)}s before retry..." + Style.RESET_ALL)
                             _interruptible_backoff(wait_s, config, context_label="SingleTrack 429 cooldown")
                             continue
             except Exception:
@@ -4769,6 +4861,18 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 last_generated_themes = None
                 last_generated_song_data = None
                 final_song_basename = None
+                
+                # Reload configuration when starting generation to pick up any changes in config.yaml
+                if action in ['generate_again', 'generate_new']:
+                    try:
+                        print(Fore.CYAN + "Reloading configuration from 'config.yaml'..." + Style.RESET_ALL)
+                        config = load_config(CONFIG_FILE)
+                        if initialize_api_keys(config):
+                            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                        else:
+                            print(Fore.YELLOW + "Warning: No valid API key found after reload. API calls will fail." + Style.RESET_ALL)
+                    except Exception as e:
+                        print(Fore.RED + f"Failed to reload configuration: {str(e)}. Using in-memory config." + Style.RESET_ALL)
 
                 if action == 'generate_new':
                     print_header("Define New Song Structure")
@@ -4845,6 +4949,14 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
             elif action == 'optimize':
                 if not last_generated_song_data:
                     print(Fore.YELLOW + "No song has been generated yet in this session to optimize." + Style.RESET_ALL); continue
+                # Ensure latest automation/call-response settings
+                try:
+                    print(Fore.CYAN + "Reloading configuration from 'config.yaml'..." + Style.RESET_ALL)
+                    config = load_config(CONFIG_FILE)
+                    if initialize_api_keys(config):
+                        genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                except Exception as e:
+                    print(Fore.YELLOW + f"Could not reload configuration for optimization: {e}. Proceeding with current settings." + Style.RESET_ALL)
 
                 print_header("Optimize Song")
                 print("This process will read the last generated song and apply your creative instructions to refine it, track by track.")
@@ -4919,6 +5031,14 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
             
             elif action == 'optimize_artifact':
                 print_header("Optimize Existing Song (Artifacts)")
+                # Ensure latest automation/call-response settings
+                try:
+                    print(Fore.CYAN + "Reloading configuration from 'config.yaml'..." + Style.RESET_ALL)
+                    config = load_config(CONFIG_FILE)
+                    if initialize_api_keys(config):
+                        genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                except Exception as e:
+                    print(Fore.YELLOW + f"Could not reload configuration for artifact optimization: {e}. Proceeding with current settings." + Style.RESET_ALL)
                 artifacts = find_final_artifacts(script_dir)
                 if not artifacts:
                     print(Fore.YELLOW + "No artifacts found." + Style.RESET_ALL)
