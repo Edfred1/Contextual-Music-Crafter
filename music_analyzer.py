@@ -146,6 +146,7 @@ try:
         build_final_song_basename,
         save_progress,
         get_progress_filename,
+        initialize_api_keys as sg_initialize_api_keys,
     )
 except Exception:
     merge_themes_to_song_data = None
@@ -155,6 +156,7 @@ except Exception:
     build_final_song_basename = None
     save_progress = None
     get_progress_filename = None
+    sg_initialize_api_keys = None
 
 
 
@@ -204,6 +206,16 @@ def _initialize_api_keys(config: Dict) -> Tuple[List[str], int]:
                 genai.configure(api_key=mc.API_KEYS[mc.CURRENT_KEY_INDEX])
         except Exception:
             pass
+        # Mirror into analyzer and song_generator state
+        try:
+            keys_m = list(getattr(mc, "API_KEYS", []))
+            idx_m = int(getattr(mc, "CURRENT_KEY_INDEX", 0))
+            globals()['API_KEYS'] = list(keys_m)
+            globals()['CURRENT_KEY_INDEX'] = idx_m
+            if sg_initialize_api_keys:
+                sg_initialize_api_keys(config)
+        except Exception:
+            pass
         return list(getattr(mc, "API_KEYS", [])), int(getattr(mc, "CURRENT_KEY_INDEX", 0))
 
     # Fallback
@@ -221,19 +233,20 @@ def _initialize_api_keys(config: Dict) -> Tuple[List[str], int]:
             genai.configure(api_key=keys[0])
         except Exception:
             pass
-    # Mirror keys into analyzer state for rotation/backoff
+    # Mirror keys into analyzer and song_generator states for rotation/backoff
     try:
         globals()['API_KEYS'] = list(keys)
         globals()['CURRENT_KEY_INDEX'] = 0
+        if sg_initialize_api_keys:
+            # Keep song_generator module's state in sync
+            sg_initialize_api_keys(config)
     except Exception:
         pass
     return keys, 0
 
 
 def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tuple[str, int]:
-    # Prefer centralized call in music_crafter (handles rotation/retries)
-    if mc and hasattr(mc, "call_generative_model"):
-        return mc.call_generative_model(prompt_text, config)
+    # Use analyzer's robust rotation/backoff so attempts are not incremented on 429
 
     # Minimal fallback
     if not genai:
@@ -273,15 +286,39 @@ def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tup
                 if ('429' in err or 'quota' in err or 'rate limit' in err):
                     qtype = _classify_quota_error(err)
                     KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
-                    # Rotate if another key is available immediately
-                    nxt = _next_available_key()
-                    if nxt is not None:
-                        globals()['CURRENT_KEY_INDEX'] = nxt
+                    # Try immediate rotation across all keys before waiting
+                    n = len(API_KEYS)
+                    rotated = False
+                    for off in range(1, n+1):
+                        idx = (CURRENT_KEY_INDEX + off) % n
+                        if not _is_key_available(idx):
+                            continue
                         try:
-                            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
-                        except Exception:
-                            pass
-                        continue
+                            globals()['CURRENT_KEY_INDEX'] = idx
+                            genai.configure(api_key=API_KEYS[idx])
+                            print(Fore.CYAN + f"Switching to API key #{idx+1}..." + Style.RESET_ALL)
+                            # rebind model to respect any model switch hotkey
+                            model_name = config.get("model_name", "gemini-2.5-pro")
+                            if REQUESTED_SWITCH_MODEL:
+                                model_name = REQUESTED_SWITCH_MODEL
+                            model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                            response = model.generate_content(prompt_text, safety_settings=safety_settings)
+                            out_text = (getattr(response, "text", "") or "")
+                            _print_llm_debug("LLM call (rotated)", prompt_text, out_text, expects_json)
+                            return out_text, int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
+                        except Exception as e2:
+                            err2 = str(e2).lower()
+                            qt2 = _classify_quota_error(err2)
+                            KEY_QUOTA_TYPE[idx] = qt2
+                            # set cooldown for this key and try next
+                            cd = PER_MINUTE_COOLDOWN_SECONDS
+                            if qt2 in ('per-hour', 'rate-limit'):
+                                cd = PER_HOUR_COOLDOWN_SECONDS
+                            elif qt2 == 'per-day':
+                                cd = PER_HOUR_COOLDOWN_SECONDS
+                            _set_key_cooldown(idx, cd)
+                            rotated = True
+                            continue
                     # Cooldowns
                     cooldown = PER_MINUTE_COOLDOWN_SECONDS
                     if qtype in ('per-hour', 'rate-limit'):
