@@ -132,7 +132,9 @@ def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tup
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
         response = model.generate_content(prompt_text, safety_settings=safety_settings)
-        return (getattr(response, "text", "") or ""), int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
+        out_text = (getattr(response, "text", "") or "")
+        _print_llm_debug("LLM call", prompt_text, out_text, expects_json)
+        return out_text, int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
     except Exception as e:
         print(Fore.RED + f"LLM call failed: {e}" + Style.RESET_ALL)
         return "", 0
@@ -667,6 +669,78 @@ def apply_to_song_generator(config_update: Dict, theme_definitions: List[Dict]) 
     print(Fore.GREEN + "Settings saved. Choose next action from the menu." + Style.RESET_ALL)
 
 
+def _ensure_scale_fields(cfg: Dict) -> None:
+    """Populate cfg['root_note'] and cfg['scale_type'] from cfg['key_scale'] if missing.
+    Expects key_scale like 'F# harmonic minor', 'C minor', 'A dorian', etc.
+    """
+    try:
+        if not isinstance(cfg, dict):
+            return
+        ks = str(cfg.get("key_scale", "")).strip()
+        if not ks:
+            return
+        if cfg.get("root_note") and cfg.get("scale_type"):
+            return
+        parts = ks.split()
+        if not parts:
+            return
+        root = parts[0]
+        scale_type = " ".join(parts[1:]).strip() if len(parts) > 1 else "major"
+        # Normalize note spelling (keep #/b as-is); title-case scale type
+        cfg.setdefault("root_note", root)
+        cfg.setdefault("scale_type", scale_type.lower())
+    except Exception:
+        pass
+
+def _remap_scale_for_generator(cfg: Dict) -> None:
+    """Map cfg['root_note'] string (e.g., 'F#') to a MIDI center note (e.g., 60+pc) for song_generator.
+    Leaves integers untouched. Normalizes scale_type to lower-case.
+    """
+    try:
+        if not isinstance(cfg, dict):
+            return
+        rn = cfg.get("root_note")
+        if isinstance(rn, int):
+            # Already numeric
+            pass
+        else:
+            NOTE_TO_PC = {
+                "C": 0, "B#": 0,
+                "C#": 1, "DB": 1, "Db": 1,
+                "D": 2,
+                "D#": 3, "EB": 3, "Eb": 3,
+                "E": 4, "FB": 4, "Fb": 4,
+                "F": 5, "E#": 5,
+                "F#": 6, "GB": 6, "Gb": 6,
+                "G": 7,
+                "G#": 8, "AB": 8, "Ab": 8,
+                "A": 9,
+                "A#": 10, "BB": 10, "Bb": 10,
+                "B": 11, "CB": 11, "Cb": 11,
+            }
+            name = str(rn or "C").strip()
+            pc = NOTE_TO_PC.get(name, NOTE_TO_PC.get(name.upper(), 0))
+            cfg["root_note"] = 60 + (pc % 12)
+        st = cfg.get("scale_type")
+        if isinstance(st, str):
+            cfg["scale_type"] = st.strip().lower()
+    except Exception:
+        pass
+
+def _print_llm_debug(label: str, prompt_text: str, output_text: str, expects_json: bool) -> None:
+    try:
+        print(Style.DIM + f"\n[LLM DEBUG] {label}: expects_json={expects_json}" + Style.RESET_ALL)
+        pprev = prompt_text.strip().replace("\n\n", "\n")
+        if len(pprev) > 600:
+            pprev = pprev[:600] + "..."
+        print(Style.DIM + f"Prompt preview:\n{pprev}\n" + Style.RESET_ALL)
+        oprev = (output_text or "").strip()
+        if len(oprev) > 600:
+            oprev = oprev[:600] + "..."
+        print(Style.DIM + f"Output preview:\n{oprev}\n" + Style.RESET_ALL)
+    except Exception:
+        pass
+
 def _choose_tracks_subset(tracks: List[Dict]) -> List[int]:
     """Ask user to select a subset of track indices (1-based) and return zero-based list."""
     try:
@@ -739,13 +813,43 @@ def _add_new_track_across_parts(config: Dict, themes: List[Dict], bars_per_secti
             ]
         except Exception:
             base_instrs = []
+        # Build rich global context
+        genre = str(config.get("genre", ""))
+        key_scale = str(config.get("key_scale", ""))
+        ts = config.get("time_signature", {}) or {}
+        beats_per_bar = ts.get("beats_per_bar")
+        beat_value = ts.get("beat_value")
+        insp_all = str(config.get("inspiration", "")).strip()
+        inspiration_short = (insp_all[:320] + "...") if len(insp_all) > 340 else insp_all
+        sections_ctx = []
+        try:
+            for th in themes:
+                sections_ctx.append({
+                    "label": th.get("label"),
+                    "description": th.get("description")
+                })
+        except Exception:
+            sections_ctx = []
+
         role_line = (f"Target role: {target_role}. The output role MUST be exactly this value.\n" if target_role else "")
         min_line = (f"Minimal idea to elaborate: {user_min_desc}\n" if user_min_desc else "")
         prompt = (
-            "Propose ONE new instrument for this MIDI arrangement. Return JSON only.\n"
-            "Schema: {\"name\": str, \"program_num\": int 0..127, \"role\": str, \"description\": str}.\n"
+            "You are adding ONE new track to this MIDI song. Return ONLY one JSON object in this schema:\n"
+            "{\"name\": str, \"program_num\": int 0..127, \"role\": str, \"description\": str}\n\n"
+            "Constraints:\n"
+            "- role MUST be exactly the target role (if provided).\n"
+            "- description MUST be genre-typical and context-aware for the role, over exactly " + str(bars_per_section) + " bars.\n"
+            "- Use bar/beat phrasing (e.g., 'bars 1-4: …, bars 5-8: …').\n"
+            "- Do NOT invent unavailable harmonic fields (no 'root_note' keys, etc.). Describe performance behavior instead.\n\n"
+            "Global context:\n"
+            f"- Genre: {genre}\n"
+            f"- Key/Scale: {key_scale}\n"
+            f"- Time Signature: {beats_per_bar}/{beat_value}\n"
+            f"- Inspiration (short): {inspiration_short}\n"
+            f"- Existing instruments (name, role, program): {json.dumps(base_instrs)}\n"
+            f"- Sections (label+description, in order): {json.dumps(sections_ctx)}\n\n"
             + role_line + min_line +
-            f"Context: part length = {bars_per_section} bars. Existing instruments: " + json.dumps(base_instrs)
+            "Return ONLY the JSON object with the schema above."
         )
         text, _ = _call_llm(prompt, config, expects_json=True)
         try:
@@ -773,6 +877,13 @@ def _add_new_track_across_parts(config: Dict, themes: List[Dict], bars_per_secti
             pass
         target_role = _get_user_input("Choose role for the new track:", (roles[0] if roles else "complementary")).strip() or (roles[0] if roles else "complementary")
         name, program, role, custom_desc = _auto_propose_track_spec(target_role)
+        try:
+            print(Fore.CYAN + "\nUsing new track spec (Auto full spec):" + Style.RESET_ALL)
+            print(f"  Name: {name}\n  Program: {program}\n  Role: {role}")
+            desc_prev = (custom_desc[:400] + '...') if isinstance(custom_desc, str) and len(custom_desc) > 403 else (custom_desc or "")
+            print(f"  Description: {desc_prev}")
+        except Exception:
+            pass
     elif mode == "3":
         # Guided full spec: user provides role + minimal description; AI completes the rest
         roles = get_allowed_roles_from_config(config)
@@ -784,6 +895,14 @@ def _add_new_track_across_parts(config: Dict, themes: List[Dict], bars_per_secti
         target_role = _get_user_input("Choose role for the new track:", (roles[0] if roles else "complementary")).strip() or (roles[0] if roles else "complementary")
         user_min_desc = _get_user_input("Enter a minimal idea (1-2 sentences):", "A supportive line that enhances the groove without clutter.").strip()
         name, program, role, custom_desc = _auto_propose_track_spec(target_role, user_min_desc)
+        try:
+            print(Fore.CYAN + "\nUsing new track spec (Guided full spec):" + Style.RESET_ALL)
+            print(f"  Name: {name}\n  Program: {program}\n  Role: {role}")
+            print(f"  Your idea: {user_min_desc}")
+            desc_prev = (custom_desc[:400] + '...') if isinstance(custom_desc, str) and len(custom_desc) > 403 else (custom_desc or "")
+            print(f"  Expanded description: {desc_prev}")
+        except Exception:
+            pass
     else:
         # For manual/minimal, also show allowed roles for clarity
         roles = get_allowed_roles_from_config(config)
@@ -805,26 +924,74 @@ def _add_new_track_across_parts(config: Dict, themes: List[Dict], bars_per_secti
         else:
             # Fallback to minimal guided if an unsupported mode was entered
             custom_desc = f"Add a {role} line that complements existing parts. Use clear phrasing over {bars_per_section} bars and leave space where needed."
+        try:
+            mode_label = "Manual" if mode == "1" else "Minimal guided"
+            print(Fore.CYAN + f"\nUsing new track spec ({mode_label}):" + Style.RESET_ALL)
+            print(f"  Name: {name}\n  Program: {program}\n  Role: {role}")
+            desc_prev = (custom_desc[:400] + '...') if isinstance(custom_desc, str) and len(custom_desc) > 403 else (custom_desc or "")
+            print(f"  Description: {desc_prev}")
+        except Exception:
+            pass
 
     updated = []
+    appended_count = 0
     for theme_idx, th in enumerate(themes):
         ctx_tracks = [t for t in th.get('tracks', [])]
         label = th.get('label', f'Part_{theme_idx+1}')
         desc = th.get('description', '')
         try:
+            # Ensure we pass the same argument structure as song_generator expects,
+            # including full previous themes history for context linking.
+            track_theme_desc = (custom_desc or desc)
+            if custom_desc:
+                # Merge part description + instrument directive for stronger guidance
+                track_theme_desc = f"{desc}\n\nFor the {role} track: {custom_desc}"
             tr_data, _ = generate_instrument_track_data(
-                config, bars_per_section, name, program, ctx_tracks, role, len(ctx_tracks), len(ctx_tracks)+1,
-                'none', label, custom_desc or desc, themes, theme_idx
+                config,
+                length=bars_per_section,
+                instrument_name=name,
+                program_num=program,
+                context_tracks=ctx_tracks,
+                role=role,
+                current_track_index=len(ctx_tracks),
+                total_tracks=len(ctx_tracks) + 1,
+                dialogue_role='none',
+                theme_label=label,
+                theme_description=track_theme_desc,
+                previous_themes_full_history=themes,
+                current_theme_index=theme_idx,
             )
             new_tracks = list(ctx_tracks)
-            if tr_data:
+            if tr_data and isinstance(tr_data, dict) and tr_data.get('notes'):
                 tr_data['instrument_name'] = name
                 tr_data['program_num'] = program
                 tr_data['role'] = role
                 new_tracks.append(tr_data)
-            updated.append({**th, 'tracks': new_tracks})
-        except Exception:
+                updated.append({**th, 'tracks': new_tracks})
+                appended_count += 1
+            else:
+                print(Fore.YELLOW + f"No notes generated for '{name}' in '{label}'. Skipping append." + Style.RESET_ALL)
+                updated.append(th)
+        except Exception as e:
+            print(Fore.YELLOW + f"Track generation failed for '{name}' in '{label}': {e}" + Style.RESET_ALL)
             updated.append(th)
+    if appended_count == 0:
+        print(Fore.YELLOW + f"No parts received a new '{role}' track. Consider using Guided full spec (3) with a short idea, or try again." + Style.RESET_ALL)
+    else:
+        print(Fore.GREEN + f"Added '{name}' ({role}) to {appended_count} part(s)." + Style.RESET_ALL)
+        # Ensure the generator knows about the new instrument (channel assignment/export)
+        try:
+            insts = config.get('instruments')
+            if not isinstance(insts, list):
+                insts = []
+            # check by name uniqueness
+            exists = any(isinstance(i, dict) and str(i.get('name')).strip().lower() == str(name).strip().lower() for i in insts)
+            if not exists:
+                insts.append({"name": name, "program_num": int(program), "role": role})
+                config['instruments'] = insts
+                print(Fore.CYAN + f"Config instruments updated: appended '{name}' (program {program}, role {role})." + Style.RESET_ALL)
+        except Exception:
+            pass
     return updated
 
 
@@ -852,6 +1019,8 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
         pass
     # Ensure API keys/model configured for downstream generator helpers
     try:
+        _ensure_scale_fields(effective_config)
+        _remap_scale_for_generator(effective_config)
         _initialize_api_keys(effective_config)
     except Exception:
         pass
@@ -865,12 +1034,34 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
         subset = _choose_tracks_subset(themes[0].get('tracks', []))
         themes = _optimize_selected_tracks(effective_config, themes, bars_per_section, subset)
         print(Fore.GREEN + "Done: optimized selected tracks across all parts." + Style.RESET_ALL)
+        # Offer immediate export
+        try:
+            do_exp = _get_user_input("Export a new MIDI with these updates now? (y/n):", "y").strip().lower()
+            if do_exp == 'y' and merge_themes_to_song_data and create_midi_from_json and build_final_song_basename:
+                song_data = merge_themes_to_song_data(themes, effective_config, bars_per_section)
+                base = build_final_song_basename(effective_config, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=True)
+                out_path = os.path.join(script_dir, f"{base}_updated.mid")
+                ok = create_midi_from_json(song_data, effective_config, out_path)
+                print((Fore.GREEN + f"Exported: {out_path}") if ok else (Fore.RED + "MIDI export failed."))
+        except Exception as e:
+            print(Fore.YELLOW + f"Export failed: {e}" + Style.RESET_ALL)
     elif choice == "2":
         if not themes:
             print(Fore.YELLOW + "No themes available from analysis; skipping." + Style.RESET_ALL)
             return
         themes = _add_new_track_across_parts(effective_config, themes, bars_per_section)
         print(Fore.GREEN + "Done: added the new track to every part." + Style.RESET_ALL)
+        # Offer immediate export
+        try:
+            do_exp = _get_user_input("Export a new MIDI with the new track now? (y/n):", "y").strip().lower()
+            if do_exp == 'y' and merge_themes_to_song_data and create_midi_from_json and build_final_song_basename:
+                song_data = merge_themes_to_song_data(themes, effective_config, bars_per_section)
+                base = build_final_song_basename(effective_config, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=True)
+                out_path = os.path.join(script_dir, f"{base}_updated.mid")
+                ok = create_midi_from_json(song_data, effective_config, out_path)
+                print((Fore.GREEN + f"Exported: {out_path}") if ok else (Fore.RED + "MIDI export failed."))
+        except Exception as e:
+            print(Fore.YELLOW + f"Export failed: {e}" + Style.RESET_ALL)
     elif choice == "3":
         # Use current config_update + derived themes to build a new song via generator
         if not (merge_themes_to_song_data and create_midi_from_json and build_final_song_basename):
@@ -1019,10 +1210,15 @@ def main():
     inspiration_text = generate_inspiration_with_llm(
         config, genre, user_inspiration, summaries, bpm=bpm, ts=ts, bars_per_section=bars_per_section, instruments_for_ref=instruments_cfg
     )
+    _print_llm_debug("Inspiration", "(see function generate_inspiration_with_llm)", inspiration_text, expects_json=False)
 
     # Sections
     section_count = max(1, total_bars // bars_per_section)
     sections = generate_section_descriptions_with_llm(config, genre, bars_per_section, section_count, instruments_cfg)
+    try:
+        _print_llm_debug("Sections", "(see function generate_section_descriptions_with_llm)", json.dumps(sections)[:1200], expects_json=True)
+    except Exception:
+        pass
 
     # Timestamp and artifact
     run_ts = time.strftime("%Y%m%d_%H%M%S")
@@ -1056,6 +1252,18 @@ def main():
 
     # Build themes from analysis for integrated actions
     themes_from_analysis = split_tracks_into_sections(merged_tracks, bars_per_section, ts["beats_per_bar"]) if 'beats_per_bar' in ts else []
+    # Overlay rich labels/descriptions from section plan to ensure LLM has strong guidance per part
+    try:
+        for i, th in enumerate(themes_from_analysis):
+            if i < len(sections):
+                sec = sections[i]
+                if isinstance(sec, dict):
+                    if sec.get('label'):
+                        th['label'] = sec.get('label')
+                    if sec.get('description'):
+                        th['description'] = sec.get('description')
+    except Exception:
+        pass
 
     # Full preview and single confirmation prompt
     if preview_settings_then_confirm(config_update, theme_defs):
