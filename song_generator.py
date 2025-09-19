@@ -280,7 +280,12 @@ def get_next_api_key():
 
 def get_instrument_name(track_dict: Dict) -> str:
     """Robustly gets the instrument name from a track dictionary, checking for common key variations."""
-    return track_dict.get('instrument_name') or track_dict.get('instrument', 'Unknown Instrument')
+    return (
+        track_dict.get('instrument_name')
+        or track_dict.get('instrument')
+        or track_dict.get('name')
+        or 'Unknown Instrument'
+    )
 
 # --- ROBUST CONFIG FILE PATH ---
 # Get the absolute path to the directory where the script is located
@@ -5451,8 +5456,16 @@ def merge_themes_to_song_data(themes: List[Dict], config: Dict, theme_length_bar
                         except Exception:
                             continue
 
-    # Originale Instrument-Reihenfolge bewahren
+    # Originale Instrument-Reihenfolge bewahren; zusätzliche (nicht gelistete) Instrumente anhängen
     final_tracks_sorted = [merged_tracks[name] for name in instrument_order if name in merged_tracks]
+    listed = set(instrument_order)
+    extras = [merged_tracks[name] for name in merged_tracks.keys() if name not in listed]
+    if extras:
+        try:
+            print(Fore.YELLOW + f"Warning: {len(extras)} track(s) not in config['instruments'] – appending to output." + Style.RESET_ALL)
+        except Exception:
+            pass
+    final_tracks_sorted.extend(extras)
 
     return {
         'bpm': config['bpm'],
