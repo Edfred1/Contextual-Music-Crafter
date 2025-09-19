@@ -19,6 +19,123 @@ try:
     import google.generativeai as genai
 except Exception:
     genai = None
+
+# --- Analyzer-local API key rotation & hotkeys (aligned with song_generator) ---
+API_KEYS = []
+CURRENT_KEY_INDEX = 0
+HOTKEY_MONITOR_STARTED = False
+REQUESTED_SWITCH_MODEL = None
+REQUEST_SET_SESSION_DEFAULT = False
+AUTO_ESCALATE_TO_PRO = False
+AUTO_ESCALATE_THRESHOLD = 6
+_LAST_HOTKEY_TS = {'1': 0.0, '2': 0.0, '3': 0.0, '0': 0.0, 'a': 0.0, 'r': 0.0}
+HOTKEY_DEBOUNCE_SEC = 0.8
+
+KEY_COOLDOWN_UNTIL = {}
+PER_MINUTE_COOLDOWN_SECONDS = 60
+PER_HOUR_COOLDOWN_SECONDS = 3600
+KEY_QUOTA_TYPE = {}
+LAST_PER_DAY_SEEN_TS = 0.0
+NEXT_HOURLY_PROBE_TS = 0.0
+
+def _classify_quota_error(err_text: str) -> str:
+    try:
+        t = (err_text or "").lower().replace('-', ' ')
+        if any(k in t for k in ["per day", "daily", "per 24 hours", "per 1 day"]):
+            return "per-day"
+        if any(k in t for k in ["per hour", "per 60 minutes", "hourly", "per 3600 seconds"]):
+            return "per-hour"
+        if any(k in t for k in ["per minute", "per 60 seconds", "per 60s"]):
+            return "per-minute"
+        if "rate limit" in t:
+            return "rate-limit"
+    except Exception:
+        pass
+    return "unknown"
+
+def _is_key_available(idx: int) -> bool:
+    return time.time() >= KEY_COOLDOWN_UNTIL.get(idx, 0)
+
+def _set_key_cooldown(idx: int, seconds: float) -> None:
+    KEY_COOLDOWN_UNTIL[idx] = max(KEY_COOLDOWN_UNTIL.get(idx, 0), time.time() + max(1.0, seconds))
+
+def _next_available_key(start_idx: int | None = None) -> int | None:
+    if not API_KEYS:
+        return None
+    n = len(API_KEYS)
+    s = CURRENT_KEY_INDEX if start_idx is None else start_idx
+    for off in range(1, n+1):
+        idx = (s + off) % n
+        if _is_key_available(idx):
+            return idx
+    return None
+
+def _all_keys_cooling_down() -> bool:
+    if not API_KEYS:
+        return True
+    return all(not _is_key_available(i) for i in range(len(API_KEYS)))
+
+def _seconds_until_first_available() -> float:
+    if not API_KEYS:
+        return 0.0
+    return max(0.0, min(KEY_COOLDOWN_UNTIL.get(i, 0) - time.time() for i in range(len(API_KEYS))))
+
+def _all_keys_daily_exhausted() -> bool:
+    if not API_KEYS:
+        return False
+    return all(KEY_QUOTA_TYPE.get(i) == 'per-day' for i in range(len(API_KEYS)))
+
+def _schedule_hourly_probe_if_needed() -> None:
+    global NEXT_HOURLY_PROBE_TS
+    now = time.time()
+    if NEXT_HOURLY_PROBE_TS <= now:
+        NEXT_HOURLY_PROBE_TS = now + PER_HOUR_COOLDOWN_SECONDS
+
+def _seconds_until_hourly_probe() -> float:
+    now = time.time()
+    if NEXT_HOURLY_PROBE_TS <= now:
+        return 1.0
+    return max(1.0, NEXT_HOURLY_PROBE_TS - now)
+
+def _clear_all_cooldowns() -> None:
+    for i in range(len(API_KEYS)):
+        KEY_COOLDOWN_UNTIL[i] = 0
+
+def _interruptible_backoff(wait_time: float, context_label: str = "") -> None:
+    try:
+        end_t = time.time() + max(0.0, wait_time)
+        if sys.platform != "win32":
+            time.sleep(max(0.0, wait_time)); return
+        print(Fore.CYAN + (f"Waiting {wait_time:.1f}s" + (f" [{context_label}]" if context_label else "") + 
+              "; press 1/2/3/0 (model), 'a' (auto-escalate), 'r' (reset cooldowns), 's' (skip wait)...") + Style.RESET_ALL)
+        import msvcrt
+        while time.time() < end_t:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch().decode(errors='ignore').lower()
+                now = time.time()
+                if ch in _LAST_HOTKEY_TS and now - _LAST_HOTKEY_TS.get(ch, 0.0) < HOTKEY_DEBOUNCE_SEC:
+                    continue
+                if ch == '1': _LAST_HOTKEY_TS['1'] = now; globals()['REQUESTED_SWITCH_MODEL'] = 'gemini-2.5-pro'; return
+                if ch == '2': _LAST_HOTKEY_TS['2'] = now; globals()['REQUESTED_SWITCH_MODEL'] = 'gemini-2.5-flash'; return
+                if ch == '3': _LAST_HOTKEY_TS['3'] = now; globals()['REQUESTED_SWITCH_MODEL'] = (globals().get('REQUESTED_SWITCH_MODEL') or 'gemini-2.5-pro'); return
+                if ch == '0': _LAST_HOTKEY_TS['0'] = now; globals()['REQUEST_SET_SESSION_DEFAULT'] = True; return
+                if ch == 'a': _LAST_HOTKEY_TS['a'] = now; globals()['AUTO_ESCALATE_TO_PRO'] = not globals().get('AUTO_ESCALATE_TO_PRO', False); return
+                if ch == 'r': _LAST_HOTKEY_TS['r'] = now; _clear_all_cooldowns(); print(Fore.CYAN + "Cooldowns reset." + Style.RESET_ALL); return
+                if ch == 's': return
+            time.sleep(0.2)
+    except Exception:
+        time.sleep(max(0.0, wait_time))
+
+def _print_hotkey_hint(context: str = "") -> None:
+    try:
+        if sys.platform != "win32":
+            return
+        ctx = f" [{context}]" if context else ""
+        esc = " [ON]" if AUTO_ESCALATE_TO_PRO else " [OFF]"
+        print(Style.DIM + Fore.CYAN + (
+            f"Hotkeys{ctx}: 1=pro, 2=flash, 3=custom, 0=set session default, a=auto-escalate{esc}, r=reset cooldowns" ) + Style.RESET_ALL)
+    except Exception:
+        pass
 # Reuse generation helpers from song_generator when available
 try:
     from song_generator import (
@@ -27,6 +144,8 @@ try:
         generate_optimization_data,
         generate_instrument_track_data,
         build_final_song_basename,
+        save_progress,
+        get_progress_filename,
     )
 except Exception:
     merge_themes_to_song_data = None
@@ -34,6 +153,8 @@ except Exception:
     generate_optimization_data = None
     generate_instrument_track_data = None
     build_final_song_basename = None
+    save_progress = None
+    get_progress_filename = None
 
 
 
@@ -100,6 +221,12 @@ def _initialize_api_keys(config: Dict) -> Tuple[List[str], int]:
             genai.configure(api_key=keys[0])
         except Exception:
             pass
+    # Mirror keys into analyzer state for rotation/backoff
+    try:
+        globals()['API_KEYS'] = list(keys)
+        globals()['CURRENT_KEY_INDEX'] = 0
+    except Exception:
+        pass
     return keys, 0
 
 
@@ -120,21 +247,83 @@ def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tup
             generation_config["response_mime_type"] = "application/json"
         if isinstance(config.get("max_output_tokens"), int):
             generation_config["max_output_tokens"] = config.get("max_output_tokens")
-
-        model = genai.GenerativeModel(
-            model_name=config.get("model_name", "gemini-2.5-pro"),
-            generation_config=generation_config,
-        )
+        # Apply hotkey-based model override
+        model_name = config.get("model_name", "gemini-2.5-pro")
+        if REQUESTED_SWITCH_MODEL:
+            model_name = REQUESTED_SWITCH_MODEL
+        model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
         safety_settings = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
-        response = model.generate_content(prompt_text, safety_settings=safety_settings)
-        out_text = (getattr(response, "text", "") or "")
-        _print_llm_debug("LLM call", prompt_text, out_text, expects_json)
-        return out_text, int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
+        json_failure_count = 0
+        quota_rotation_count = 0
+        while True:
+            try:
+                _print_hotkey_hint("Analyzer LLM call")
+                response = model.generate_content(prompt_text, safety_settings=safety_settings)
+                out_text = (getattr(response, "text", "") or "")
+                _print_llm_debug("LLM call", prompt_text, out_text, expects_json)
+                return out_text, int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
+            except Exception as e:
+                err = str(e).lower()
+                # Quota/429 handling with rotation & cooldowns
+                if ('429' in err or 'quota' in err or 'rate limit' in err):
+                    qtype = _classify_quota_error(err)
+                    KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
+                    # Rotate if another key is available immediately
+                    nxt = _next_available_key()
+                    if nxt is not None:
+                        globals()['CURRENT_KEY_INDEX'] = nxt
+                        try:
+                            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                        except Exception:
+                            pass
+                        continue
+                    # Cooldowns
+                    cooldown = PER_MINUTE_COOLDOWN_SECONDS
+                    if qtype in ('per-hour', 'rate-limit'):
+                        cooldown = PER_HOUR_COOLDOWN_SECONDS
+                    elif qtype == 'per-day':
+                        cooldown = PER_HOUR_COOLDOWN_SECONDS
+                    _set_key_cooldown(CURRENT_KEY_INDEX, cooldown)
+                    # Wait strategy
+                    if _all_keys_cooling_down():
+                        if _all_keys_daily_exhausted():
+                            _schedule_hourly_probe_if_needed(); wait_s = _seconds_until_hourly_probe()
+                        else:
+                            wait_s = max(5.0, min(_seconds_until_first_available(), PER_HOUR_COOLDOWN_SECONDS))
+                        _interruptible_backoff(wait_s, context_label="Analyzer 429 cooldown")
+                        # after wait, try rotate again
+                        nxt = _next_available_key()
+                        if nxt is not None:
+                            globals()['CURRENT_KEY_INDEX'] = nxt
+                            try:
+                                genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                            except Exception:
+                                pass
+                            continue
+                        else:
+                            # if still none, retry loop with same key
+                            continue
+                    else:
+                        # If not all cooling, immediately retry to switch
+                        nxt = _next_available_key()
+                        if nxt is not None:
+                            globals()['CURRENT_KEY_INDEX'] = nxt
+                            try:
+                                genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                            except Exception:
+                                pass
+                            continue
+                # Other transient errors → small exponential backoff
+                json_failure_count += 1
+                base = 3
+                wait_time = min(30, base * (2 ** max(0, json_failure_count - 1)))
+                time.sleep(wait_time)
+                continue
     except Exception as e:
         print(Fore.RED + f"LLM call failed: {e}" + Style.RESET_ALL)
         return "", 0
@@ -1034,6 +1223,21 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
         subset = _choose_tracks_subset(themes[0].get('tracks', []))
         themes = _optimize_selected_tracks(effective_config, themes, bars_per_section, subset)
         print(Fore.GREEN + "Done: optimized selected tracks across all parts." + Style.RESET_ALL)
+        # Save resume progress for song_generator
+        try:
+            if save_progress and get_progress_filename:
+                progress_payload = {
+                    'type': 'optimization',
+                    'config': effective_config,
+                    'theme_length': bars_per_section,
+                    'themes': themes,
+                    'user_optimization_prompt': '',
+                    'timestamp': time.strftime("%Y%m%d-%H%M%S"),
+                }
+                save_progress(progress_payload, script_dir, progress_payload['timestamp'])
+                print(Fore.CYAN + "Resume progress file saved for song_generator." + Style.RESET_ALL)
+        except Exception as e:
+            print(Fore.YELLOW + f"Could not save resume progress: {e}" + Style.RESET_ALL)
         # Offer immediate export
         try:
             do_exp = _get_user_input("Export a new MIDI with these updates now? (y/n):", "y").strip().lower()
@@ -1051,6 +1255,20 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
             return
         themes = _add_new_track_across_parts(effective_config, themes, bars_per_section)
         print(Fore.GREEN + "Done: added the new track to every part." + Style.RESET_ALL)
+        # Save resume progress for song_generator
+        try:
+            if save_progress and get_progress_filename:
+                progress_payload = {
+                    'type': 'generation',
+                    'config': effective_config,
+                    'theme_length': bars_per_section,
+                    'themes': themes,
+                    'timestamp': time.strftime("%Y%m%d-%H%M%S"),
+                }
+                save_progress(progress_payload, script_dir, progress_payload['timestamp'])
+                print(Fore.CYAN + "Resume progress file saved for song_generator." + Style.RESET_ALL)
+        except Exception as e:
+            print(Fore.YELLOW + f"Could not save resume progress: {e}" + Style.RESET_ALL)
         # Offer immediate export
         try:
             do_exp = _get_user_input("Export a new MIDI with the new track now? (y/n):", "y").strip().lower()
@@ -1085,14 +1303,29 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
             print(Fore.YELLOW + "No tracks found to optimize." + Style.RESET_ALL)
             return
         print(Fore.CYAN + "Running full optimization across all parts and tracks..." + Style.RESET_ALL)
-        _ = _optimize_selected_tracks(effective_config, themes, bars_per_section, subset_all)
+        optimized = _optimize_selected_tracks(effective_config, themes, bars_per_section, subset_all)
         # Offer immediate export
         try:
-            song_data = merge_themes_to_song_data(themes, effective_config, bars_per_section)
+            song_data = merge_themes_to_song_data(optimized, effective_config, bars_per_section)
             base = build_final_song_basename(effective_config, themes, time.strftime("%Y%m%d-%H%M%S"), resumed=True)
             out_path = os.path.join(script_dir, f"{base}_fully_optimized.mid")
             ok = create_midi_from_json(song_data, effective_config, out_path)
             print((Fore.GREEN + f"Exported: {out_path}") if ok else (Fore.RED + "MIDI export failed."))
+            # Save resume progress so song_generator can pick it up
+            try:
+                if save_progress and get_progress_filename:
+                    progress_payload = {
+                        'type': 'optimization',
+                        'config': effective_config,
+                        'theme_length': bars_per_section,
+                        'themes': optimized,
+                        'user_optimization_prompt': '',
+                        'timestamp': time.strftime("%Y%m%d-%H%M%S"),
+                    }
+                    save_progress(progress_payload, script_dir, progress_payload['timestamp'])
+                    print(Fore.CYAN + "Resume progress file saved for song_generator." + Style.RESET_ALL)
+            except Exception as e:
+                print(Fore.YELLOW + f"Could not save resume progress: {e}" + Style.RESET_ALL)
         except Exception as e:
             print(Fore.YELLOW + f"Export after optimization failed: {e}" + Style.RESET_ALL)
     else:
