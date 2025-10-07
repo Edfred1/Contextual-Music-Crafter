@@ -5,7 +5,7 @@
 > **Note: Try it in your Browser!**
 > The included [Google Colab Notebook](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb) has been updated to run the full suite of scripts directly in your browser with no local installation required. Please be aware that this Colab integration is considered experimental and has not been as extensively tested as running the scripts on a local machine. For the most stable experience, we recommend a local installation.
 
-Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music generation tool that leverages the power of Google's Gemini to compose multi-track musical pieces. Unlike simple random note generators, CMC builds songs iteratively, instrument by instrument. Each new part is intelligently composed in response to the parts that have already been written, creating cohesive and musically interesting results. CMC also includes a Synthesizer‑ready lyric pipeline aimed at Synthesizer V Studio 2 (UST export). UST files may also work in OpenUtau and similar UTAU‑compatible tools. In addition, Emvoice TXT exports are produced for simple copy/paste into Emvoice.
+Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music generation tool that leverages the power of Google's Gemini to compose multi-track musical pieces. Unlike simple random note generators, CMC builds songs iteratively, instrument by instrument. Each new part is intelligently composed in response to the parts that have already been written, creating cohesive and musically interesting results. CMC also includes a Synthesizer‑ready lyric and vocal‑melody pipeline aimed at Synthesizer V Studio 2 (UST export). UST files may also work in OpenUtau and similar UTAU‑compatible tools. In addition, Emvoice TXT exports are produced for simple copy/paste into Emvoice.
 
 The entire creative direction of the music is guided through an interactive setup process, making it accessible to both developers and musicians.
 
@@ -20,7 +20,7 @@ The entire creative direction of the music is guided through an interactive setu
   - [2. Full Song Generation: The Creative Duo](#2-full-song-generation-the-creative-duo)
 - [Note on legacy scripts](#note-on-legacy-scripts)
 - [Advanced usage and notes](#advanced-usage-and-notes)
-  - [Lyric generation – quick guide](#lyric-generation--quick-guide)
+- [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide)
 - [Music Analyzer (optional)](#music-analyzer-optional)
 - [Artifact Builder (optional)](#artifact-builder-optional)
 - [Further advanced notes (addendum)](#further-advanced-notes-addendum)
@@ -232,7 +232,7 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 
 - **Why the context sometimes shows “Using 4/6 previous themes”**: The generator fits context under an internal character budget (`MAX_CONTEXT_CHARS`). In dynamic mode (`context_window_size: -1`) it includes as many previous parts as fit that budget, so the fraction (e.g., 4/6) is expected and will change if you or future versions adjust this character limit. Set `context_window_size` to a positive number to force a fixed number of previous parts, or to `0` to disable history entirely.
 
-### 🎤 Lyric generation – quick guide
+### 🎤 Lyrics and Vocal Melody – quick guide
 
 - Before you run
   - Put your chorus hook in double quotes in your prompt (short, singable). Example: "Breaking news: reality took the day off".
