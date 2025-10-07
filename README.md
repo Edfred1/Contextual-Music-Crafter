@@ -21,6 +21,7 @@ The entire creative direction of the music is guided through an interactive setu
 - [Note on legacy scripts](#note-on-legacy-scripts)
 - [Advanced usage and notes](#advanced-usage-and-notes)
 - [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide)
+- [General notes (resume & exports)](#general-notes-resume--exports)
 - [Music Analyzer (optional)](#music-analyzer-optional)
 - [Artifact Builder (optional)](#artifact-builder-optional)
 - [Further advanced notes (addendum)](#further-advanced-notes-addendum)
@@ -263,6 +264,8 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 
 - Exports
   - Outputs UST plus two Emvoice TXT files; optional single‑track vocal `.mid`.
+
+### General notes (resume & exports)
 
 - **Resuming long runs**: The song generator saves progress and supports resuming via its interactive menu. You can also resume directly with:
   ```bash
