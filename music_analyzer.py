@@ -147,6 +147,7 @@ try:
         save_progress,
         get_progress_filename,
         initialize_api_keys as sg_initialize_api_keys,
+        save_final_artifact,
     )
 except Exception:
     merge_themes_to_song_data = None
@@ -1539,6 +1540,32 @@ def main():
                         th['label'] = sec.get('label')
                     if sec.get('description'):
                         th['description'] = sec.get('description')
+    except Exception:
+        pass
+
+    # Also persist a final artifact for downstream workflows (optimization/lyrics)
+    try:
+        # Build effective config similarly to integrated actions to keep fields consistent
+        try:
+            base_cfg = _load_config_roundtrip() or {}
+        except Exception:
+            base_cfg = {}
+        effective_config = dict(base_cfg)
+        try:
+            if isinstance(config_update, dict):
+                effective_config.update(config_update)
+        except Exception:
+            pass
+        try:
+            _ensure_scale_fields(effective_config)
+            _remap_scale_for_generator(effective_config)
+            if 'time_signature' not in effective_config and isinstance(ts, dict):
+                effective_config['time_signature'] = ts
+        except Exception:
+            pass
+        # Save final artifact using derived themes and section definitions
+        if save_final_artifact and themes_from_analysis:
+            save_final_artifact(effective_config, themes_from_analysis, bars_per_section, theme_defs, script_dir, run_ts)
     except Exception:
         pass
 
