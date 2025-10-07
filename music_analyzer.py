@@ -1000,7 +1000,7 @@ def _optimize_selected_tracks(config: Dict, themes: List[Dict], bars_per_section
                     opt_tr, _ = generate_optimization_data(
                         config, bars_per_section, tr, role, label, desc, [], [t for j,t in enumerate(inner_ctx) if j!=i], theme_idx, user_optimization_prompt=""
                     )
-                    # Behalte Instrument-Metadaten bei, damit der Export nicht zu "Unknown Instrument" zusammenfällt
+                    # Keep instrument metadata so the export does not collapse to "Unknown Instrument"
                     if opt_tr and isinstance(opt_tr, dict) and opt_tr.get('notes'):
                         opt_tr['instrument_name'] = tr.get('instrument_name', opt_tr.get('instrument_name'))
                         opt_tr['program_num'] = tr.get('program_num', opt_tr.get('program_num', 0))
