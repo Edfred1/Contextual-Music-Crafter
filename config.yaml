@@ -30,6 +30,17 @@ model_name: gemini-2.5-pro
 # Note: Values closer to 0 tend to be more reliable/consistent but less creative/playful;
 #       higher values increase novelty and variation at the cost of stability.
 temperature: 0
+lyrics_temperature: 0.0
+# Enable runtime hotkeys (1=on, 0=off) for model switch/backoff controls
+enable_hotkeys: 1
+# Number of retries for Stage-2 (notes composition) when the LLM output is invalid.
+# Quota/429 errors do not consume attempts; the system rotates API keys and retries.
+stage2_invalid_retries: 5
+
+# Control whether the raw user lyrics prompt is forwarded to Stage-1/2.
+# 0 = Only Step 0 (planning) receives the raw prompt; Stage-1/2 receive distilled info only (role, plan_hint, hook, chorus_lines, palettes).
+# 1 = Also pass the raw prompt to Stage-1/2 as context (higher risk of meta-leaks).
+pass_raw_prompt_to_stages: 0
 
 # -----------------------------------------------------------------------------
 # Automation Settings
@@ -312,4 +323,5 @@ instruments:
 # 126. Helicopter
 # 127. Applause
 # 128. Gunshot
+
 
