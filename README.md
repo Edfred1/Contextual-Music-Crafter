@@ -5,7 +5,7 @@
 > **Note: Try it in your Browser!**
 > The included [Google Colab Notebook](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb) has been updated to run the full suite of scripts directly in your browser with no local installation required. Please be aware that this Colab integration is considered experimental and has not been as extensively tested as running the scripts on a local machine. For the most stable experience, we recommend a local installation.
 
-Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music generation tool that leverages the power of Google's Gemini to compose multi-track musical pieces. Unlike simple random note generators, CMC builds songs iteratively, instrument by instrument. Each new part is intelligently composed in response to the parts that have already been written, creating cohesive and musically interesting results.
+Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music generation tool that leverages the power of Google's Gemini to compose multi-track musical pieces. Unlike simple random note generators, CMC builds songs iteratively, instrument by instrument. Each new part is intelligently composed in response to the parts that have already been written, creating cohesive and musically interesting results. CMC also includes a Synthesizer‑ready lyric pipeline aimed at Synthesizer V Studio 2 (UST export). UST files may also work in OpenUtau and similar UTAU‑compatible tools. In addition, Emvoice TXT exports are produced for simple copy/paste into Emvoice.
 
 The entire creative direction of the music is guided through an interactive setup process, making it accessible to both developers and musicians.
 
@@ -20,6 +20,7 @@ The entire creative direction of the music is guided through an interactive setu
   - [2. Full Song Generation: The Creative Duo](#2-full-song-generation-the-creative-duo)
 - [Note on legacy scripts](#note-on-legacy-scripts)
 - [Advanced usage and notes](#advanced-usage-and-notes)
+  - [Lyric generation – quick guide](#lyric-generation--quick-guide)
 - [Music Analyzer (optional)](#music-analyzer-optional)
 - [Artifact Builder (optional)](#artifact-builder-optional)
 - [Further advanced notes (addendum)](#further-advanced-notes-addendum)
@@ -27,7 +28,7 @@ The entire creative direction of the music is guided through an interactive setu
 ## 🧰 Toolkit overview
 
 - **music_crafter.py**: Interactive planner (co‑producer). Creates/updates `config.yaml` and `song_settings.json`, then launches the generator.
-- **song_generator.py**: Core engine that builds, optimizes, and resumes full songs from the plan.
+- **song_generator.py**: Core engine that builds, optimizes, and resumes full songs from the plan. Includes the lyric generator. Exports SynthV‑ready UST, Emvoice TXT, and (optionally) a single‑track MIDI for vocals.
 - **music_analyzer.py**: Optional pre‑step to analyze existing MIDI and derive a compact, LLM‑friendly plan.
 - **artifact_builder.py**: Utility to rebuild `.mid` from final artifacts or progress JSONs without re‑running generation.
 - **part_generator.py**: Legacy single‑part generator (quick loops).
@@ -42,6 +43,8 @@ The entire creative direction of the music is guided through an interactive setu
 -   **Polish Your Tracks:** After generation, an AI "producer" can optimize each part to enhance groove, dynamics, and overall musicality for a more professional sound.
 -   **Resumable Workflow:** Never lose your work. If a long generation job is interrupted, you can resume it right where you left off.
 -   **Fine-Grained Control:** While the interactive assistant is powerful, you can always dive into the `config.yaml` and `song_settings.json` files to manually tweak every detail.
+
+-   **SynthV‑ready vocals:** A lyric pipeline designed for Synthesizer V Studio 2: Step‑0 plans roles/hooks with a meta‑filter, Stage‑1 shapes text for singability, Stage‑2 maps notes with soft hook contiguity and micro‑note handling. Exports UST for SynthV and two Emvoice TXT files (whole/by part). UST may also load in OpenUtau.
 
 ---
 
@@ -151,7 +154,7 @@ Each script reads your `config.yaml` and writes a new `.mid`. For most users, we
 
 ### 2. Full Song Generation: The Creative Duo
 
-For creating complete, multi-part songs, CMC uses two powerful scripts that work hand-in-hand: `music_crafter.py` (the planner) and `song_generator.py` (the builder).
+For creating complete, multi-part songs, CMC uses two powerful scripts that work hand-in-hand: `music_crafter.py` (the planner) and `song_generator.py` (the builder). The builder also covers SynthV‑ready lyric generation (see the Lyric quick guide below).
 
 #### **Step 1 (Recommended): Plan Your Song with the Creative Assistant (`music_crafter.py`)**
 
@@ -276,6 +279,7 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
   - `part_generator.py`: dynamic names like `<Genre>_<Key>_<Bars>bars_<BPM>bpm_<Timestamp>.mid`.
   - `part_extender.py`: `<OriginalName>_ext_<N>.mid`.
   - `part_variator.py`: `<OriginalName>_var_<N>.mid`.
+  - Lyric exports: `lyrics_<TrackName>_<Timestamp>.ust`, `..._emvoice.txt`, `..._emvoice_by_part.txt`. You can optionally export a single‑track MIDI for the new vocal.
 
 - **Dependencies**: See `requirements.txt` (google-generativeai, midiutil, PyYAML, colorama, ruamel.yaml, mido). Standard library modules are used for everything else.
 
