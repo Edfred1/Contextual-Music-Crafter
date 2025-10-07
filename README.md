@@ -234,24 +234,19 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 
 ### 🎤 Lyrics and Vocal Melody – quick guide
 
-- Before you run
-  - Put your chorus hook in double quotes in your prompt (short, singable). Example: "Breaking news: reality took the day off".
-  - Keep the prompt style‑agnostic (no artist/model/file names). Meta words will not become lyrics.
-  - Optional config: `pass_raw_prompt_to_stages`
-    - `0` (default): Only Step‑0 sees the raw prompt (safer, fewer meta‑leaks).
-    - `1`: Also pass raw prompt to Stage‑1/2 if you want very tight stylistic steering.
-  - Prompt is optional: You can press Enter and generate without any prompt. Step‑0 will still plan sections and may propose a concise `hook_canonical` from context; you can accept, modify, or ignore it later.
+- Getting started
+  - New vocal: choose “Generate NEW Vocal Track”. If the hook line isn’t right, adjust the quoted hook and retry.
+  - Existing melody: choose the vocal track to generate lyrics for it.
 
 - Generate a NEW vocal track
   - In the menu, pick “Generate NEW Vocal Track”.
-  - Check the console “[Plan Summary]”: Hook Canonical, Chorus Lines, Imagery/Verbs, etc. If the hook isn’t right, fix the quoted line in your prompt and retry.
+  - Check the console “[Plan Summary]”: Hook Canonical, Chorus Lines, Imagery/Verbs, etc. Start over.
   - The system will then:
     - Stage‑1 (lyrics): favor whole words, use `-` sustains on tiny slots, keep hook words unbroken where possible.
     - Stage‑2 (notes): soft hook contiguity (compact segments if melody is chopped), avoid new onsets on very short notes.
 
 - Generate lyrics for an EXISTING vocal track (word‑first)
   - Pick the existing vocal track.
-  - The same shaping rules apply: fewer tokens when texture is dense; `-` on tiny notes; unbroken hook words when possible.
   - For heavily chopped melodies, expect compact hook segments instead of a forced contiguous chain.
 
 - Read results efficiently
@@ -259,12 +254,12 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
   - “[Vocal Plan]” = per‑part role + short hint to anticipate density and function.
 
 - Troubleshooting
-  - Meta words leaked into lyrics: keep the hook quoted; remove “in the style of …” from the raw prompt, or set `pass_raw_prompt_to_stages: 0`.
-  - Too many short syllables: shorten instruction lines; the system already prefers `-` on micro‑notes; dense drops benefit from fewer words.
-  - Silent/very sparse parts: allowed by design (intros/outros/breakdowns may plan silence or pure vowels).
+  - Meta words leaked: keep hook quoted; or set `pass_raw_prompt_to_stages: 0`.
+  - Too many short syllables: shorten instruction lines.
+  - Very sparse parts can be intentional (intro/breakdown).
 
 - Exports
-  - New vocal tracks export UST plus two Emvoice TXT files; you can also export a single‑track MIDI for the new vocal.
+  - Outputs UST plus two Emvoice TXT files; optional single‑track vocal `.mid`.
 
 - **Resuming long runs**: The song generator saves progress and supports resuming via its interactive menu. You can also resume directly with:
   ```bash
