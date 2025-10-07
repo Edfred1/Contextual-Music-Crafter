@@ -229,6 +229,40 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 
 - **Why the context sometimes shows “Using 4/6 previous themes”**: The generator fits context under an internal character budget (`MAX_CONTEXT_CHARS`). In dynamic mode (`context_window_size: -1`) it includes as many previous parts as fit that budget, so the fraction (e.g., 4/6) is expected and will change if you or future versions adjust this character limit. Set `context_window_size` to a positive number to force a fixed number of previous parts, or to `0` to disable history entirely.
 
+### 🎤 Lyric generation – quick guide
+
+- Before you run
+  - Put your chorus hook in double quotes in your prompt (short, singable). Example: "Breaking news: reality took the day off".
+  - Keep the prompt style‑agnostic (no artist/model/file names). Meta words will not become lyrics.
+  - Optional config: `pass_raw_prompt_to_stages`
+    - `0` (default): Only Step‑0 sees the raw prompt (safer, fewer meta‑leaks).
+    - `1`: Also pass raw prompt to Stage‑1/2 if you want very tight stylistic steering.
+  - Prompt is optional: You can press Enter and generate without any prompt. Step‑0 will still plan sections and may propose a concise `hook_canonical` from context; you can accept, modify, or ignore it later.
+
+- Generate a NEW vocal track
+  - In the menu, pick “Generate NEW Vocal Track”.
+  - Check the console “[Plan Summary]”: Hook Canonical, Chorus Lines, Imagery/Verbs, etc. If the hook isn’t right, fix the quoted line in your prompt and retry.
+  - The system will then:
+    - Stage‑1 (lyrics): favor whole words, use `-` sustains on tiny slots, keep hook words unbroken where possible.
+    - Stage‑2 (notes): soft hook contiguity (compact segments if melody is chopped), avoid new onsets on very short notes.
+
+- Generate lyrics for an EXISTING vocal track (word‑first)
+  - Pick the existing vocal track.
+  - The same shaping rules apply: fewer tokens when texture is dense; `-` on tiny notes; unbroken hook words when possible.
+  - For heavily chopped melodies, expect compact hook segments instead of a forced contiguous chain.
+
+- Read results efficiently
+  - “[Plan Summary]” = quick sanity check (hook(s), chorus lines, repetition, palettes).
+  - “[Vocal Plan]” = per‑part role + short hint to anticipate density and function.
+
+- Troubleshooting
+  - Meta words leaked into lyrics: keep the hook quoted; remove “in the style of …” from the raw prompt, or set `pass_raw_prompt_to_stages: 0`.
+  - Too many short syllables: shorten instruction lines; the system already prefers `-` on micro‑notes; dense drops benefit from fewer words.
+  - Silent/very sparse parts: allowed by design (intros/outros/breakdowns may plan silence or pure vowels).
+
+- Exports
+  - New vocal tracks export UST plus two Emvoice TXT files; you can also export a single‑track MIDI for the new vocal.
+
 - **Resuming long runs**: The song generator saves progress and supports resuming via its interactive menu. You can also resume directly with:
   ```bash
   python song_generator.py --resume-file path/to/progress_run_*.json
