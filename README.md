@@ -234,13 +234,16 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 
 ### 🎤 Lyrics and Vocal Melody – quick guide
 
-- Getting started
-  - New vocal: choose “Generate NEW Vocal Track”. If the hook line isn’t right, adjust the quoted hook and retry.
-  - Existing melody: choose the vocal track to generate lyrics for it.
+- Entry point
+  - In the `song_generator.py` menu, select “Generate Lyrics for a Track (from final artifact)”. This option appears once a final artifact exists.
+  - No final artifact yet? You can create one from your own multi‑track MIDI: run `music_analyzer.py`, analyze your file, then use an integrated action to generate/export a final song. This will produce the required `final_run_*.json`, after which the lyrics option will be available.
+
+- Branches
+  - Existing track (word‑first): pick a listed track to generate lyrics for its existing melody.
+  - Generate NEW Vocal Track (notes + lyrics + UST): choose the extra option shown after the track list to create a new vocal line across all parts.
 
 - Generate a NEW vocal track
-  - In the menu, pick “Generate NEW Vocal Track”.
-  - Check the console “[Plan Summary]”: Hook Canonical, Chorus Lines, Imagery/Verbs, etc. Start over.
+  - Check the console “[Plan Summary]”: Hook Canonical, Chorus Lines, Imagery/Verbs, etc. If the hook isn’t right, adjust the quoted hook and retry.
   - The system will then:
     - Stage‑1 (lyrics): favor whole words, use `-` sustains on tiny slots, keep hook words unbroken where possible.
     - Stage‑2 (notes): soft hook contiguity (compact segments if melody is chopped), avoid new onsets on very short notes.
@@ -286,6 +289,7 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
   - Extracts tracks, note timing in beats, initial BPM and time signature from a MIDI file.
   - Builds compact, LLM‑friendly summaries of tracks to avoid oversized prompts.
   - Can propose updates to `config.yaml`/`song_settings.json` and save them for use with the generators.
+  - Saves an analysis artifact (`analysis_run_*.json`) that you can use as a starting point for generation/optimization.
   - Integrated actions after analysis:
     - Optimize selected tracks only (keeps other tracks unchanged).
     - Add a new track to the whole song (context‑aware). Modes:
@@ -295,7 +299,7 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
     - Generate a NEW MIDI from the analyzed descriptions.
     - Full optimization of the ORIGINAL imported MIDI.
 - When to use:
-  - Use it when you want to use an existing MIDI structure as a starting point for generation or optimization.
+  - Use it when you want to use an existing multi‑track MIDI as a starting point, and produce artifacts that the generator or artifact builder can pick up.
 
 ## 🧱 Artifact Builder (optional)
 
