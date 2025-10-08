@@ -237,7 +237,7 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 
 - Entry point
   - In the `song_generator.py` menu, select “Generate Lyrics for a Track (from final artifact)”. This option appears once a final artifact exists.
-  - No final artifact yet? You can create one from your own multi‑track MIDI: run `music_analyzer.py`, analyze your file, then use an integrated action to generate/export a final song. This will produce the required `final_run_*.json`, after which the lyrics option will be available.
+  - No final artifact yet? You can create one from your own multi‑track MIDI: run `music_analyzer.py`, analyze your file, this will produce the required `final_run_*.json`, after which the lyrics option will be available.
 
 - Branches
   - Existing track (word‑first): pick a listed track to generate lyrics for its existing melody.
