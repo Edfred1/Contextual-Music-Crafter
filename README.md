@@ -18,6 +18,7 @@ The entire creative direction of the music is guided through an interactive setu
   - [0. (Optional) Analyze an existing MIDI first](#0-optional-analyze-an-existing-midi-first)
   - [1. Optional Legacy Tools (single parts & quick edits)](#1-optional-legacy-tools-single-parts--quick-edits)
   - [2. Full Song Generation: The Creative Duo](#2-full-song-generation-the-creative-duo)
+- [Creative Workflows & Ideas](#creative-workflows--ideas)
 - [Note on legacy scripts](#note-on-legacy-scripts)
 - [Advanced usage and notes](#advanced-usage-and-notes)
 - [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide)
@@ -197,6 +198,46 @@ python song_generator.py
 > **Don't worry, your progress will be saved!** The `song_generator.py` script is designed for this. If generation stops, you can simply resume it from its interactive menu. It will pick up exactly where it left off.
 >
 > **💡 A Note on Quality:** While the process can be resource-intensive, the results from this two-step workflow can be strikingly good. The detailed plan created by `music_crafter.py` gives `song_generator.py` the context it needs to produce surprisingly cohesive and creative pieces.
+
+## 🎨 Creative Workflows & Ideas
+
+CMC works best as a creativity amplifier: a sketchbook, exploration engine, and co‑producer. The ideas below reference existing sections to avoid repetition, while giving you practical routes to try.
+
+- **Start from your own MIDI (Analyzer → Generator)**
+  - Create a multi‑track MIDI in your DAW.
+  - Run the analyzer to derive a compact, LLM‑friendly plan and artifact (see [Music Analyzer (optional)](#music-analyzer-optional)):
+    ```bash
+    python music_analyzer.py
+    ```
+  - Then use the song engine (see [How to Use](#how-to-use)) to either add a new, context‑aware instrument across all parts or run an optimization cycle to refine what’s already there:
+    ```bash
+    python song_generator.py
+    ```
+  - Outcome: you preserve your song’s identity while exploring fresh harmonic, rhythmic, and textural ideas.
+
+- **Iterative variation cycles on your own material**
+  - Load the artifact produced by the analyzer in the song engine and do short optimize → listen → tweak rounds.
+  - Keep changes small per round to maintain “family resemblance” while discovering related variations. See also [Advanced usage and notes](#advanced-usage-and-notes) for model/cost tips.
+
+- **AI reinterpretation from analyzer summaries**
+  - Analyze your multi‑track MIDI to produce compact section/track descriptions.
+  - In the analyzer’s integrated actions, choose “Generate a NEW MIDI from the analyzed descriptions” to let the model re‑interpret your song from the textual plan.
+  - Tips: adjust bars‑per‑section, roles, or the `inspiration` to steer fidelity vs. novelty; save multiple artifacts to compare different “takes”.
+
+- **Lyrics and vocals on top of your MIDI**
+  - Once a final artifact exists (from analyzer or generator), open the lyrics menu in the song engine to: generate lyrics for an existing melody or create a NEW vocal track (notes + lyrics + UST) across all parts.
+  - Exports: Synthesizer V Studio 2 UST and two Emvoice TXT formats. See [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide) for details.
+
+- **Style frames and creative constraints**
+  - In `config.yaml`, keep the “inspiration” prompt focused on feel, phrasing, and energy arc (avoid plugin/FX terms).
+  - Try constraints: fixed section lengths, call‑and‑response enabled, intentionally sparse intros, or “one silent instrument per section” to create musical negative space.
+
+- **Quality and cost tips**
+  - Prefer short generate→optimize loops; resume long runs instead of restarting. Use dynamic context for cohesion.
+  - Reliability: start with `gemini-2.5-pro`. Economy: `gemini-2.5-flash` + an optimization pass; auto‑escalate helps on tricky tracks (see [Advanced usage and notes](#advanced-usage-and-notes)).
+
+- **On publishing and monetization (friendly note)**
+  - CMC is most fun as a creativity tool—sketching, learning, and exploring musical ideas. If you choose to release or sell what you make, that’s your call. Please be mindful of originality, platform policies, and any third‑party material.
 
 ## 📌 Note on legacy scripts
 
