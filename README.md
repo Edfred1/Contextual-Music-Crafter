@@ -9,8 +9,15 @@ Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music gener
 
 The entire creative direction of the music is guided through an interactive setup process, making it accessible to both developers and musicians.
 
+## 🆕 Recent Highlights
+
+- **Music Analyzer**: Analyze your multi‑track MIDI into a compact, LLM‑friendly plan/artifact with integrated actions (optimize selected tracks, add a context‑aware track, or generate a NEW MIDI from the analyzed descriptions). See [Music Analyzer (optional)](#music-analyzer-optional).
+- **Lyrics & Vocal pipeline**: Generate lyrics for an existing melody or create a NEW vocal line (notes + lyrics + UST). Exports Synthesizer V UST and Emvoice TXT. See [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide).
+- **Coming soon**: MIDI merge utilities (combine multiple `.mid` files into one project) and UST→MIDI extraction tools to bring vocal lines back into MIDI for further editing.
+
 ## Table of Contents
 
+- [Recent Highlights](#recent-highlights)
 - [Toolkit overview](#toolkit-overview)
 - [Features](#features)
 - [Installation & Setup](#installation--setup)
