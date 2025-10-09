@@ -581,100 +581,121 @@ def get_next_api_key():
     return API_KEYS[CURRENT_KEY_INDEX]
 
 def call_generative_model(prompt_text, config):
-    """A centralized function to call the generative model with robust retries and API key rotation."""
+    """Call the generative model with retries where quota/rate limits DO NOT consume attempts.
+
+    - Quota/429/rate-limit errors trigger API key rotation and/or backoff without increasing the attempt counter.
+    - Only functional failures (safety blocks, empty responses, other exceptions) consume attempts.
+    """
     global CURRENT_KEY_INDEX
     max_retries = 3
-    while True: # Loop for user-prompted retries
-        for attempt in range(max_retries):
-            try:
-                # Give a slightly more descriptive message depending on the prompt content
-                task_description = "Expanding inspiration" if "expand this" in prompt_text else "Generating content"
-                print(Fore.BLUE + f"Attempt {attempt + 1}/{max_retries}: Calling generative AI ({task_description})..." + Style.RESET_ALL)
-                
-                # Build generation config; enforce JSON MIME only for JSON prompts
-                wants_json = "JSON" in (prompt_text or "")
-                generation_config = {
-                    "temperature": config.get("temperature", 1.0)
-                }
-                if wants_json:
-                    generation_config["response_mime_type"] = "application/json"
-                if isinstance(config.get("max_output_tokens"), int):
-                    generation_config["max_output_tokens"] = config.get("max_output_tokens")
+    while True:  # Loop for user-prompted retries after attempt budget exhausted
+        attempt_count = 0
+        while attempt_count < max_retries:
+            # Descriptive task label
+            task_description = "Expanding inspiration" if "expand this" in (prompt_text or "") else "Generating content"
+            print(Fore.BLUE + f"Attempt {attempt_count + 1}/{max_retries}: Calling generative AI ({task_description})..." + Style.RESET_ALL)
 
-                model = genai.GenerativeModel(
-                    model_name=config["model_name"],
-                    generation_config=generation_config
-                )
-                
-                safety_settings=[
-                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-                ]
+            # Build generation config; enforce JSON MIME only for JSON prompts
+            wants_json = "JSON" in (prompt_text or "")
+            generation_config = {
+                "temperature": config.get("temperature", 1.0)
+            }
+            if wants_json:
+                generation_config["response_mime_type"] = "application/json"
+            if isinstance(config.get("max_output_tokens"), int):
+                generation_config["max_output_tokens"] = config.get("max_output_tokens")
 
-                response = model.generate_content(
-                    prompt_text,
-                    safety_settings=safety_settings,
-                )
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ]
 
-                # --- NEW, MORE ROBUST RESPONSE VALIDATION ---
-                # 1. First, check if the prompt was blocked for safety reasons.
-                if hasattr(response, 'prompt_feedback') and getattr(response.prompt_feedback, 'block_reason', None):
-                    print(Fore.RED + f"Error on attempt {attempt + 1}: Your prompt was blocked by the safety filter." + Style.RESET_ALL)
-                    try:
-                        reason_name = response.prompt_feedback.block_reason.name
-                    except Exception:
-                        reason_name = str(getattr(response.prompt_feedback, 'block_reason', 'UNKNOWN'))
-                    print(Fore.YELLOW + f"Reason: {reason_name}. Please try rephrasing your creative direction to be less aggressive or explicit." + Style.RESET_ALL)
-                    continue # Move to the next retry attempt
+            # Inner rotation loop: try current key, rotate on quota without consuming attempt
+            started_key_index = CURRENT_KEY_INDEX
+            keys_tried = 0
+            quota_only_failures = True
+            while keys_tried < max(1, len(API_KEYS)):
+                try:
+                    model = genai.GenerativeModel(
+                        model_name=config["model_name"],
+                        generation_config=generation_config
+                    )
+                    response = model.generate_content(
+                        prompt_text,
+                        safety_settings=safety_settings,
+                    )
 
-                # 2. Second, check if the AI returned an empty or incomplete response, even if not blocked.
-                if not response.candidates or not response.candidates[0].content or not response.candidates[0].content.parts:
-                    finish_reason_name = "UNKNOWN"
-                    if response.candidates:
-                        try: finish_reason_name = response.candidates[0].finish_reason.name
-                        except AttributeError: finish_reason_name = str(response.candidates[0].finish_reason)
-                    
-                    print(Fore.RED + f"Error on attempt {attempt + 1}: The AI returned an empty or incomplete response." + Style.RESET_ALL)
-                    print(Fore.YELLOW + f"Finish Reason: {finish_reason_name}. This can happen if the request is too complex. The script will retry." + Style.RESET_ALL)
-                    continue # Move to the next retry attempt
+                    # Safety block check (counts as a functional failure)
+                    if hasattr(response, 'prompt_feedback') and getattr(response.prompt_feedback, 'block_reason', None):
+                        quota_only_failures = False
+                        print(Fore.RED + f"Error on attempt {attempt_count + 1}: Your prompt was blocked by the safety filter." + Style.RESET_ALL)
+                        try:
+                            reason_name = response.prompt_feedback.block_reason.name
+                        except Exception:
+                            reason_name = str(getattr(response.prompt_feedback, 'block_reason', 'UNKNOWN'))
+                        print(Fore.YELLOW + f"Reason: {reason_name}. Consider rephrasing to be less aggressive/explicit." + Style.RESET_ALL)
+                        break  # exit rotation loop; will consume attempt below
 
-                print(Fore.GREEN + "AI call successful." + Style.RESET_ALL)
-                
-                total_token_count = 0
-                if hasattr(response, 'usage_metadata'):
-                    total_token_count = response.usage_metadata.total_token_count
+                    # Empty/incomplete response (counts as a functional failure)
+                    if not response.candidates or not response.candidates[0].content or not response.candidates[0].content.parts:
+                        quota_only_failures = False
+                        finish_reason_name = "UNKNOWN"
+                        if response.candidates:
+                            try:
+                                finish_reason_name = response.candidates[0].finish_reason.name
+                            except AttributeError:
+                                finish_reason_name = str(response.candidates[0].finish_reason)
+                        print(Fore.RED + f"Error on attempt {attempt_count + 1}: The AI returned an empty/incomplete response." + Style.RESET_ALL)
+                        print(Fore.YELLOW + f"Finish Reason: {finish_reason_name}. The script will retry." + Style.RESET_ALL)
+                        break  # exit rotation loop; will consume attempt below
 
-                return response.text, total_token_count
+                    print(Fore.GREEN + "AI call successful." + Style.RESET_ALL)
+                    total_token_count = 0
+                    if hasattr(response, 'usage_metadata'):
+                        total_token_count = response.usage_metadata.total_token_count
+                    return response.text, total_token_count
 
-            except Exception as e:
-                if "429" in str(e) and "quota" in str(e).lower():
-                    print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: API quota exceeded for key #{CURRENT_KEY_INDEX + 1}." + Style.RESET_ALL)
-                    
-                    # --- Key Rotation Logic ---
-                    if len(API_KEYS) > 1:
-                        if (CURRENT_KEY_INDEX + 1) < len(API_KEYS):
-                            new_key = get_next_api_key()
-                            genai.configure(api_key=new_key)
-                            print(Fore.CYAN + "Retrying immediately with the next key...")
-                            # We don't increment the attempt counter here, we just retry the same attempt with a new key.
-                            continue
-                        else:
-                            print(Fore.RED + "All available API keys have exceeded their quota.")
-                            # Fall through to the normal retry waiting period
-                    # --- End Key Rotation ---
+                except Exception as e:
+                    err = str(e).lower()
+                    if ("429" in err) or ("quota" in err) or ("rate limit" in err):
+                        print(Fore.YELLOW + f"Warning: API quota/rate limit for key #{CURRENT_KEY_INDEX + 1}. Rotating..." + Style.RESET_ALL)
+                        # Rotate key and retry without consuming the attempt
+                        if len(API_KEYS) > 1:
+                            CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
+                            try:
+                                genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+                            except Exception:
+                                pass
+                        # Count this rotation step
+                        keys_tried += 1
+                        # If we've looped back to the starting key or tried all, break to backoff
+                        if keys_tried >= len(API_KEYS) or CURRENT_KEY_INDEX == started_key_index:
+                            break
+                        continue
+                    else:
+                        quota_only_failures = False
+                        print(Fore.RED + f"An unexpected error occurred: {str(e)}" + Style.RESET_ALL)
+                        break  # functional failure; consume attempt
 
-                else:
-                    print(Fore.RED + f"An unexpected error occurred on attempt {attempt + 1}: {str(e)}" + Style.RESET_ALL)
-            
-                if attempt < max_retries - 1:
+            # After trying keys: decide whether to consume attempt
+            if quota_only_failures:
+                # All failures were quota/rate-limit; do not consume attempt, backoff then continue
+                wait_time = 10
+                print(Fore.YELLOW + f"All keys hit quota/rate limits. Waiting {wait_time}s before probing again..." + Style.RESET_ALL)
+                time.sleep(wait_time)
+                continue  # same attempt_count
+            else:
+                # Consume an attempt for functional failure
+                attempt_count += 1
+                if attempt_count < max_retries:
                     wait_time = 5
-                    print(Fore.YELLOW + f"Waiting for {wait_time} seconds before retrying..." + Style.RESET_ALL)
+                    print(Fore.YELLOW + f"Waiting {wait_time}s before retrying..." + Style.RESET_ALL)
                     time.sleep(wait_time)
 
+        # Out of attempts → user‑prompted retry window
         print(Fore.RED + f"Failed to get a valid response from the AI after {max_retries} attempts." + Style.RESET_ALL)
-        
         print(Fore.CYAN + "Automatic retry in 60 seconds..." + Style.RESET_ALL)
         print(Fore.YELLOW + "Press 'y' to retry now, 'n' to cancel the setup." + Style.RESET_ALL)
 
@@ -687,13 +708,12 @@ def call_generative_model(prompt_text, config):
                     break
             print(f"  Retrying in {i} seconds...  ", end="\r")
             time.sleep(1)
-        
         print("                               ", end="\r")
 
         if user_action == 'n':
             print(Fore.RED + "Setup cancelled by user." + Style.RESET_ALL)
             sys.exit(0)
-        
+
         print(Fore.CYAN + "Retrying now..." + Style.RESET_ALL)
 
 def generate_instrument_list_with_ai(genre, inspiration, num_instruments, config, config_details):
