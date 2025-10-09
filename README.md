@@ -231,6 +231,11 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
   - In the analyzer’s integrated actions, choose “Generate a NEW MIDI from the analyzed descriptions” to let the model re‑interpret your song from the textual plan.
   - Tips: adjust bars‑per‑section, roles, or the `inspiration` to steer fidelity vs. novelty; save multiple artifacts to compare different “takes”.
 
+- **Targeted part‑to‑part transition building**
+  - In your DAW, export only the tracks from the current section that should carry over into the next section as a multi‑track MIDI.
+  - Analyze that MIDI to get a concise plan, then use the analyzer’s integrated actions to add NEW, context‑aware tracks specifically for the upcoming section/change.
+  - Steer the result via your `inspiration` prompt and motif repetition to keep continuity while introducing contrast.
+
 - **Lyrics and vocals on top of your MIDI**
   - Once a final artifact exists (from analyzer or generator), open the lyrics menu in the song engine to: generate lyrics for an existing melody or create a NEW vocal track (notes + lyrics + UST) across all parts.
   - Exports: Synthesizer V Studio 2 UST and two Emvoice TXT formats. See [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide) for details.
