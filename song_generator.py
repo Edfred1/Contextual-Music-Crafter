@@ -3172,9 +3172,10 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                             except Exception:
                                 continue
                     derived_total = tmp_total
-                # If we have both strict and derived, take the minimum (never exceed planned total length)
+                # If we have both strict and derived, take the maximum to avoid truncation of late parts
+                # (Prefer full planned length when content-derived estimate is shorter.)
                 if song_total_beats > 0.0 and derived_total > 0.0:
-                    song_total_beats = min(song_total_beats, derived_total)
+                    song_total_beats = max(song_total_beats, derived_total)
                 elif derived_total > 0.0 and song_total_beats <= 0.0:
                     song_total_beats = derived_total
                 if song_total_beats > 0.0:
@@ -3188,13 +3189,25 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                 continue
             notes = sorted(trks[track_index].get('notes', []), key=lambda n: float(n.get('start_beat', 0.0)))
             sylls = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
-            if not notes or len(sylls) != len(notes):
-                # skip empty or mismatched
-                # If we treat notes as relative per part, advance the conceptual cursor by one section length
-                # so later parts don't create gigantic mid-song gaps; we will cap final length below.
+            if not notes:
+                # No notes in this part; advance cursor to the end of the section to keep alignment
                 if section_length_beats is not None and treat_as_relative:
                     abs_cursor_beats = max(abs_cursor_beats, float(part_idx + 1) * float(section_length_beats))
                 continue
+            # Reconcile token count to notes count to avoid dropping parts due to minor mismatches
+            if len(sylls) != len(notes):
+                try:
+                    target = len(notes)
+                    # Trim excess tokens, pad deficit with '-' sustains (or 'Ah' for first syllable)
+                    if len(sylls) > target:
+                        sylls = sylls[:target]
+                    else:
+                        pad_needed = target - len(sylls)
+                        # Use '-' to sustain if there was any prior content; otherwise seed with 'Ah'
+                        default_token = '-' if (len(sylls) > 0 and str(sylls[-1]).strip() not in ('', 'R', 'r')) else 'Ah'
+                        sylls = list(sylls) + [default_token] * pad_needed
+                except Exception:
+                    pass
             # If notes are relative per part, compute part offset
             part_offset = 0.0
             if section_length_beats is not None and treat_as_relative:
@@ -8487,7 +8500,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 print(Fore.GREEN + "\nOptimization complete." + Style.RESET_ALL)
 
             elif action == 'lyrics_from_artifact':
-                print_header("Generate Lyrics for a Track (Artifact)")
+                print_header("Generate Lyrics for a Track (Artifact/Progress)")
                 # Ensure API keys/model are configured for LLM calls
                 try:
                     print(Fore.CYAN + "Reloading configuration from 'config.yaml'..." + Style.RESET_ALL)
@@ -8496,25 +8509,76 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
                 except Exception as e:
                     print(Fore.YELLOW + f"Warning: Could not initialize API keys for lyrics: {e}" + Style.RESET_ALL)
-                artifacts = find_final_artifacts(script_dir)
-                if not artifacts:
-                    print(Fore.YELLOW + "No artifacts found." + Style.RESET_ALL); continue
-                for i, ap in enumerate(artifacts):
-                    print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {summarize_artifact(ap)}")
+
+                # Build combined selection list: Final artifacts + Progress files
+                finals = find_final_artifacts(script_dir)
+                progresses = find_progress_files(script_dir)
+                combined = []  # (path, is_final, label)
+                for p in finals:
+                    try:
+                        combined.append((p, True, "[F] " + summarize_artifact(p)))
+                    except Exception:
+                        combined.append((p, True, "[F] " + os.path.basename(p)))
+                for p in progresses:
+                    try:
+                        combined.append((p, False, "[P] " + summarize_progress_file(p)))
+                    except Exception:
+                        combined.append((p, False, "[P] " + os.path.basename(p)))
+
+                if not combined:
+                    print(Fore.YELLOW + "No final artifacts or progress files found." + Style.RESET_ALL)
+                    continue
+
+                for i, (_, _, label) in enumerate(combined):
+                    print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {label}")
                 try:
-                    sel = input(f"{Fore.GREEN}Choose artifact (1-{len(artifacts)}): {Style.RESET_ALL}").strip()
+                    sel = input(f"{Fore.GREEN}Choose item (1-{len(combined)}): {Style.RESET_ALL}").strip()
                     idx = int(sel) - 1
                 except Exception:
-                    print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL); continue
-                if not (0 <= idx < len(artifacts)):
-                    print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL); continue
-                artifact = load_final_artifact(artifacts[idx])
-                if not artifact:
+                    print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL)
                     continue
-                cfg = artifact.get('config', {})
-                themes = artifact.get('themes', [])
+                if not (0 <= idx < len(combined)):
+                    print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL)
+                    continue
+
+                selected_path, is_final, _ = combined[idx]
+
+                # Helper: best-effort extraction from progress files for lyrics
+                def _extract_from_progress_for_lyrics(pdata: Dict) -> tuple:
+                    cfg = pdata.get('config') or {}
+                    length_bars = int(pdata.get('theme_length') or pdata.get('length') or previous_settings.get('length', DEFAULT_LENGTH))
+                    themes = None
+                    # Try by type first
+                    ptype = str(pdata.get('type') or '').lower()
+                    if 'generation' in ptype:
+                        themes = pdata.get('all_themes_data') or pdata.get('themes')
+                    if themes is None and 'window_optimization' in ptype:
+                        themes = pdata.get('themes')
+                    if themes is None and 'optimization' in ptype:
+                        themes = pdata.get('themes_to_optimize') or pdata.get('themes') or pdata.get('final_optimized_themes')
+                    if themes is None and 'automation_enhancement' in ptype:
+                        themes = pdata.get('themes')
+                    # Generic fallbacks
+                    if themes is None:
+                        themes = pdata.get('themes') or pdata.get('all_themes_data') or pdata.get('themes_to_optimize')
+                    return cfg, themes, length_bars
+
+                if is_final:
+                    artifact = load_final_artifact(selected_path)
+                    if not artifact:
+                        continue
+                    cfg = artifact.get('config', {})
+                    themes = artifact.get('themes', [])
+                    theme_len_bars = int(artifact.get('length', previous_settings.get('length', DEFAULT_LENGTH)))
+                else:
+                    pdata = load_progress(selected_path)
+                    if not pdata:
+                        print(Fore.YELLOW + "Could not load the selected progress file." + Style.RESET_ALL)
+                        continue
+                    cfg, themes, theme_len_bars = _extract_from_progress_for_lyrics(pdata)
                 if not themes:
-                    print(Fore.YELLOW + "Artifact has no themes." + Style.RESET_ALL); continue
+                    print(Fore.YELLOW + "Selected item has no themes to process." + Style.RESET_ALL)
+                    continue
 
                 # Build global track name list from the first theme (assume consistent ordering)
                 base_tracks = themes[0].get('tracks', []) if themes and isinstance(themes[0], dict) else []
@@ -8540,7 +8604,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 inspiration = cfg.get('inspiration', '')
                 bpm = cfg.get('bpm', 120)
                 ts = cfg.get('time_signature', {"beats_per_bar": 4, "beat_value": 4})
-                theme_len_bars = int(artifact.get('length') or previous_settings.get('length', DEFAULT_LENGTH))
+                # theme_len_bars is set based on selected item (artifact/progress)
                 beats_per_bar = int(ts.get('beats_per_bar', 4))
                 section_len_beats = theme_len_bars * beats_per_bar
 

@@ -1294,6 +1294,20 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
                 print((Fore.GREEN + f"Exported: {out_path}") if ok else (Fore.RED + "MIDI export failed."))
         except Exception as e:
             print(Fore.YELLOW + f"Export failed: {e}" + Style.RESET_ALL)
+        # Also persist a new final artifact to include these updated themes
+        try:
+            if save_final_artifact and isinstance(themes, list) and themes:
+                tdefs = []
+                try:
+                    for th in themes:
+                        tdefs.append({"label": th.get("label"), "description": th.get("description", "")})
+                except Exception:
+                    tdefs = []
+                ts_now = time.strftime("%Y%m%d-%H%M%S")
+                save_final_artifact(effective_config, themes, bars_per_section, tdefs, script_dir, ts_now)
+                print(Fore.CYAN + "Saved updated final artifact (includes optimized tracks)." + Style.RESET_ALL)
+        except Exception:
+            pass
     elif choice == "2":
         if not themes:
             print(Fore.YELLOW + "No themes available from analysis; skipping." + Style.RESET_ALL)
@@ -1325,6 +1339,20 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
                 print((Fore.GREEN + f"Exported: {out_path}") if ok else (Fore.RED + "MIDI export failed."))
         except Exception as e:
             print(Fore.YELLOW + f"Export failed: {e}" + Style.RESET_ALL)
+        # Also persist a new final artifact so lyrics/menu see the added track in [F]
+        try:
+            if save_final_artifact and isinstance(themes, list) and themes:
+                tdefs = []
+                try:
+                    for th in themes:
+                        tdefs.append({"label": th.get("label"), "description": th.get("description", "")})
+                except Exception:
+                    tdefs = []
+                ts_now = time.strftime("%Y%m%d-%H%M%S")
+                save_final_artifact(effective_config, themes, bars_per_section, tdefs, script_dir, ts_now)
+                print(Fore.CYAN + "Saved updated final artifact (includes newly added track)." + Style.RESET_ALL)
+        except Exception:
+            pass
     elif choice == "3":
         # Use current config_update + derived themes to build a new song via generator
         if not (merge_themes_to_song_data and create_midi_from_json and build_final_song_basename):
@@ -1338,6 +1366,20 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
             print((Fore.GREEN + f"Generated: {out_path}") if ok else (Fore.RED + "Generation/export failed."))
         except Exception as e:
             print(Fore.RED + f"Generation error: {e}" + Style.RESET_ALL)
+        # Save a final artifact snapshot matching the generated-from-analysis state
+        try:
+            if save_final_artifact and isinstance(themes, list) and themes:
+                tdefs = []
+                try:
+                    for th in themes:
+                        tdefs.append({"label": th.get("label"), "description": th.get("description", "")})
+                except Exception:
+                    tdefs = []
+                ts_now = time.strftime("%Y%m%d-%H%M%S")
+                save_final_artifact(effective_config, themes, bars_per_section, tdefs, script_dir, ts_now)
+                print(Fore.CYAN + "Saved final artifact from analysis-based generation." + Style.RESET_ALL)
+        except Exception:
+            pass
     elif choice == "4":
         # Full-file optimization path: treat imported themes as baseline and run per-track optimization for all
         if not themes:
@@ -1373,6 +1415,20 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
                 print(Fore.YELLOW + f"Could not save resume progress: {e}" + Style.RESET_ALL)
         except Exception as e:
             print(Fore.YELLOW + f"Export after optimization failed: {e}" + Style.RESET_ALL)
+        # Persist a final artifact reflecting the fully optimized themes
+        try:
+            if save_final_artifact and isinstance(optimized, list) and optimized:
+                tdefs = []
+                try:
+                    for th in optimized:
+                        tdefs.append({"label": th.get("label"), "description": th.get("description", "")})
+                except Exception:
+                    tdefs = []
+                ts_now = time.strftime("%Y%m%d-%H%M%S")
+                save_final_artifact(effective_config, optimized, bars_per_section, tdefs, script_dir, ts_now)
+                print(Fore.CYAN + "Saved updated final artifact (fully optimized)." + Style.RESET_ALL)
+        except Exception:
+            pass
     else:
         print(Fore.YELLOW + "No action selected." + Style.RESET_ALL)
 
