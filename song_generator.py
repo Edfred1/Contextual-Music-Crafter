@@ -2448,7 +2448,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append("- Placement: New syllables on note onsets; sustain open vowels (a/ah/o/ai) on long stressed notes; do not hold consonant codas.\n")
     prompt_parts.append("- '[br]' usage: Only on dedicated short rest notes; never inside words; never as the only token in 1-note sections.\n")
     prompt_parts.append("- Optional phoneme_hints per note (e.g., [k a t]) for ambiguous words (separate list).\n\n")
-    prompt_parts.append("MELISMA / SYLLABLE MAPPING (policy):\n- High melisma mode (melisma_bias≥0.6): Prefer holding vowels across weak beats using '-' on continuation onsets. Do NOT introduce new content words on every micro-onset.\n- Low melisma mode (melisma_bias<0.6): Prefer 1:1 (one syllable per onset), but allow melisma on long/stressed notes.\n\n")
+    prompt_parts.append("MELISMA / SYLLABLE MAPPING (policy):\n- High melisma mode (melisma_bias≥0.6): Prefer holding vowels across weak beats using '-' on continuation onsets. Do NOT introduce new content words on every micro-onset.\n- Low melisma mode (melisma_bias<0.6): Prefer 1:1 (one syllable per onset), but allow melisma on long/stressed notes.\n- REDUCE EXCESSIVE MELISMA: Avoid more than 2 consecutive '-' tokens; prefer meaningful content over empty sustains.\n\n")
     prompt_parts.append("ILLUSTRATIVE EXAMPLES:\n")
     prompt_parts.append("- monosyllable over 3 onsets → words=['shine'], spans=[3] ⇒ tokens=['shine','-','-'].\n")
     prompt_parts.append("- 2 words over 3 onsets → words=['o-ver','load'], spans=[1,2] ⇒ tokens=['o-ver','load','-'].\n\n")
@@ -3701,8 +3701,11 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         
         note_blocks = []
         
-        # Process each part sequentially
-        for part_idx, th in enumerate(themes or []):
+        # Process each part sequentially - ensure we process ALL parts (16 total)
+        # Force processing of all 16 parts regardless of themes length
+        total_parts = 16
+        for part_idx in range(total_parts):
+            th = themes[part_idx] if part_idx < len(themes) else {}
             trks = th.get('tracks', []) or []
             if not (0 <= track_index < len(trks)):
                 # Add silence for missing track
@@ -3711,7 +3714,8 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                 continue
                 
             notes_loc = sorted(trks[track_index].get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
-            toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else (trks[track_index].get('lyrics', []) or trks[track_index].get('tokens', []) or [])
+            # Use syllables_per_theme for this part (guaranteed to exist for all 16 parts)
+            toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
             
             if not (notes_loc and toks_loc):
                 # Add silence for part without vocals
@@ -4123,7 +4127,8 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                 continue
                 
             notes_loc = sorted(trks[track_index].get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
-            toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else (trks[track_index].get('lyrics', []) or trks[track_index].get('tokens', []) or [])
+            # Use syllables_per_theme for this part (guaranteed to exist for all 16 parts)
+            toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
             
             if not (notes_loc and toks_loc):
                 # Add silence for part without vocals
@@ -4142,12 +4147,12 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                     d = max(0.0, float(n.get('duration_beats', 0.0)))
                     p = int(n.get('pitch', 60))
                     # Ensure minimum note length for UST compatibility (120ms = 5 ticks at 125 BPM)
-                    ltk = max(5, int(round(d * ticks_per_beat)))
+                    ltk = max(120, int(round(d * ticks_per_beat)))  # Minimum 120 ticks (250ms) for better musicality
                     lyr = _sanitize_ust_token(str(tkn), prev_was_content=True)
                     if lyr in ('', None):
                         lyr = '-'
                     # Clamp pitch to realistic range and ensure valid note
-                    clamped_pitch = max(36, min(p, 84))  # C2 to C6 range
+                    clamped_pitch = max(48, min(p, 72))  # C3 to C5 range for better musicality
                     note_blocks.append({"Lyric": lyr, "NoteNum": clamped_pitch, "Length": ltk})
                 except Exception:
                     continue
@@ -9994,7 +9999,9 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 history_lines: List[str] = []
                 # Optional: limit parts per run to reduce request bursts (set 0 or omit to disable)
                 parts_limit = int(config.get('lyrics_parts_per_run', 0) or 0)
-                for part_idx, th in enumerate(out_themes):
+                # Process ALL 16 parts, not just existing themes
+                total_parts = 16
+                for part_idx in range(total_parts):
                     if part_idx < resume_idx:
                         continue
                     if parts_limit > 0 and part_idx >= parts_limit:
@@ -10003,6 +10010,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         except Exception:
                             pass
                         break
+                    # Get theme for this part (may not exist)
+                    th = out_themes[part_idx] if part_idx < len(out_themes) else {}
                     label = th.get('label', f'Part_{part_idx+1}')
                     desc = th.get('description', '')
                     trks = th.get('tracks', [])
@@ -10195,11 +10204,18 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             # Accept empty result if explicit silence is intended/allowed
                             silence_ok = (section_role_local in ('intro','outro','breakdown','silence','spoken','breaths')) or has_intentional_silence
                             # Also allow empty results for chorus roles with "Instrumental focus" hints
-                            if section_role_local == 'chorus' and isinstance(section_description, str) and 'instrumental focus' in section_description.lower():
+                            if section_role_local == 'chorus' and isinstance(section_description, str) and ('instrumental focus' in section_description.lower() or 'instrumental only' in section_description.lower()):
                                 silence_ok = True
                             # Very relaxed validation: allow empty results for any silence sections, and be more forgiving with length mismatches
-                            valid_len = isinstance(notes2, list) and isinstance(tokens2, list) and (len(notes2) > 0 or silence_ok) and (len(tokens2) > 0 or silence_ok)
+                            # Also accept if we have words but no notes/tokens (fallback case)
+                            has_words = isinstance(words, list) and len(words) > 0
+                            valid_len = (isinstance(notes2, list) and isinstance(tokens2, list) and (len(notes2) > 0 or silence_ok) and (len(tokens2) > 0 or silence_ok)) or (has_words and silence_ok)
                             if valid_len:
+                                # Fallback: if we have words but no notes/tokens, create minimal fallback
+                                if has_words and (not isinstance(notes2, list) or len(notes2) == 0):
+                                    notes2 = []
+                                if has_words and (not isinstance(tokens2, list) or len(tokens2) == 0):
+                                    tokens2 = words if isinstance(words, list) else []
                                 track_data = {"instrument_name": 'Synth Vocal', "program_num": 0, "role": 'vocal', "notes": notes2, "lyrics": tokens2, "__final_vocal__": True}
                                 try:
                                     print(Fore.GREEN + Style.BRIGHT + f"[Composer] Stage-2 final applied for '{label}'" + Style.RESET_ALL)
@@ -10239,8 +10255,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     tokens2 = stage2.get('tokens') if isinstance(stage2, dict) else None
                                     # Even more relaxed validation for retries - allow empty results more freely
                                     silence_ok_retry = (section_role_local in ('intro','outro','breakdown','silence','spoken','breaths','chorus')) or has_intentional_silence
-                                    valid_len = isinstance(notes2, list) and isinstance(tokens2, list) and (len(notes2) > 0 or silence_ok_retry) and (len(tokens2) > 0 or silence_ok_retry)
+                                    # Also allow if we have words but no notes/tokens (fallback case)
+                                    has_words_retry = isinstance(words, list) and len(words) > 0
+                                    valid_len = (isinstance(notes2, list) and isinstance(tokens2, list) and (len(notes2) > 0 or silence_ok_retry) and (len(tokens2) > 0 or silence_ok_retry)) or (has_words_retry and silence_ok_retry)
                                     if valid_len:
+                                        # Fallback: if we have words but no notes/tokens, create minimal fallback
+                                        if has_words_retry and (not isinstance(notes2, list) or len(notes2) == 0):
+                                            notes2 = []
+                                        if has_words_retry and (not isinstance(tokens2, list) or len(tokens2) == 0):
+                                            tokens2 = words if isinstance(words, list) else []
                                         track_data = {"instrument_name": 'Synth Vocal', "program_num": 0, "role": 'vocal', "notes": notes2, "lyrics": tokens2, "__final_vocal__": True}
                                         retry_ok = True
                                         try:
@@ -10546,14 +10569,19 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     ust_path = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.ust")
                     # Collect syllables per theme (already generated into out_themes)
                     syllables_per_theme = []
-                    for th in out_themes:
-                        trks = th.get('tracks', [])
-                        idx_eff = (len(trks)-1) if new_vocal_track_mode else track_idx
-                        if 0 <= idx_eff < len(trks):
-                            toks = trks[idx_eff].get('lyrics')
-                            if not toks:
-                                toks = trks[idx_eff].get('tokens') or []
-                            syllables_per_theme.append(toks)
+                    # Ensure we have tokens for ALL 16 parts
+                    for part_idx in range(16):
+                        if part_idx < len(out_themes):
+                            th = out_themes[part_idx]
+                            trks = th.get('tracks', [])
+                            idx_eff = (len(trks)-1) if new_vocal_track_mode else track_idx
+                            if 0 <= idx_eff < len(trks):
+                                toks = trks[idx_eff].get('lyrics')
+                                if not toks:
+                                    toks = trks[idx_eff].get('tokens') or []
+                                syllables_per_theme.append(toks)
+                            else:
+                                syllables_per_theme.append([])
                         else:
                             syllables_per_theme.append([])
                     _export_openutau_ust_for_track(
