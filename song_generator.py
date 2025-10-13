@@ -3701,9 +3701,9 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         
         note_blocks = []
         
-        # Process each part sequentially - ensure we process ALL parts (16 total)
-        # Force processing of all 16 parts regardless of themes length
-        total_parts = 16
+        # Process each part sequentially - ensure we process ALL parts from loaded JSON
+        # Use actual number of parts from loaded themes
+        total_parts = len(themes) if themes else 0
         for part_idx in range(total_parts):
             th = themes[part_idx] if part_idx < len(themes) else {}
             trks = th.get('tracks', []) or []
@@ -9999,8 +9999,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 history_lines: List[str] = []
                 # Optional: limit parts per run to reduce request bursts (set 0 or omit to disable)
                 parts_limit = int(config.get('lyrics_parts_per_run', 0) or 0)
-                # Process ALL 16 parts, not just existing themes
-                total_parts = 16
+                # Process ALL parts from loaded JSON, not just existing themes
+                total_parts = len(out_themes) if out_themes else 0
                 for part_idx in range(total_parts):
                     if part_idx < resume_idx:
                         continue
@@ -10569,8 +10569,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     ust_path = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.ust")
                     # Collect syllables per theme (already generated into out_themes)
                     syllables_per_theme = []
-                    # Ensure we have tokens for ALL 16 parts
-                    for part_idx in range(16):
+                    # Ensure we have tokens for ALL parts from loaded JSON
+                    for part_idx in range(len(out_themes) if out_themes else 0):
                         if part_idx < len(out_themes):
                             th = out_themes[part_idx]
                             trks = th.get('tracks', [])
