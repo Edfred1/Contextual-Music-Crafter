@@ -40,6 +40,41 @@ PLANNED_CONTEXT_COUNT = 0        # Planned context size after pending halvings (
 # Lyrics per-part meta (optional side-channel from words generation)
 LYRICS_PART_META: Dict[str, Dict] = {}
 
+# --- JSON Schemas for structured LLM outputs ---
+LYRICS_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "words": {"type": "array", "items": {"type": "string"}},
+        "melisma_spans": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "phoneme_hints": {"type": ["array", "null"], "items": {"type": ["string", "null"]}},
+        "hook_canonical": {"type": ["string", "null"]},
+        "hook_token_ranges": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}},
+        "line_breaks": {"type": ["array", "null"], "items": {"type": "integer"}},
+        "chant_segments": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}},
+        "phrase_windows": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}},
+        "vowel_sustain_targets": {"type": ["array", "null"], "items": {"type": "integer"}},
+        "mapping_feasibility_score": {"type": ["number", "null"]},
+        "note_rewrite_request": {"type": ["boolean", "null"]},
+        "note_rewrite_intent": {"type": ["string", "null"]},
+        "self_check": {
+            "type": ["object", "null"],
+            "properties": {
+                "notes_count": {"type": ["integer", "null"]},
+                "spans_sum": {"type": ["integer", "null"]},
+                "words_len": {"type": ["integer", "null"]},
+                "ok": {"type": ["boolean", "null"]},
+                "intentional_silence": {"type": ["boolean", "null"]}
+            }
+        }
+    },
+    "required": ["words", "melisma_spans"],
+    "additionalProperties": True
+}
+
+ROLES_JSON_SCHEMA = {"type": "object"}
+HINTS_JSON_SCHEMA = {"type": "object"}
+PLAN_JSON_SCHEMA = {"type": "object"}
+
 # --- Quota state tracking (to improve cooldown reset behavior) ---
 KEY_QUOTA_TYPE: Dict[int, str] = {}  # index -> 'per-day' | 'per-hour' | 'per-minute' | 'rate-limit' | ...
 LAST_PER_DAY_SEEN_TS: float = 0.0
@@ -417,6 +452,7 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
             _cfg_temp = config.get("temperature")
         selected_temp = float(_cfg_temp) if isinstance(_cfg_temp, (int, float)) else float(derived_temp)
         generation_config = {"response_mime_type": "application/json", "temperature": selected_temp}
+        # Do not set response_schema here to avoid SDK schema normalization errors
         try:
             if isinstance(config.get("max_output_tokens"), int):
                 _mx = int(config.get("max_output_tokens"))
@@ -445,8 +481,11 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
                     resp = model.generate_content(prompt_text, safety_settings=safety_settings, generation_config=generation_config)
                     raw_txt = getattr(resp, "text", "") or ""
                     try:
-                        cleaned = raw_txt.strip().replace("```json", "").replace("```", "")
-                        obj = json.loads(cleaned)
+                        try:
+                            obj = json.loads(raw_txt)
+                        except Exception:
+                            cleaned = raw_txt.strip().replace("```json", "").replace("```", "")
+                            obj = json.loads(cleaned)
                         syll = obj.get("syllables") if isinstance(obj, dict) else None
                         if not (isinstance(syll, list) and len(syll) == num_slots):
                             return None
@@ -717,6 +756,7 @@ Return only the JSON array, no other text."""
             _plan_temp = 0.0
         
         generation_config = {"response_mime_type": "application/json", "temperature": _plan_temp}
+        # Do not set response_schema for roles planning
         try:
             if isinstance(config.get("max_output_tokens"), int):
                 _mx = int(config.get("max_output_tokens"))
@@ -2003,13 +2043,13 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         # Chorus: stronger sustain for carpets of short notes
         if role == 'chorus' and short_note_ratio >= 0.4:
             mb_adj += 0.2
-        derived_melisma_bias = max(0.2, min(0.95, base_mb + mb_adj))
+        derived_melisma_bias = max(0.20, min(0.50, base_mb + mb_adj - 0.15))
 
         if note_durs:
             nd_sorted = sorted(note_durs)
             med = nd_sorted[len(nd_sorted)//2]
             # Higher push with many short notes (especially chorus) to avoid choppy mapping
-            derived_min_word_beats = max(0.5, min(1.2, 0.5*med + 0.25 + 0.35*short_note_ratio + (0.1 if role=='chorus' and short_note_ratio>=0.4 else 0.0)))
+            derived_min_word_beats = max(1.0, min(1.3, 0.5*med + 0.45 + 0.25*short_note_ratio + (0.1 if role=='chorus' and short_note_ratio>=0.4 else 0.0)))
         else:
             derived_min_word_beats = 0.6
 
@@ -2025,11 +2065,11 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
             if isinstance(cfg_target_wpb, (int, float)) else derived_target_wpb
         )
         melisma_bias = (
-            blend*cfg_melisma_bias + (1.0-blend)*derived_melisma_bias
+            blend*min(0.5, max(0.2, float(cfg_melisma_bias))) + (1.0-blend)*derived_melisma_bias
             if isinstance(cfg_melisma_bias, (int, float)) else derived_melisma_bias
         )
         min_word_beats = (
-            blend*cfg_min_word_beats + (1.0-blend)*derived_min_word_beats
+            blend*max(1.0, min(1.3, float(cfg_min_word_beats))) + (1.0-blend)*derived_min_word_beats
             if isinstance(cfg_min_word_beats, (int, float)) else derived_min_word_beats
         )
         allow_nonsense = bool(cfg_allow_nonsense) or bool(derived_allow_nonsense)
@@ -2100,6 +2140,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         _cfg_temp = config.get("temperature")
     selected_temp = float(_cfg_temp) if isinstance(_cfg_temp, (int, float)) else float(derived_temp)
     generation_config = {"response_mime_type": "application/json", "temperature": selected_temp}
+    # Do not set response_schema here to keep compatibility with current SDK
     try:
         if isinstance(config.get("max_output_tokens"), int):
             generation_config["max_output_tokens"] = int(config.get("max_output_tokens"))
@@ -2355,7 +2396,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append("ACTIVE POLICIES: " + ", ".join(active_blocks) + "\n\n")
     prompt_parts.append("ROLE:\nYou are a professional lyricist and vocal arranger. Target: SynthV-ready output.\n\n")
     # Soft guidance for micro-notes / text shaping in word-first mode
-    prompt_parts.append("TEXT SHAPING (soft):\n- Prefer whole words; split only when rhythm truly requires it; avoid frequent splits outside the hook.\n- Favor fewer tokens when melodic texture is dense; use '-' sustains instead of adding syllables on very short notes.\n- Keep hook words unbroken where possible; only split if musically compelling.\n\n")
+    prompt_parts.append("TEXT SHAPING (soft):\n- Prefer whole words; split only when rhythm truly requires it; avoid frequent splits outside the hook.\n- Favor fewer tokens when melodic texture is dense; use '-' sustains instead of adding syllables on very short notes.\n- Where possible, avoid splitting words like 'echo', 'pattern', 'remember', 'light', 'glass', 'shape'.\n- Keep hook words unbroken where possible; only split if musically compelling.\n\n")
     prompt_parts.append("CONTEXT:\n")
     prompt_parts.append(f"- Genre={genre}; Language={language}; Key/Scale={key_scale}; BPM={round(float(bpm))}; TimeSig={ts.get('beats_per_bar','?')}/{ts.get('beat_value','?')}\n")
     prompt_parts.append(f"- Track={track_name}; Section={section_label or ''}; Description={section_description or ''}\n")
@@ -2441,12 +2482,17 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append("- '+' usage: Allowed only as a continuation indicator when absolutely necessary (it will be mapped to '-' in export). Prefer melisma via spans instead. No in-word hyphenation. One token = one word.\n")
     prompt_parts.append("- Phrase starts: After a rest, the first note MUST be a content syllable (never '-').\n")
     prompt_parts.append("- Forbidden tokens at word starts: single consonants, punctuation-only tokens. Use a content word or, if necessary, map that onset as a continuation '-' with melisma (do not invent vowels).\n")
-    prompt_parts.append("- Spoken/Backing policy: Spoken-word and backing fragments MUST still contain a vowel nucleus when used as content; if timing is too chopped, prefer '-' holds over adding filler vowels.\n")
-    prompt_parts.append("- Micro-onset policy: Onsets shorter than ~1/8 beat should prefer '-' continuation unless the token naturally fits; avoid forcing new content on micro-slots.\n")
+    # Breath-specific guidance only when role demands it
+    if section_role in ('breaths', 'prechorus'):
+        prompt_parts.append("- Breath policy: If the role or plan hints request a breath, output the token '[br]' on a dedicated short rest-like note; do NOT replace it with words.\n")
+        prompt_parts.append("- Micro-onset policy (with breaths): Onsets shorter than ~1/4 beat should prefer '-' continuation or '[br]' (if specifically intended) unless a naturally short syllable fits.\n")
+    else:
+        prompt_parts.append("- Micro-onset policy: Onsets shorter than ~1/4 beat should prefer '-' continuation unless a naturally short syllable fits.\n")
     prompt_parts.append("- Multi-syllable words: With ≥2 onsets, split into syllables; do not put '-' on a fresh onset.\n")
     prompt_parts.append("- Monosyllables on many onsets: Prefer a 2-syllable synonym; else at most one '-' continuation; avoid '- -'.\n")
     prompt_parts.append("- Placement: New syllables on note onsets; sustain open vowels (a/ah/o/ai) on long stressed notes; do not hold consonant codas.\n")
-    prompt_parts.append("- '[br]' usage: Only on dedicated short rest notes; never inside words; never as the only token in 1-note sections.\n")
+    if section_role in ('breaths',):
+        prompt_parts.append("- '[br]' usage: Only on dedicated short rest notes; never inside words; nie als einziges Token bei 1-Note-Teilen (nutze stattdessen einen kurzen Content-Impuls, falls nötig).\n")
     prompt_parts.append("- Optional phoneme_hints per note (e.g., [k a t]) for ambiguous words (separate list).\n\n")
     prompt_parts.append("MELISMA / SYLLABLE MAPPING (policy):\n- High melisma mode (melisma_bias≥0.6): Prefer holding vowels across weak beats using '-' on continuation onsets. Do NOT introduce new content words on every micro-onset.\n- Low melisma mode (melisma_bias<0.6): Prefer 1:1 (one syllable per onset), but allow melisma on long/stressed notes.\n- REDUCE EXCESSIVE MELISMA: Avoid more than 2 consecutive '-' tokens; prefer meaningful content over empty sustains.\n\n")
     prompt_parts.append("ILLUSTRATIVE EXAMPLES:\n")
@@ -2457,10 +2503,14 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append("- 1-syllable word across 3 onsets → prefer a different 2-syllable word; else allow at most one '-', and let remaining onsets start the next word.\n")
     prompt_parts.append("- 4-syllable word with 4 onsets → words=['sy1','sy2','sy3','sy4'], spans=[1,1,1,1]; if only 1 onset exists, choose a shorter alternative; never '-' on first onset after a rest.\n\n")
     prompt_parts.append("OUTPUT FORMAT (STRICT JSON):\n")
-    prompt_parts.append("{\n  \"words\": [string, ...],\n  \"melisma_spans\": [int, ...],\n  \"phoneme_hints\": [string|null, ...],   // optional; same length; nulls allowed\n  \"hook_canonical\": string|null,        // optional exact chorus/title phrase if any\n  \"hook_token_ranges\": [[int,int],...]|null, // optional token index ranges covering hook occurrences (contiguous)\n  \"line_breaks\": [int,...]|null,        // optional token indices where a new lyric line starts\n  \"chorus_lines\": [string,...]|null,    // optional 2–4 short chorus lines for reuse\n  \"chant_segments\": [[int,int],...]|null, // optional token ranges for chant/mantra usage\n  \"phrase_windows\": [[int,int],...]|null, // optional token ranges for legato phrasing\n  \"vowel_sustain_targets\": [int,...]|null, // optional token indices to sustain with open vowels\n  \"note_rewrite_request\": bool|null,   // optional: request a note rewrite due to mapping infeasibility\n  \"note_rewrite_intent\": string|null,  // optional: short plan for how notes should change\n  \"mapping_feasibility_score\": number|null, // optional [0..1], lower=hard to map cleanly\n  \"repetition_report\": object|null,     // optional brief counts of repeated tokens/ngrams\n  \"self_check\": {\n    \"hook_exact\": bool|null,\n    \"hook_contiguous\": bool|null,\n    \"prechorus_uses_hook\": bool|null,\n    \"outro_repetition_ok\": bool|null,\n    \"chorus_consistency\": bool|null,\n    \"nonsense_ratio\": number|null,\n    \"repetition_ngram_overlap\": number|null,\n    \"stress_alignment_score\": number|null,\n    \"case_policy_applied\": bool|null\n  }|null,\n  \"placement_difficulty\": number|null,  // optional [0..1]\n  \"note_adaptation_vision\": string|null // optional short guidance for a follow-up notes pass\n}\n\n")
-    prompt_parts.append(f"CONSTRAINTS:\n- Sum(melisma_spans) == {N}.\n- len(words) == len(melisma_spans) == len(phoneme_hints).\n- Spans = consecutive notes per word; prefer syllable-per-onset for multi-syllables; use melisma only to hold a single syllable.\n- Never output two or more '-' in a row; at most one '-' between content syllables.\n- Do not place '-' on the first note after a rest.\n\n")
+    prompt_parts.append("{\n  \"intentional_silence\": bool|null,     // if true: words=[], melisma_spans=[] and Step-2 will be skipped\n  \"words\": [string, ...],\n  \"melisma_spans\": [int, ...],\n  \"phoneme_hints\": [string|null, ...],   // optional; same length; nulls allowed\n  \"hook_canonical\": string|null,        // optional exact chorus/title phrase if any\n  \"hook_token_ranges\": [[int,int],...]|null, // optional token index ranges covering hook occurrences (contiguous)\n  \"line_breaks\": [int,...]|null,        // optional token indices where a new lyric line starts\n  \"chorus_lines\": [string,...]|null,    // optional 2–4 short chorus lines for reuse\n  \"chant_segments\": [[int,int],...]|null, // optional token ranges for chant/mantra usage\n  \"phrase_windows\": [[int,int],...]|null, // optional token ranges for legato phrasing\n  \"vowel_sustain_targets\": [int,...]|null, // optional token indices to sustain with open vowels\n  \"note_rewrite_request\": bool|null,   // optional: request a note rewrite due to mapping infeasibility\n  \"note_rewrite_intent\": string|null,  // optional: short plan for how notes should change\n  \"mapping_feasibility_score\": number|null, // optional [0..1], lower=hard to map cleanly\n  \"repetition_report\": object|null,     // optional brief counts of repeated tokens/ngrams\n  \"self_check\": {\n    \"hook_exact\": bool|null,\n    \"hook_contiguous\": bool|null,\n    \"prechorus_uses_hook\": bool|null,\n    \"outro_repetition_ok\": bool|null,\n    \"chorus_consistency\": bool|null,\n    \"nonsense_ratio\": number|null,\n    \"repetition_ngram_overlap\": number|null,\n    \"stress_alignment_score\": number|null,\n    \"case_policy_applied\": bool|null,\n    \"intentional_silence\": bool|null    // duplicate mirror for safety\n  }|null,\n  \"placement_difficulty\": number|null,  // optional [0..1]\n  \"note_adaptation_vision\": string|null // optional short guidance for a follow-up notes pass\n}\n\n")
+    prompt_parts.append(f"CONSTRAINTS:\n- If intentional_silence==true: words=[], melisma_spans=[].\n- Otherwise: Sum(melisma_spans) == {N}.\n- len(words) == len(melisma_spans) == len(phoneme_hints).\n- Spans = consecutive notes per word; prefer syllable-per-onset for multi-syllables; use melisma only to hold a single syllable.\n- Never output two or more '-' in a row; at most one '-' between content syllables.\n- Do not place '-' on the first note after a rest.\n\n")
     prompt_parts.append("PRIORITIES (desc):\n1) Syllable-to-onset alignment and span consistency\n2) Open-vowel sustain on long/stressed notes\n3) Section function (hook/verse/etc.) and lyrical coherence\n4) Strict adherence to output format and rules\n\n")
-    prompt_parts.append("CHECKLIST:\n- No '+'; no in-word '-' hyphens\n- No leading '-' after a rest; no consecutive '-' chain\n- No breath in 1-note parts; [br] only on rest notes\n- Spans sum/lengths match; JSON only\n\n")
+    # Checklist with role gating
+    prompt_parts.append("CHECKLIST:\n- No '+'; no in-word '-' hyphens\n- No leading '-' after a rest; no consecutive '-' chain\n")
+    if section_role not in ('breaths',):
+        prompt_parts.append("- No breath in 1-note parts; [br] only on rest notes\n")
+    prompt_parts.append("- Spans sum/lengths match; JSON only\n\n")
     prompt_parts.append("SELF-CHECK & AUTO-REPAIR (hard):\n")
     prompt_parts.append("- Compute the following metrics before returning: words_per_bar, one_span_ratio (#spans==1 / #words).\n")
     prompt_parts.append("- If melisma_bias≥0.6 AND one_span_ratio > 0.70, increase melisma by holding vowels ('-') on weak beats for suitable words until one_span_ratio ∈ [0.35..0.70].\n")
@@ -2468,7 +2518,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append("- If words_per_bar < target_wpb-0.20, reduce melisma moderately and choose shorter content words where possible while respecting min_word_beats.\n")
     prompt_parts.append("- If words_per_bar > target_wpb+0.20, increase melisma moderately or choose fewer/longer words while respecting min_word_beats.\n")
     prompt_parts.append("- Also enforce existing hook/section policies as already specified. Return ONLY the final JSON.\n\n")
-    prompt_parts.append("Return ONLY the JSON object.\n")
+    # JSON-only enforced via response_mime_type/response_schema
     prompt = "".join(prompt_parts)
 
     def _call_with_rotation(prompt_text: str) -> dict | None:
@@ -2638,6 +2688,12 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
             "repetition_report": (obj.get("repetition_report") if isinstance(obj.get("repetition_report"), dict) else None),
             "self_check": (obj.get("self_check") if isinstance(obj.get("self_check"), dict) else None)
         }
+        # Top-level intentional silence flag (preferred short-circuit)
+        try:
+            if obj.get("intentional_silence") is True:
+                meta_entry["intentional_silence"] = True
+        except Exception:
+            pass
         LYRICS_PART_META[part_key] = meta_entry
         pd = LYRICS_PART_META[part_key]["placement_difficulty"]
         if pd is not None:
@@ -2834,7 +2890,7 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
             + ("- If this is a CHORUS or the section label implies a drop: begin with the exact HOOK TEXT; keep hook words unbroken and contiguous. Reuse the same hook line across choruses/drops with only micro-variation elsewhere (adapt repetition to part length and musical feel).\n" if (section_role == 'chorus') else "")
             + ("\nHOOK POLICY (chorus only):\n- If a hook/title exists: include it verbatim where musically fitting for the part length.\n- Keep hook words contiguous; avoid letter-by-letter spelling.\n- Avoid over-hyphenation of hook words; keep them as whole as possible.\n" if section_role == 'chorus' else "")
             + ("\nSILENCE OPTION (when appropriate):\n- If this section is Intro/Outro/Breakdown OR other tracks are very dense, it is acceptable to skip vocals: set words=[] and syllables=[], and set arranger_note='intentional silence: <short rationale>'.\n" if section_role in ('intro','outro','breakdown') else "")
-            + "\nSELF-CHECK & AUTO-REPAIR:\n- Ensure words is a non-empty list (unless intentional silence is used for Intro/Outro/Breakdown).\n- If syllables are provided: best-effort only; do not force 1:1 alignment.\n- If CHORUS and a hook exists: include it once; if absent, provide a short alternative hook line.\n- Avoid nonsense/filler outside deliberately repetitive chant moments.\n\nReturn ONLY the JSON.\n"
+            + "\nSELF-CHECK & AUTO-REPAIR:\n- Ensure words is a non-empty list (unless intentional silence is used for Intro/Outro/Breakdown).\n- If syllables are provided: best-effort only; do not force 1:1 alignment.\n- If CHORUS and a hook exists: include it once; if absent, provide a short alternative hook line.\n- Avoid nonsense/filler outside deliberately repetitive chant moments.\n"
         )
 
         # Retry with key rotation and interruptible backoff on quota/429
@@ -2958,7 +3014,13 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         # Use session override if available, otherwise config
         global SESSION_MODEL_OVERRIDE
         model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
-        generation_config = {"response_mime_type": "application/json", "temperature": float(config.get("temperature", 0.5))}
+        # Use a slightly higher temperature for Stage-2 to avoid deterministic loops
+        try:
+            _base_t = float(config.get("lyrics_temperature", config.get("temperature", 0.5)))
+        except Exception:
+            _base_t = 0.5
+        _temp = max(0.3, min(1.0, _base_t))
+        generation_config = {"response_mime_type": "application/json", "temperature": _temp}
         model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
         # Context summary and available scale notes
         try:
@@ -3039,6 +3101,20 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             },
             labels=labels
         )
+        # Per-call nonce to decorrelate near-identical prompts across runs/parts
+        try:
+            from uuid import uuid4
+            _nonce = str(uuid4())[:8]
+        except Exception:
+            import random
+            _nonce = hex(random.getrandbits(24))[2:]
+
+        # Target onsets per bar for shaping density
+        try:
+            target_wpb = float(config.get('lyrics_target_words_per_bar', 2.0))
+        except Exception:
+            target_wpb = 2.0
+
         prompt = (
             "ROLE: You are a vocal composer. Compose notes (start_beat,duration,pitch) for the lyrics below; map tokens accordingly.\n\n"
             + ("GLOBAL: " + line_ctx + " bars.\n")
@@ -3051,6 +3127,18 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + ("LYRICS TEXT (preferred source):\n" + json.dumps([w for w in (lyrics_words or [])]) + "\n" if isinstance(lyrics_words, list) and lyrics_words else "")
             + "SYLLABLE INPUT (optional; may be ignored):\n" + json.dumps(syllables or []) + "\n\n"
             + "AVAILABLE SCALE NOTES: " + json.dumps(scale_notes) + "\n\n"
+            + f"NONCE: { _nonce }\n\n"
+            + "PROSODY & MAPPING POLICY:\n"
+            + "- Map exactly one lyric token to one note. Use '-' tokens to extend the previous note (melisma).\n"
+            + "- Avoid inserting micro rests (< 0.5 beats); extend the preceding note instead.\n"
+            + "- Place stressed syllables on stronger beats and stable tones; function words on weak parts.\n"
+            + "- Target onsets per bar ≈ " + str(round(target_wpb,2)) + "; do not exceed it unless musically justified by role/plan.\n"
+            + "- Favor legato and coherent phrase arcs over fragmented mapping.\n\n"
+            + "PHRASING HINTS BY ROLE:\n"
+            + "- intro/whisper/spoken: fewer onsets, longer durations (≥ 1.0–1.25 beats typical).\n"
+            + "- phrase_spot/prechorus: legato motifs, min durations ≥ 1.0 beats im Zweifel.\n"
+            + "- chorus: klare Bögen; Wiederholung ok; meide Silben-Häckseln (< 0.5 beats).\n"
+            + "- vocal_fx/breaths: sehr sparsam; musikalische Platzierung; viel Raum.\n\n"
             + _vocal_toolbox_block(
                 2,
                 is_chorus=is_chorus,
@@ -3073,6 +3161,12 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "- Use phrase windows implicitly; aim for legato across musically sensible spans for this part; cadence near bar starts.\n"
             + "- Avoid overlapping notes; connect continuation notes end-to-start; place rests only between words/phrases if musically justified.\n"
             + "- Align key content to strong beats or context accents; avoid crowding when other tracks are dense.\n\n"
+            + "VARIATION POLICY (context-aware, not prohibitive):\n"
+            + "- Prefer subtle variation over strict loops, UNLESS the context suggests repetition (e.g., role=chorus/chant/hook/tag/vocal_fx, or plan hints mention hook/refrain/mantra/call-and-response).\n"
+            + "- If repetition is stylistically appropriate (pop/dance/hip-hop, hook-centric sections), you MAY repeat ABAB or short motifs; add micro-variation every 2–4 bars (pickup, end cadence, rhythm shift, small diatonic transposition).\n"
+            + "- For spoken/whisper roles, repetition of words is acceptable; prioritize timing/placement over pitch variety.\n"
+            + "- Aim for musical intent: when in doubt, choose clarity and groove over forced variation.\n"
+            + "- Keep comfortable vocal range; brief approach tones are fine if they resolve.\n\n"
             # Role-specific guidance blocks (only emitted for the active role)
             + ("VERSE FOCUS (role-specific):\n- Advance the narrative with concrete images.\n- Keep phrasing punchy and rhythmic; prefer short words/lines.\n- Two-phrase A–A' per 4 bars; A' is a minimal variation.\n\n" if is_verse else "")
             + ("PRE-CHORUS FOCUS (role-specific):\n- Build tension and lift into the chorus; rising contour preferred.\n- Reuse a short priming phrase; avoid revealing the hook.\n\n" if is_prechorus else "")
@@ -3086,9 +3180,9 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + ("RESPONSE FOCUS (role-specific):\n- Call-and-response one-liners; answer lead with 1–2 words.\n- Ensure rests before/after; avoid overlap.\n\n" if is_response else "")
             + ("RAP FOCUS (role-specific):\n- Rhythm-first syllables; keep internal rhyme optional but minimal.\n- Avoid overfilling; respect micro-onset rules.\n\n" if is_rap else "")
             + ("CHOIR/HUM FOCUS (role-specific):\n- Sustained vowels (hum/aa/oo) in simple chords/unison; no semantics.\n- Very slow movement; long sustains.\n\n" if (is_choir or is_hum) else "")
-            + ("BREATHS/TAG FOCUS (role-specific):\n- Breaths/noise as musical cues; or tiny end-tags (1–2 words).\n- Extremely sparse; do not crowd.\n\n" if (is_breaths or is_tag) else "")
+            + ("BREATHS/TAG FOCUS (role-specific):\n- Breaths/noise as musical cues; or tiny end-tags (1–2 words).\n- Extremely sparse; do not crowd.\n- If role=breaths: create 1–2 short onsets mapped to the explicit token '[br]'; do NOT use words.\n\n" if (is_breaths or is_tag) else "")
             + ("PHRASE_SPOT FOCUS (role-specific):\n- Single short phrase placed in a free window; everything else rests.\n- Duration ≤ 1 bar; clear entry/exit.\n\n" if is_phrase_spot else "")
-            + ("VOCODER/TALKBOX/FX FOCUS (role-specific):\n- Treat tokens as syllabic carriers; simple pitch shapes; sparse usage.\n- Avoid semantic density; use rests generously.\n\n" if (is_vocoder or is_talkbox or is_vocal_fx) else "")
+            + ("VOCODER/TALKBOX/FX FOCUS (role-specific):\n- Treat tokens as syllabic carriers; simple pitch shapes; sparse usage.\n- Avoid semantic density; use rests generously.\n- If role=vocal_fx: output at least 1–2 short onsets within the part; if no musical placement is feasible, set intentional_silence=true in Stage-1 (preferred).\n\n" if (is_vocoder or is_talkbox or is_vocal_fx) else "")
             + ("SCAT FOCUS (role-specific):\n- Use percussive, non-lexical syllables (da/ka/tek...).\n- Lock to groove accents; avoid long sustains and semantics.\n\n" if is_scat else "")
             + ("VOWELS FOCUS (role-specific):\n- Sustained open vowels on long notes; no semantics.\n- Favor legato and simple stepwise contour.\n\n" if is_vowels else "")
             + ("INTRO FOCUS (role-specific):\n- Set the tone with a sparse gesture; minimal new content.\n- Prefer longer sustains and clear downbeat anchoring.\n\n" if is_intro else "")
@@ -3118,7 +3212,9 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + ("HOOK DURATION & PLACEMENT (soft for chorus/drop):\n- Aim to start the first hook usage on a strong accent; keep hook tokens as contiguous as the melody reasonably allows.\n- Prefer one note per hook word in order; avoid splitting a single hook word.\n- Sustain core hook vowels noticeably; avoid micro-slicing.\n- If the melody is highly chopped with large rests, map the hook in compact segments that respect musical phrasing rather than forcing a fully contiguous chain.\n\n" if (is_chorus or is_drop) else "")
             + ("OUTRO MINIMUM (hard for outro):\n- Output MUST include at least one note and one token.\n- If no lyrics words provided, you MAY use a single sustained open vowel (e.g., 'Ah').\n- Prefer smooth, sustained contour; avoid dense onsets; no empty arrays.\n\n" if is_outro else "")
             + "OUTPUT (STRICT JSON):\n{\n  \"notes\": [{\"start_beat\": number, \"duration_beats\": number, \"pitch\": int}, ...],\n  \"tokens\": [string, ...]\n}\n\n- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
-            + "CONSTRAINTS:\n- Map the provided lyrics in order; you MAY split words or use '-' for sustained continuations.\n- Try to keep len(tokens) ≈ number of notes; exact equality is NOT required if musically justified (but avoid large mismatches).\n- Preserve reading order of words; do not spell letter-by-letter.\n- Clamp total beats to theme length (bars * beats_per_bar); no overlaps; no negative durations.\n\nReturn ONLY the JSON.\n"
+            + "CONSTRAINTS:\n- Map the provided lyrics in order; you MAY split words or use '-' for sustained continuations.\n- Try to keep len(tokens) ≈ number of notes; exact equality is NOT required if musically justified (but avoid large mismatches).\n- Preserve reading order of words; do not spell letter-by-letter.\n- Clamp total beats to theme length (bars * beats_per_bar); no overlaps; no negative durations.\n"
+            + ("- HARD (breaths): If lyrics contain '[br]', produce at least one short note per '[br]'.\n" if is_breaths else "")
+            + ("- HARD (vocal_fx): If lyrics are provided, produce at least one short onset; if impossible, prefer intentional silence (model-driven).\n" if is_vocal_fx else "")
         )
         # Retry wrapper for Stage-2 similar to Stage-1
         def _call_with_rotation_comp(prompt_text: str) -> dict | None:
@@ -3196,7 +3292,7 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
                     for n in notes[:32]:  # Check fewer notes
                         if not isinstance(n, dict):
                             return False, "note item not object"
-                        if not {"start_beat","duration_beats","pitch"}.issubset(set(n.keys())):
+                        if not {"start_beat", "duration_beats", "pitch"}.issubset(set(n.keys())):
                             return False, "missing note keys"
                 # Relaxed token check - only validate if tokens exist
                 if len(tokens) > 0:
@@ -3457,7 +3553,18 @@ def _analyze_user_prompt(config: Dict, genre: str, inspiration: str, user_prompt
         global SESSION_MODEL_OVERRIDE
         model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
         generation_config = {"response_mime_type": "application/json", "temperature": float(config.get("plan_temperature", config.get("lyrics_temperature", config.get("temperature", 0.4))))}
+        try:
+            if isinstance(config.get("max_output_tokens"), int):
+                _mx = int(config.get("max_output_tokens")); _mx = max(256, min(_mx, 8192)); generation_config["max_output_tokens"] = _mx
+        except Exception:
+            pass
         model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
         prompt = (
             "ROLE: You analyze a free-form lyric/style prompt and extract compact directives for a vocal generation pipeline.\n\n"
             f"CONTEXT: Genre={genre}; Inspiration={inspiration}.\n\n"
@@ -3497,13 +3604,46 @@ def _analyze_user_prompt(config: Dict, genre: str, inspiration: str, user_prompt
             + "  \"section_goals\": object|null,\n"
             + "  \"notes\": string|null\n"
             + "}\n\n"
-            + "RULES:\n- Consider the genre context: hook-heavy genres (pop, rock, hip-hop, dance, R&B, country) typically benefit from catchy hooks, while instrumental genres (ambient, minimal techno, IDM, classical, jazz) often work better without them.\n- If a clear title/hook phrase is explicitly provided (quoted or not), use that exact phrase.\n- For genres that traditionally use hooks, consider generating a hook_canonical if it would enhance the song's appeal and memorability.\n- For instrumental-focused genres, only include hook_canonical if explicitly requested or if the context strongly suggests vocal content.\n- Provide 2–4 short chorus_lines if a chorus idea exists; else null.\n- Keep lists short and practical; avoid repeating the entire user prompt.\n- Return ONLY the JSON.\n"
+            + "RULES:\n- Consider the genre context: hook-heavy genres (pop, rock, hip-hop, dance, R&B, country) typically benefit from catchy hooks, while instrumental genres (ambient, minimal techno, IDM, classical, jazz) often work better without them.\n- If a clear title/hook phrase is explicitly provided (quoted or not), use that exact phrase.\n- For genres that traditionally use hooks, consider generating a hook_canonical if it would enhance the song's appeal and memorability.\n- For instrumental-focused genres, only include hook_canonical if explicitly requested or if the context strongly suggests vocal content.\n- Provide 2–4 short chorus_lines if a chorus idea exists; else null.\n- Keep lists short and practical; avoid repeating the entire user prompt.\n"
         )
-        resp = model.generate_content(prompt)
-        raw = getattr(resp, "text", "") or ""
-        cleaned = raw.strip().replace("```json", "").replace("```", "")
-        obj = json.loads(cleaned)
-        return obj if isinstance(obj, dict) else {}
+        # Robust generation with key rotation and retries
+        max_attempts = max(3, len(API_KEYS))
+        attempts = 0
+        nonlocal_model = [model]
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                resp = nonlocal_model[0].generate_content(prompt, generation_config=generation_config, safety_settings=safety_settings)
+                raw = getattr(resp, "text", "") or ""
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    cleaned = raw.strip().replace("```json", "").replace("```", "")
+                    obj = json.loads(cleaned)
+                return obj if isinstance(obj, dict) else {}
+            except Exception as e:
+                err = str(e).lower()
+                # Quota/key rotation handling
+                if ('429' in err) or ('quota' in err) or ('rate limit' in err) or ('resource exhausted' in err) or ('exceeded' in err):
+                    try:
+                        qtype = _classify_quota_error(err)
+                        KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
+                        # cooldown
+                        cd = 60 if qtype not in ('per-hour','per-day') else 3600
+                        KEY_COOLDOWN_UNTIL[CURRENT_KEY_INDEX] = max(KEY_COOLDOWN_UNTIL.get(CURRENT_KEY_INDEX,0), time.time()+cd)
+                        # rotate
+                        idx = _next_available_key(CURRENT_KEY_INDEX)
+                        if idx is not None and idx != CURRENT_KEY_INDEX:
+                            globals()['CURRENT_KEY_INDEX'] = idx
+                            genai.configure(api_key=API_KEYS[idx])
+                            nonlocal_model[0] = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                            continue
+                    except Exception:
+                        pass
+                # Non-quota/transient: small backoff then retry
+                time.sleep(0.5)
+                continue
+        return {}
     except Exception:
         return {}
 
@@ -3656,7 +3796,8 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
     Simplified version to avoid duplicates and ensure proper note lengths.
     """
     try:
-        ticks_per_beat = TICKS_PER_BEAT
+        # Use quarter-note beat as base for tick conversion to keep song length consistent
+        ticks_per_unit = TICKS_PER_BEAT
         lines = []
         lines.append("[#VERSION]")
         lines.append("UST Version=1.20")
@@ -3701,52 +3842,145 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         
         note_blocks = []
         
+        # Absolute timeline in beats; we emit rests to preserve spacing between parts/notes
+        current_beat = 0.0
+        
         # Process each part sequentially - ensure we process ALL parts from loaded JSON
-        # Use actual number of parts from loaded themes
         total_parts = len(themes) if themes else 0
+        # Threshold for merging micro-gaps (in denominator-beat units)
+        small_gap_units = 0.5  # merge rests shorter/equal than half a denominator beat
         for part_idx in range(total_parts):
             th = themes[part_idx] if part_idx < len(themes) else {}
             trks = th.get('tracks', []) or []
+            part_start = float(part_idx) * float(section_len_beats)
+            # Detect role of selected track (if available)
+            role_norm = None
+            if 0 <= track_index < len(trks):
+                try:
+                    role_norm = str(trks[track_index].get('role','')).strip().lower() or None
+                except Exception:
+                    role_norm = None
+
             if not (0 <= track_index < len(trks)):
-                # Add silence for missing track
-                part_silence_ticks = int(round(section_len_beats * ticks_per_beat))
-                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": part_silence_ticks})
+                # Fill entire part as rest to maintain song timeline
+                if current_beat < part_start:
+                    gap = part_start - current_beat
+                    if gap > 0.0:
+                        if note_blocks and note_blocks[-1]["Lyric"] == "R":
+                            note_blocks[-1]["Length"] += int(round(gap * ticks_per_unit))
+                        else:
+                            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap * ticks_per_unit))})
+                    current_beat = part_start
+                if note_blocks and note_blocks[-1]["Lyric"] == "R":
+                    note_blocks[-1]["Length"] += int(round(section_len_beats * ticks_per_unit))
+                else:
+                    note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(section_len_beats * ticks_per_unit))})
+                current_beat = part_start + section_len_beats
                 continue
-                
-            notes_loc = sorted(trks[track_index].get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
-            # Use syllables_per_theme for this part (guaranteed to exist for all 16 parts)
-            toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
             
-            if not (notes_loc and toks_loc):
-                # Add silence for part without vocals
-                part_silence_ticks = int(round(section_len_beats * ticks_per_beat))
-                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": part_silence_ticks})
-                continue
-                
-            # Align tokens with notes
+            notes_loc = sorted(trks[track_index].get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
+            toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
+
+            # Ensure tokens length covers notes; rests will not consume tokens
             if len(toks_loc) < len(notes_loc):
                 toks_loc = list(toks_loc) + ['-'] * (len(notes_loc) - len(toks_loc))
-            
-            # Process notes for this part
-            for n, tkn in zip(notes_loc, toks_loc):
+
+            # If no notes for this part, emit a part-length rest to preserve spacing
+            if not notes_loc:
+                # Bring timeline up to part_start, then fill part
+                if current_beat < part_start:
+                    gap = part_start - current_beat
+                    if gap > 0.0:
+                        if note_blocks and note_blocks[-1]["Lyric"] == "R":
+                            note_blocks[-1]["Length"] += int(round(gap * ticks_per_unit))
+                        else:
+                            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap * ticks_per_unit))})
+                    current_beat = part_start
+                if note_blocks and note_blocks[-1]["Lyric"] == "R":
+                    note_blocks[-1]["Length"] += int(round(section_len_beats * ticks_per_unit))
+                else:
+                    note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(section_len_beats * ticks_per_unit))})
+                current_beat = part_start + section_len_beats
+                continue
+
+            # Ensure we are at least at this part's start
+            if current_beat < part_start:
+                gap_to_part = part_start - current_beat
+                if gap_to_part > 0.0:
+                    if note_blocks and note_blocks[-1]["Lyric"] == "R":
+                        note_blocks[-1]["Length"] += int(round(gap_to_part * ticks_per_unit))
+                    else:
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap_to_part * ticks_per_unit))})
+                current_beat = part_start
+
+            # Emit notes and needed rests before each note to align absolute starts
+            tok_i = 0
+            for n in notes_loc:
                 try:
+                    local_start = float(n.get('start_beat', 0.0))
                     d = max(0.0, float(n.get('duration_beats', 0.0)))
                     p = int(n.get('pitch', 60))
-                    
-                    # Ensure minimum note length for UST compatibility (120ms = 5 ticks at 125 BPM)
-                    ltk = max(5, int(round(d * ticks_per_beat)))
-                    lyr = _sanitize_ust_token(str(tkn))
-                    
-                    # Clamp pitch to realistic range (C2 to C6)
-                    clamped_pitch = max(36, min(p, 84))
-                    
-                    note_blocks.append({"Lyric": lyr, "NoteNum": clamped_pitch, "Length": ltk})
+
+                    abs_start = part_start + max(0.0, local_start)
+                    # Emit rest if there is a gap to the next note start
+                    if abs_start > current_beat:
+                        gap = abs_start - current_beat
+                        # Merge micro-gaps by extending previous note if very small
+                        if gap <= small_gap_units and note_blocks and note_blocks[-1]["Lyric"] != "R":
+                            note_blocks[-1]["Length"] += int(round(gap * ticks_per_unit))
+                            current_beat = abs_start
+                        else:
+                            if note_blocks and note_blocks[-1]["Lyric"] == "R":
+                                note_blocks[-1]["Length"] += int(round(gap * ticks_per_unit))
+                            else:
+                                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap * ticks_per_unit))})
+                            current_beat = abs_start
+
+                    # Prepare lyric for this note (consume one token if available)
+                    lyr_tok = toks_loc[tok_i] if tok_i < len(toks_loc) else '-'
+                    tok_i += 1
+                    # Rely on model-provided token; exporter does not invent content
+                    raw_token = (str(lyr_tok) if lyr_tok is not None else '').strip()
+                    lyr = _sanitize_ust_token(raw_token)
+
+                    # Clamp duration to remaining time in this part
+                    part_end = part_start + section_len_beats
+                    remaining = max(0.0, part_end - current_beat)
+                    d = max(0.0, min(d, remaining))
+                    if d <= 0.0:
+                        continue
+                    # Clamp pitch and length
+                    ltk = max(120, int(round(d * ticks_per_unit)))
+                    # Note lengths remain as composed; no role-based shortening
+                    # Slightly higher airy range
+                    clamped_pitch = max(60, min(p, 79))
+                    # Merge '-' as extension of previous content instead of new note
+                    if lyr == '-' and note_blocks:
+                        if note_blocks[-1].get('Lyric') not in ('-', 'R'):
+                            note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + ltk)
+                        else:
+                            # If previous is not content, fall back to a rest of equivalent length
+                            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": ltk})
+                    else:
+                        note_blocks.append({"Lyric": lyr, "NoteNum": clamped_pitch, "Length": ltk})
+                    current_beat += d
                 except Exception:
                     continue
+
+            # If the part has leftover time after the last note, pad with a rest up to part end
+            part_end = part_start + section_len_beats
+            if current_beat < part_end:
+                gap_tail = part_end - current_beat
+                if gap_tail > 0.0:
+                    if note_blocks and note_blocks[-1]["Lyric"] == "R":
+                        note_blocks[-1]["Length"] += int(round(gap_tail * ticks_per_unit))
+                    else:
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap_tail * ticks_per_unit))})
+                current_beat = part_end
         
         # If still empty, add a minimal rest
         if not note_blocks:
-            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(beats_per_bar * ticks_per_beat))})
+            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(beats_per_bar * ticks_per_unit))})
 
         # Write note blocks
         for idx, nb in enumerate(note_blocks):
@@ -3830,8 +4064,8 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
             else:
                 # Heuristik (Fallback): Median der Part-Dauern in Part 1 über alle Tracks
                 durations = []
-                if themes and themes[0].get('tracks'):
-                    for tr in themes[0]['tracks']:
+            if themes and themes[0].get('tracks'):
+                for tr in themes[0]['tracks']:
                         notes0 = tr.get('notes', []) or []
                         if notes0:
                             starts = [float(x.get('start_beat', 0.0)) for x in notes0]
@@ -3876,7 +4110,7 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         song_total_beats = 0.0
         try:
             if section_length_beats is not None and isinstance(themes, list) and len(themes) > 0:
-                song_total_beats = float(len(themes)) * float(section_length_beats)
+                    song_total_beats = float(len(themes)) * float(section_length_beats)
             elif section_length_beats is None:
                 # Fallback: konservative Ableitung aus Arrangement, wenn Partlänge unbekannt
                 derived_total = 0.0
@@ -3976,7 +4210,7 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
 
             # Iterate notes and append rests as needed
             last_end = abs_cursor_beats
-            SMALL_GAP_BEATS = 1.0/8.0
+            SMALL_GAP_BEATS = 1.0/4.0
             prev_was_content = False
             continuation_count = 0
             for note, syl in zip(notes, sylls):
@@ -3999,7 +4233,7 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                         remaining = song_total_beats - last_end
                         rest_len_beats = max(0.0, min(rest_len_beats, remaining))
                     # Soft ceiling for pathological rests when no global length is known
-                    MAX_REST_BEATS = 8.0 * float(beats_per_bar)
+                    MAX_REST_BEATS = 2.0 * float(beats_per_bar)
                     if not song_total_beats and rest_len_beats > MAX_REST_BEATS:
                         rest_len_beats = MAX_REST_BEATS
                     # Attach tiny gaps to the previous note; output larger gaps as explicit rest notes 'R'
@@ -4024,7 +4258,7 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                 min_content_ticks = int(round(MIN_CONTENT_BEATS * ticks_per_beat))
                 lyric_token = str(syl).strip() if syl is not None else ''
                 # Handle explicit silences or invalid leading continuations as rests
-                if lyric_token.lower() in ("r", "silence") or (lyric_token == '-' and not prev_was_content) or lyric_token == '':
+                if lyric_token.lower() in ("r", "silence", "[br]", "br", "breath") or (lyric_token == '-' and not prev_was_content) or lyric_token == '':
                     if note_len_ticks > 0:
                         tiny_thresh_ticks = int(round(SMALL_GAP_BEATS * ticks_per_beat))
                         if note_blocks and note_len_ticks <= tiny_thresh_ticks:
@@ -4061,25 +4295,25 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                             pass
                     prev_was_content = (lyric_str != '-' and lyric_str.lower() != 'r')
                     continuation_count = 0
-                # Clamp pitch to a safe singing range
-                note_num = max(36, min(pitch, 84))  # C2 to C6 range
+                # Clamp pitch to a safe singing range; airy default slightly higher
+                note_num = max(60, min(pitch, 79))  # C4 to G5 range
                 if note_len_ticks > 0:
                     note_blocks.append({"Lyric": lyric_str, "NoteNum": note_num, "Length": max(5, note_len_ticks)})
                     last_end = max(abs_start + (note_len_ticks / float(ticks_per_beat) if ticks_per_beat else 0.0), last_end)
                 # If we reached the part end, stop this part
                 if part_end_abs is not None and last_end >= part_end_abs - 1e-6:
                     break
-                abs_cursor_beats = max(abs_cursor_beats, last_end)
-                # Ensure cursor advances to at least the end of this part to keep parts aligned
-                if part_end_abs is not None and abs_cursor_beats < part_end_abs - 1e-6:
-                    abs_cursor_beats = part_end_abs
+            abs_cursor_beats = max(abs_cursor_beats, last_end)
+            # Ensure cursor advances to at least the end of this part to keep parts aligned
+            if part_end_abs is not None and abs_cursor_beats < part_end_abs - 1e-6:
+                abs_cursor_beats = part_end_abs
                 # Continue processing all parts - don't stop early based on song length
 
             
 
         # Coalesce micro rests and consecutive rests to reduce choppiness
         try:
-            tiny_rest_ticks = int(round(SMALL_GAP_BEATS * ticks_per_beat))
+            tiny_rest_ticks = int(round((1.0/4.0) * ticks_per_beat))
             coalesced = []
             for i, nb in enumerate(note_blocks):
                 if nb.get('Lyric') == 'R' and nb.get('Length', 0) <= tiny_rest_ticks and coalesced:
@@ -4120,10 +4354,7 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         for part_idx, th in enumerate(themes or []):
             trks = th.get('tracks', []) or []
             if not (0 <= track_index < len(trks)):
-                # Add silence for missing track
-                part_start = float(part_idx) * section_len_loc
-                part_silence_ticks = int(round(section_len_loc * ticks_per_beat))
-                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": part_silence_ticks})
+                # Skip missing track - no notes needed
                 continue
                 
             notes_loc = sorted(trks[track_index].get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
@@ -4131,10 +4362,7 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
             toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
             
             if not (notes_loc and toks_loc):
-                # Add silence for part without vocals
-                part_start = float(part_idx) * section_len_loc
-                part_silence_ticks = int(round(section_len_loc * ticks_per_beat))
-                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": part_silence_ticks})
+                # Skip part without vocals - no notes needed
                 continue
                 
             if len(toks_loc) < len(notes_loc):
@@ -4196,6 +4424,7 @@ def _export_emvoice_txt_for_track(themes: List[Dict], track_index: int, syllable
         per_part_tokens: List[List[str]] = []
         for part_idx, th in enumerate(themes):
             toks = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
+            # Do not remap role-specific content here; rely on model tokens
             # Repair problematic tokens to avoid unintended vowels in export
             repaired = []
             prev = False
@@ -5259,6 +5488,59 @@ def _build_temp_note_grid_for_lyrics(ts: Dict, theme_len_bars: int, target_wpb: 
     grid.sort(key=lambda x: x["start_beat"])  
     return grid
 
+# --- Post-processing: enforce role-based timing to avoid overly hasty mapping ---
+def _enforce_role_timing_constraints(notes: List[Dict], bpb: int, role_norm: str, part_index: int, config: Dict) -> List[Dict]:
+    try:
+        if not isinstance(notes, list) or len(notes) == 0:
+            return notes
+        role = (role_norm or '').lower()
+        # Base thresholds (in beats); raised to slow down phrasing as requested
+        base_min = {
+            'intro': 1.25,
+            'whisper': 1.25,
+            'spoken': 1.25,
+            'phrase_spot': 1.0,
+            'prechorus': 1.0,
+            'chorus': 0.75,
+            'vocal_fx': 0.6,
+            'breaths': 1.0,
+            'outro': 1.0,
+            'breakdown': 1.0,
+        }
+        # Allow optional config override
+        try:
+            override = config.get('role_min_note_beats')
+            if isinstance(override, dict):
+                for k, v in override.items():
+                    if isinstance(v, (int, float)):
+                        base_min[str(k).lower()] = float(v)
+        except Exception:
+            pass
+        min_dur = base_min.get(role, 0.75)
+        # Early sections: add a gentle boost to slow down even more
+        if isinstance(part_index, int) and part_index <= 1:
+            min_dur *= 1.2
+
+        # Work on a sorted copy and clamp durations without overlap
+        sorted_notes = sorted([n for n in notes if isinstance(n, dict)], key=lambda x: float(x.get('start_beat', 0.0)))
+        for i in range(len(sorted_notes)):
+            try:
+                s = float(sorted_notes[i].get('start_beat', 0.0))
+                d = max(0.0, float(sorted_notes[i].get('duration_beats', 0.0)))
+                # target minimal duration
+                target = max(min_dur, d)
+                # next note start to avoid overlap
+                if i + 1 < len(sorted_notes):
+                    next_s = float(sorted_notes[i+1].get('start_beat', s + target))
+                    max_allowed = max(0.0, next_s - s)
+                    target = min(target, max_allowed)
+                sorted_notes[i]['duration_beats'] = round(target, 6)
+            except Exception:
+                continue
+        return sorted_notes
+    except Exception:
+        return notes
+
 def _synthesize_notes_from_tokens(tokens: List[str], grid_notes: List[Dict], ts: Dict, theme_len_bars: int, key_scale: str | None = None) -> List[Dict]:
     if not isinstance(tokens, list) or not isinstance(grid_notes, list):
         return []
@@ -5979,8 +6261,8 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                                 #     max_tokens_fail_pro = 0
                                 #     print(Fore.CYAN + "Auto-escalate after 6 MAX_TOKENS on flash → switching to pro for this track." + Style.RESET_ALL)
                                 # else:
-                                print(Fore.YELLOW + "Deferring this track due to repeated MAX_TOKENS on flash (6 attempts)." + Style.RESET_ALL)
-                                return None, 0
+                                    print(Fore.YELLOW + "Deferring this track due to repeated MAX_TOKENS on flash (6 attempts)." + Style.RESET_ALL)
+                                    return None, 0
                         elif 'pro' in (local_model_name or ''):
                             max_tokens_fail_pro += 1
                             if max_tokens_fail_pro >= 6:
@@ -7110,8 +7392,8 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                                 #     max_tokens_fail_pro = 0
                                 #     print(Fore.CYAN + "Auto-escalate after 6 MAX_TOKENS on flash → switching to pro for this track (optimization)." + Style.RESET_ALL)
                                 # else:
-                                print(Fore.YELLOW + "Deferring this optimization track due to repeated MAX_TOKENS on flash (6 attempts)." + Style.RESET_ALL)
-                                return None, 0
+                                    print(Fore.YELLOW + "Deferring this optimization track due to repeated MAX_TOKENS on flash (6 attempts)." + Style.RESET_ALL)
+                                    return None, 0
                         elif 'pro' in (local_model_name or ''):
                             max_tokens_fail_pro += 1
                             if max_tokens_fail_pro >= 6:
@@ -9993,7 +10275,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         print()
                 except Exception:
                     pass
-                
+
                 
                 plan_by_idx = {int(it.get('idx', i)): it for i, it in enumerate(plan_items) if isinstance(it, dict)}
                 history_lines: List[str] = []
@@ -10126,11 +10408,11 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             # sanitize hint at call site already done; proceed with generation
                             try:
                                 stage1 = _generate_lyrics_free_with_syllables(
-                                    cfg or config, genre, inspiration, 'Synth Vocal', bpm, ts,
-                                    section_label=label, section_description=desc_part,
-                                    context_tracks_basic=seed_context_basic, user_prompt=user_guidance,
-                                    history_context=history_text_seed, theme_len_bars=theme_len_bars
-                                )
+                                cfg or config, genre, inspiration, 'Synth Vocal', bpm, ts,
+                                section_label=label, section_description=desc_part,
+                                context_tracks_basic=seed_context_basic, user_prompt=user_guidance,
+                                history_context=history_text_seed, theme_len_bars=theme_len_bars
+                            )
                             except Exception:
                                 # If Stage-1 fails, treat this part as intentional silence (robustness)
                                 stage1 = {"words": [], "syllables": [], "arranger_note": "intentional silence: stage1 failed"}
@@ -10152,11 +10434,16 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         words = stage1.get('words') if isinstance(stage1, dict) else None
                         syllables = stage1.get('syllables') if isinstance(stage1, dict) else None
                         arranger_note = stage1.get('arranger_note') if isinstance(stage1, dict) else None
+                        # New: model-declared silence flag
+                        try:
+                            model_silence = bool(stage1.get('intentional_silence'))
+                        except Exception:
+                            model_silence = False
                         track_data = None
                         # Allow explicit silence for intro/outro/breakdown if provided as empty arrays
                         section_role_local = _normalize_section_role(label)
                         is_silence_allowed = section_role_local in ('intro', 'outro', 'breakdown')
-                        has_intentional_silence = isinstance(arranger_note, str) and ('intentional silence' in arranger_note.lower())
+                        has_intentional_silence = bool(model_silence) or (isinstance(arranger_note, str) and ('intentional silence' in arranger_note.lower()))
                         if (isinstance(words, list) and isinstance(syllables, list) and len(words) == 0 and len(syllables) == 0 and (is_silence_allowed or has_intentional_silence)):
                             track_data = {"instrument_name": 'Synth Vocal', "program_num": 0, "role": 'vocal', "notes": [], "lyrics": []}
                             try:
@@ -10164,6 +10451,17 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             except Exception:
                                 pass
                             # Add to history so the next parts see the silence context
+                            try:
+                                history_lines.append(f"{label}: [silence]")
+                            except Exception:
+                                pass
+                        elif model_silence:
+                            # Model explicitly requested silence → accept directly
+                            try:
+                                print(Style.DIM + f"[Composer] '{label}': model-declared intentional silence." + Style.RESET_ALL)
+                            except Exception:
+                                pass
+                            track_data = {"instrument_name": 'Synth Vocal', "program_num": 0, "role": 'vocal', "notes": [], "lyrics": []}
                             try:
                                 history_lines.append(f"{label}: [silence]")
                             except Exception:
@@ -10189,7 +10487,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             is_contradictory = (role_lower == 'chorus' and any(k in hint_lower for k in (
                                 'instrumental only', 'maintain vocal silence', 'no vocal', 'no vocals', 'no vocal presence', 'purely instrumental'
                             )))
-                            if role_lower == 'silence' or is_contradictory:
+                            if role_lower == 'silence' or is_contradictory or model_silence:
                                 stage2 = {"notes": [], "tokens": []}
                             else:
                                 stage2 = _compose_notes_for_syllables(
@@ -10199,8 +10497,14 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     chorus_lines=(stage1.get('chorus_lines') if isinstance(stage1.get('chorus_lines'), list) else None),
                                     section_description=(plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part, lyrics_words=(words or [])
                                 )
+                            # Enforce role-based timing to slow down overly hasty mapping
                             notes2 = stage2.get('notes') if isinstance(stage2, dict) else None
                             tokens2 = stage2.get('tokens') if isinstance(stage2, dict) else None
+                            try:
+                                if isinstance(notes2, list):
+                                    notes2 = _enforce_role_timing_constraints(notes2, int(ts.get('beats_per_bar',4)), _normalize_section_role(label), part_idx, cfg or config)
+                            except Exception:
+                                pass
                             # Accept empty result if explicit silence is intended/allowed
                             silence_ok = (section_role_local in ('intro','outro','breakdown','silence','spoken','breaths')) or has_intentional_silence
                             # Also allow empty results for chorus roles with "Instrumental focus" hints
@@ -10452,18 +10756,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     except Exception:
                         pass
 
-                    # If NEW-2Stage already delivered final vocals, skip the words stage
-                    if isinstance(target_tr, dict) and target_tr.get('__final_vocal__'):
-                        tokens = target_tr.get('lyrics', []) or []
-                        try:
-                            print(Style.DIM + f"[Lyrics] Using tokens from Composer Stage-2 for '{label}'" + Style.RESET_ALL)
-                        except Exception:
-                            pass
-                        try:
-                            target_tr['lyrics'] = tokens
-                        except Exception:
-                            pass
-                    else:
+                    # Always run Stage-1 (words) before Stage-2; do not mirror tokens from Stage-2
+                    if True:
                         # Word-based only for existing tracks
                         tokens = _generate_lyrics_words_with_spans(
                             cfg or config, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes,
