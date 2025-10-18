@@ -4575,7 +4575,7 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
                 if full_part_ticks > 0:
                     if note_blocks and note_blocks[-1].get('Lyric') == 'R':
                         note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + full_part_ticks)
-                else:
+                    else:
                         note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": full_part_ticks})
                 abs_cursor_beats = part_end_abs
                 continue
@@ -4624,7 +4624,7 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
                         if rest_ticks > 0:
                             if note_blocks and note_blocks[-1].get('Lyric') == 'R':
                                 note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
-                        else:
+                            else:
                                 note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
                         abs_cursor_beats = part_start_abs
                     # Rest für komplette Partlänge
@@ -4710,7 +4710,7 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
                         if rest_ticks > 0:
                             if note_blocks and note_blocks[-1].get('Lyric') == 'R':
                                 note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
-                        else:
+                            else:
                                 note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
                         abs_cursor_beats = abs_start
                     # Token wählen
@@ -4766,6 +4766,21 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
         if not note_blocks:
             note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(beats_per_bar * ticks_per_unit))})
 
+        # Final padding to enforce exact total song length in UST timeline (append to note_blocks)
+        try:
+            total_parts = len(themes) if isinstance(themes, list) else 0
+            bpb_loc = int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
+            total_song_beats = float(total_parts) * float(section_length_bars) * float(bpb_loc)
+            if abs_cursor_beats < total_song_beats - 1e-6:
+                tail_ticks = int(round((total_song_beats - abs_cursor_beats) * ticks_per_unit))
+                if tail_ticks > 0:
+                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + tail_ticks)
+                    else:
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": tail_ticks})
+        except Exception:
+            pass
+
         # Write note blocks
         for idx, nb in enumerate(note_blocks):
             tag = f"[#NOTE{idx:04d}]"
@@ -4781,27 +4796,6 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
         lines.append("Name=DefaultSinger")
         lines.append("VoiceDir=")
         lines.append("[#TRACKEND]")
-
-        # Final padding to enforce exact total song length in UST timeline
-        try:
-            total_parts = len(themes) if isinstance(themes, list) else 0
-            bpb_loc = int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
-            total_song_beats = float(total_parts) * float(section_length_bars) * float(bpb_loc)
-            if abs_cursor_beats < total_song_beats - 1e-6:
-                tail_ticks = int(round((total_song_beats - abs_cursor_beats) * ticks_per_unit))
-                if tail_ticks > 0:
-                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
-                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + tail_ticks)
-                    else:
-                        # Append tail rest
-                        lines.append(f"[#NOTE{len(note_blocks):04d}]")
-                        lines.append(f"Length={tail_ticks}")
-                        lines.append("Lyric=R")
-                        lines.append("NoteNum=60")
-                        lines.append("Intensity=100")
-                        lines.append("Modulation=0")
-        except Exception:
-            pass
 
         # Diagnostics: log export parameters for bar math transparency
         try:
@@ -11232,110 +11226,6 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 except Exception:
                     pass
 
-                # Export ONLY UST for the selected track AFTER all parts are generated (SynthV/UTAU friendly)
-                if out_themes:  # Only export if generation was successful
-                    try:
-                        timestamp = time.strftime('%Y%m%d-%H%M%S')
-                        export_name = (get_instrument_name(out_themes[0]['tracks'][-1]) if new_vocal_track_mode else get_instrument_name(base_tracks[track_idx]))
-                        ust_path = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.ust")
-                        # Collect syllables per theme (already generated into out_themes)
-                        syllables_per_theme = []
-                        # Ensure we have tokens for ALL parts from loaded JSON
-                        for part_idx in range(len(out_themes) if out_themes else 0):
-                            if part_idx < len(out_themes):
-                                th = out_themes[part_idx]
-                            else:
-                                th = {}
-                            trks = th.get('tracks', [])
-                            idx_eff = (len(trks)-1) if new_vocal_track_mode else track_idx
-                            if 0 <= idx_eff < len(trks):
-                                toks = trks[idx_eff].get('lyrics')
-                                if not toks:
-                                    toks = trks[idx_eff].get('tokens') or []
-                                syllables_per_theme.append(toks)
-                            else:
-                                syllables_per_theme.append([])
-                        _export_openutau_ust_for_track(
-                            out_themes,
-                            (len(out_themes[0].get('tracks',[]))-1) if new_vocal_track_mode else track_idx,
-                            syllables_per_theme,
-                            ts,
-                            bpm,
-                            ust_path,
-                            section_length_bars=theme_len_bars
-                        )
-                        print(Fore.GREEN + f"\n✓ UST automatisch exportiert: {ust_path}" + Style.RESET_ALL)
-                        
-                        # Successfully exported -> remove progress file from this run
-                        try:
-                            prog_file = os.path.join(script_dir, get_progress_filename(cfg or config, run_timestamp))
-                            if os.path.exists(prog_file):
-                                os.remove(prog_file)
-                        except Exception:
-                            pass
-                        # Emvoice flat TXT (both for existing and NEW vocal track)
-                        export_track_index = (len(out_themes[0].get('tracks', [])) - 1) if new_vocal_track_mode else track_idx
-                        txt_all = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}_emvoice.txt")
-                        txt_by_part = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}_emvoice_by_part.txt")
-                        _export_emvoice_txt_for_track(out_themes, export_track_index, syllables_per_theme, txt_all, txt_by_part)
-                        print(Fore.GREEN + f"✓ Emvoice TXT exportiert: {txt_all}" + Style.RESET_ALL)
-                        
-                        # Ask to export a MIDI of the modified single track
-                        try:
-                            ans = input(f"{Fore.CYAN}Export modified single-track MIDI as well? [y/N]: {Style.RESET_ALL}").strip().lower()
-                        except Exception:
-                            ans = 'n'
-                        if ans in ('y', 'yes'):
-                            try:
-                                # Build MIDI directly from the just-exported UST so notes match 1:1
-                                midi_out = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.mid")
-                                ok = _create_midi_from_ust(ust_path, bpm, ts, midi_out)
-                                if not ok:
-                                    # Fallback: assemble single-track MIDI from themes to ensure export even with sparse vocals
-                                    try:
-                                        section_len_beats = float(theme_len_bars) * float(int(ts.get('beats_per_bar', 4)))
-                                    except Exception:
-                                        section_len_beats = 4.0 * float(theme_len_bars)
-                                    # Gather absolute notes for the selected vocal track
-                                    notes_abs = []
-                                    export_idx = (len(out_themes[0].get('tracks', [])) - 1) if new_vocal_track_mode else track_idx
-                                    for pi, th in enumerate(out_themes):
-                                        trks_loc = th.get('tracks', []) or []
-                                        if 0 <= export_idx < len(trks_loc):
-                                            for n in (trks_loc[export_idx].get('notes', []) or []):
-                                                try:
-                                                    s = float(n.get('start_beat', 0.0)) + float(pi) * section_len_beats
-                                                    d = max(0.0, float(n.get('duration_beats', 0.0)))
-                                                    p = int(n.get('pitch', 60))
-                                                    notes_abs.append({'start_beat': s, 'duration_beats': d, 'pitch': p})
-                                                except Exception:
-                                                    continue
-                                    if notes_abs:
-                                        single_song = {
-                                            'bpm': bpm,
-                                            'time_signature': ts,
-                                            'key_scale': (cfg or config).get('key_scale',''),
-                                            'tracks': [{
-                                                'instrument_name': 'Synth Vocal',
-                                                'program_num': 0,
-                                                'role': 'vocal',
-                                                'notes': sorted(notes_abs, key=lambda x: x['start_beat'])
-                                            }]
-                                        }
-                                        try:
-                                            create_midi_from_json(single_song, cfg or config, midi_out)
-                                            print(Fore.GREEN + f"Exported single-track MIDI (fallback): {midi_out}" + Style.RESET_ALL)
-                                            ok = True
-                                        except Exception as ee:
-                                            print(Fore.YELLOW + f"Fallback MIDI export failed: {ee}" + Style.RESET_ALL)
-                                    else:
-                                        print(Fore.YELLOW + "No vocal notes found across themes; skipping MIDI write." + Style.RESET_ALL)
-                                if ok:
-                                    print(Fore.GREEN + f"Exported single-track MIDI: {midi_out}" + Style.RESET_ALL)
-                            except Exception as e:
-                                print(Fore.YELLOW + f"MIDI export failed: {e}" + Style.RESET_ALL)
-                    except Exception:
-                        pass
 
                 history_lines: List[str] = []
                 # Optional: limit parts per run to reduce request bursts (set 0 or omit to disable)
@@ -11979,6 +11869,108 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         print(Fore.BLUE + Style.BRIGHT + "[Lyrics:Tokens] " + Style.NORMAL + Fore.WHITE + f"part={part_idx+1} tokens={len(tokens)} · melisma_ratio={dash_ratio:.0%}" + Style.RESET_ALL)
                     except Exception:
                         pass
+
+                # Post-loop export (runs after all parts completed)
+                if out_themes:
+                    try:
+                        timestamp = time.strftime('%Y%m%d-%H%M%S')
+                        # Determine export track index safely for both modes
+                        try:
+                            export_track_index = (len(out_themes[0].get('tracks', [])) - 1) if new_vocal_track_mode else track_idx
+                        except Exception:
+                            export_track_index = 0
+                        # Resolve export_name from out_themes using export_track_index
+                        try:
+                            export_name = get_instrument_name(out_themes[0]['tracks'][export_track_index])
+                        except Exception:
+                            export_name = "Synth_Vocal"
+                        ust_path = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.ust")
+                        syllables_per_theme = []
+                        for pi in range(len(out_themes)):
+                            th = out_themes[pi] if pi < len(out_themes) else {}
+                            trks = th.get('tracks', [])
+                            idx_eff = (len(trks)-1) if new_vocal_track_mode else export_track_index
+                            if 0 <= idx_eff < len(trks):
+                                toks = trks[idx_eff].get('lyrics') or trks[idx_eff].get('tokens') or []
+                                syllables_per_theme.append(toks)
+                            else:
+                                syllables_per_theme.append([])
+                        try:
+                            _export_openutau_ust_for_track__legacy(
+                                out_themes,
+                                (len(out_themes[0].get('tracks',[]))-1) if new_vocal_track_mode else export_track_index,
+                                syllables_per_theme,
+                                ts,
+                                bpm,
+                                ust_path,
+                                section_length_bars=theme_len_bars
+                            )
+                        except Exception as ee:
+                            print(Fore.RED + f"UST export failed: {ee}" + Style.RESET_ALL)
+                            raise
+                        print(Fore.GREEN + f"\n✓ UST automatisch exportiert: {ust_path}" + Style.RESET_ALL)
+                        try:
+                            prog_file = os.path.join(script_dir, get_progress_filename(cfg or config, run_timestamp))
+                            if os.path.exists(prog_file):
+                                os.remove(prog_file)
+                        except Exception:
+                            pass
+                        txt_all = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}_emvoice.txt")
+                        txt_by_part = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}_emvoice_by_part.txt")
+                        _export_emvoice_txt_for_track(out_themes, export_track_index, syllables_per_theme, txt_all, txt_by_part)
+                        print(Fore.GREEN + f"✓ Emvoice TXT exportiert: {txt_all}" + Style.RESET_ALL)
+                        try:
+                            ans = input(f"{Fore.CYAN}Export modified single-track MIDI as well? [y/N]: {Style.RESET_ALL}").strip().lower()
+                        except Exception:
+                            ans = 'n'
+                        if ans in ('y', 'yes'):
+                            try:
+                                midi_out = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.mid")
+                                ok = _create_midi_from_ust(ust_path, bpm, ts, midi_out)
+                                if not ok:
+                                    try:
+                                        section_len_beats = float(theme_len_bars) * float(int(ts.get('beats_per_bar', 4)))
+                                    except Exception:
+                                        section_len_beats = 4.0 * float(theme_len_bars)
+                                    notes_abs = []
+                                    export_idx = (len(out_themes[0].get('tracks', [])) - 1) if new_vocal_track_mode else export_track_index
+                                    for pi, th in enumerate(out_themes):
+                                        trks_loc = th.get('tracks', []) or []
+                                        if 0 <= export_idx < len(trks_loc):
+                                            for n in (trks_loc[export_idx].get('notes', []) or []):
+                                                try:
+                                                    s = float(n.get('start_beat', 0.0)) + float(pi) * section_len_beats
+                                                    d = max(0.0, float(n.get('duration_beats', 0.0)))
+                                                    p = int(n.get('pitch', 60))
+                                                    notes_abs.append({'start_beat': s, 'duration_beats': d, 'pitch': p})
+                                                except Exception:
+                                                    continue
+                                    if notes_abs:
+                                        single_song = {
+                                            'bpm': bpm,
+                                            'time_signature': ts,
+                                            'key_scale': (cfg or config).get('key_scale',''),
+                                            'tracks': [{
+                                                'instrument_name': 'Synth Vocal',
+                                                'program_num': 0,
+                                                'role': 'vocal',
+                                                'notes': sorted(notes_abs, key=lambda x: x['start_beat'])
+                                            }]
+                                        }
+                                        try:
+                                            create_midi_from_json(single_song, cfg or config, midi_out)
+                                            print(Fore.GREEN + f"Exported single-track MIDI (fallback): {midi_out}" + Style.RESET_ALL)
+                                            ok = True
+                                        except Exception as ee:
+                                            print(Fore.YELLOW + f"Fallback MIDI export failed: {ee}" + Style.RESET_ALL)
+                                    else:
+                                        print(Fore.YELLOW + "No vocal notes found across themes; skipping MIDI write." + Style.RESET_ALL)
+                                if ok:
+                                    print(Fore.GREEN + f"Exported single-track MIDI: {midi_out}" + Style.RESET_ALL)
+                            except Exception as e:
+                                print(Fore.YELLOW + f"MIDI export failed: {e}" + Style.RESET_ALL)
+                    except Exception as e:
+                        print(Fore.RED + f"Post-loop export failed: {e}" + Style.RESET_ALL)
 
             elif action == 'advanced_opt':
                 print_header("Advanced Optimization Options")
