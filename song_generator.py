@@ -396,7 +396,7 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
     }
     prompt = (
         "You are a professional lyricist. Create singable, meaningful tokens aligned to the melody notes.\n"
-        "Goal: chart-worthy, emotionally engaging lines that could plausibly be released.\n"
+        "Goal: genre-true, minimal, context-aware phrasing; avoid generic clichés. Keep guidance broadly musical (no hard stylistic constraints).\n"
         f"Global: Genre={genre}; Language={language}; Key/Scale={key_scale}; BPM={round(float(bpm))}; TimeSig={ts.get('beats_per_bar','?')}/{ts.get('beat_value','?')}.\n"
         f"Track: {track_name}.\n"
         + (f"Section: {section_label or ''}. Description: {section_description or ''}.\n" if (section_label or section_description) else "")
@@ -407,10 +407,10 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         + "\n\nStrict output format (JSON only):\n"
         + "{\n  \"syllables\": [string, string, ...]\n}\n\n"
         + f"Constraints:\n- The array length MUST be exactly {num_slots}.\n"
-        + "- No null/empty items.\n- Avoid placeholder syllables like 'la', 'na', 'da' repeated; use varied vowels.\n"
+        + "- No null/empty items.\n- Avoid placeholder syllables like 'la/na/da' as content; prefer meaningful minimal words.\n"
         + "- Prefer open vowels on long/high notes; place lexical stresses roughly on stress=1 notes.\n"
-        + "- If you split into syllables, keep single strings per note; elisions only if required.\n"
-        + "- Syllable-per-onset (general): For multi-syllable words with ≥2 onsets, split; never use '-' on a fresh onset. For monosyllables across many onsets, prefer a 2-syllable synonym; else at most one '-'.\n"
+        + "- Keep 1:1 mapping: one token per onset. Use '-' only to continue a previous word (melisma); never on a fresh onset.\n"
+        + "- Multi-syllable words: split when ≥2 onsets; avoid over-splitting. Monosyllables across many onsets: prefer a 2-syllable synonym; else at most one '-'.\n"
         + "- CHORUS (only if a hook exists): place the hook on strong downbeats; repeat 2–3× with micro-variation (semantic core intact).\n"
         + "- VERSE (optional): adopt a bulletin structure (headline → two surreal segments → closing sting) if a news/report vibe is intended.\n"
         + "- Nonsense budget ≤ 15% of tokens only if nonsense is allowed/used; vary syllables; avoid back-to-back nonsense lines.\n"
@@ -418,6 +418,7 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         + "- Follow universal pop-lyric heuristics: clear images, concrete nouns/verbs, a memorable hook, avoid cliche overload, keep pronoun perspective consistent.\n"
         + "- If inspiration mentions an artist, emulate stylistic fingerprints (rhythm of phrasing, imagery types) without copying lines.\n"
         + "- No markdown or prose, JSON only.\n"
+        + ("- Apply plan_hint if present: prioritize entry_beats and phrase_window_beats; target onset_count_min/max and duration_min/max in mapping choices.\n" if isinstance(section_description, str) and 'entry_beats' in (section_description or '') else "")
     )
 
     # Fallback if API unavailable or no API key
@@ -429,9 +430,11 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         return ["la" for _ in range(num_slots)]
 
     try:
-        # Use session override if available, otherwise config
+        # Use session override if available, otherwise config (no flash fallback)
         global SESSION_MODEL_OVERRIDE
-        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+        if not model_name:
+            model_name = "gemini-2.5-pro"
         try:
             if REQUESTED_SWITCH_MODEL:
                 model_name = REQUESTED_SWITCH_MODEL
@@ -660,7 +663,7 @@ def _summarize_parts_aggregate(themes: List[Dict], ts: Dict, exclude_track_index
             "avg_dur": round(avg_dur,3), "max_dur": round(max_dur,3), "sustain_ratio": round(sustain_ratio,3), "silent": False
         })
     return summaries
-def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | int, ts: Dict, summaries: List[Dict], analysis_ctx: Dict, user_prompt: str | None = None) -> List[Dict]:
+def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | int, ts: Dict, summaries: List[Dict], analysis_ctx: Dict, user_prompt: str | None = None, cfg: Dict | None = None) -> List[Dict]:
     """
     Step 0b: Plan vocal roles for each part based on song structure and analysis.
     Focus only on logical role distribution, no hints yet.
@@ -671,6 +674,10 @@ def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | i
         style_tags = analysis_ctx.get('style_tags', [])
         repetition_policy = analysis_ctx.get('repetition_policy', {})
         
+        # Extract key_scale from artifact if available, otherwise use config
+        # Note: cfg parameter should contain the artifact/progress data with key_scale
+        key_scale_to_use = cfg.get('key_scale', '') if cfg else config.get('key_scale', 'Unknown')
+        
         # Build role planning prompt
         role_prompt = f"""You are a vocal arrangement specialist. Plan vocal roles for a {genre} track inspired by "{inspiration}".
 
@@ -678,6 +685,9 @@ SONG STRUCTURE:
 - {len(summaries)} parts total
 - BPM: {bpm}
 - Time signature: {ts.get('beats_per_bar', 4)}/4
+
+KEY CONTEXT:
+- Key/Scale: {key_scale_to_use} (soft guidance: prefer tonic/dominant focus for monotone-suitable roles)
 
 ANALYSIS CONTEXT:
 - Hook: {hook_canonical if hook_canonical else 'None (instrumental focus)'}
@@ -713,6 +723,12 @@ VOCAL BUDGET:
 - Target: 3-5 vocal parts for a {len(summaries)}-part song
 - Minimum gap: 1-2 parts between vocal sections
 - Prefer sparse, impactful vocal placement
+- Ensure ≥1 silent gap between vocal sections for breathing room
+
+SILENCE POLICY (soft):
+- Only use role='silence' when explicitly musically intended for space/contrast
+- Do not overuse silence as a fallback; prefer meaningful vocal content
+- Consider whisper/hum roles for atmospheric sections instead of complete silence
 
 TASK:
 For each part, assign ONLY a role. No hints, descriptions, or explanations.
@@ -738,9 +754,11 @@ Return only the JSON array, no other text."""
         if genai is None or not API_KEYS:
             raise RuntimeError("Role planning unavailable: no LLM SDK or API key")
         
-        # Use session override if available, otherwise config
+        # Use session override if available, otherwise config (no flash fallback)
         global SESSION_MODEL_OVERRIDE
-        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+        if not model_name:
+            model_name = "gemini-2.5-pro"
         print(f"[DEBUG] Role Planning using model: {model_name}")
         
         # Plan generation should be highly deterministic
@@ -864,7 +882,7 @@ Return only the JSON array, no other text."""
             out.append({"idx": s['idx'], "role": "silence"})
         return out
 
-def _generate_vocal_hints(config: Dict, genre: str, inspiration: str, bpm: float | int, ts: Dict, summaries: List[Dict], roles: List[Dict], analysis_ctx: Dict, user_prompt: str | None = None) -> List[Dict]:
+def _generate_vocal_hints(config: Dict, genre: str, inspiration: str, bpm: float | int, ts: Dict, summaries: List[Dict], roles: List[Dict], analysis_ctx: Dict, user_prompt: str | None = None, cfg: Dict | None = None) -> List[Dict]:
     """
     Step 0c: Generate hints for each part based on assigned roles and context.
     Includes consistency validation.
@@ -875,41 +893,86 @@ def _generate_vocal_hints(config: Dict, genre: str, inspiration: str, bpm: float
         style_tags = analysis_ctx.get('style_tags', [])
         repetition_policy = analysis_ctx.get('repetition_policy', {})
         
-        # Build hint generation prompt
-        hint_prompt = f"""You are a vocal content specialist. Generate detailed hints for each vocal part based on assigned roles.
+        # Build hint generation prompt (compact, numeric; no mix/FX/panning prose)
+        # Inject key/scale + tonic center for tonal steering
+        try:
+            # Use artifact key_scale if available, otherwise fallback to config
+            key_scale_str = str(cfg.get('key_scale', '') if cfg else config.get('key_scale', '') or '').strip()
+            def _infer_root_from_key(ks: str) -> int:
+                try:
+                    tonic = (ks or '').strip().split()[0].lower()
+                    table = {
+                        'c': 60, 'c#': 61, 'db': 61,
+                        'd': 62, 'd#': 63, 'eb': 63,
+                        'e': 64, 'fb': 64, 'e#': 65,
+                        'f': 65, 'f#': 66, 'gb': 66,
+                        'g': 67, 'g#': 68, 'ab': 68,
+                        'a': 69, 'a#': 70, 'bb': 70,
+                        'b': 71, 'cb': 71
+                    }
+                    return table.get(tonic, 60)
+                except Exception:
+                    return 60
+            tonic_center = int(config.get('root_note')) if isinstance(config.get('root_note'), (int, float)) else _infer_root_from_key(key_scale_str)
+            tonic_center = max(55, min(tonic_center, 79))
+            scale_type = (key_scale_str.split(' ', 1)[1].lower() if ' ' in key_scale_str else 'major') or 'major'
+        except Exception:
+            key_scale_str = ''
+            tonic_center = 60
+            scale_type = 'major'
+        hint_prompt = f"""You generate compact, numeric vocal hints directly implementable by notes/tokens. Do NOT include mixing/FX/panning/production instructions. Keep guidance musical and widely applicable (no hard stylistic constraints).
 
 SONG STRUCTURE:
-- {len(summaries)} parts total
-- BPM: {bpm}
-- Time signature: {ts.get('beats_per_bar', 4)}/4
+- parts_total={len(summaries)}
+- bpm={bpm}
+- time_signature={ts.get('beats_per_bar', 4)}/4
 
-ANALYSIS CONTEXT:
-- Hook: {hook_canonical if hook_canonical else 'None (instrumental focus)'}
-- Style: {', '.join(style_tags) if style_tags else 'Standard'}
-- Repetition: {repetition_policy}
+CONTEXT:
+- hook={hook_canonical if hook_canonical else 'None'}
+- style_tags={', '.join(style_tags) if style_tags else 'Standard'}
+- repetition={repetition_policy}
+- key_scale={key_scale_str if key_scale_str else 'Unknown'}; tonic_midi={tonic_center}; scale_type={scale_type}
 
 ASSIGNED ROLES:
 {chr(10).join([f"Part {r['idx']}: {r['role']}" for r in roles])}
 
-HINT GUIDELINES:
-- For 'silence' roles: Describe instrumental focus, no vocal content
-- For vocal roles: Describe content, delivery, emotional tone
-- Be specific about timing, energy, and context
-- Consider part position in song structure
-- Match genre expectations
+RULES (HARD):
+- Hints MUST be implementable by notes/tokens only. Forbid: sidechain, granular, carrier, vocoder carrier, pan/panning, delay/reverb values, distortion, mix.
+- role='silence' → force_silence=1 only (no prose).
+- If tokens are expected: provide entry windows and onset/duration minima.
+- Use key=value pairs; numbers/arrays only; keep each plan_hint ≤ 240 chars.
 
-CONSISTENCY RULES (MANDATORY):
-- role='silence' MUST have instrumental-only hints
-- role='chorus' MUST have vocal content hints
-- role='whisper' MUST have quiet, intimate hints
-- role='spoken' MUST have conversational hints
-- NEVER contradict role with hint
+PLAN_HINT KEYS (allowed):
+- force_silence: 0|1
+- entry_beats: [numbers...] (beat positions)
+- phrase_window_beats: [[start,end], ...]
+- onset_count_min, onset_count_max: int
+- duration_min, duration_max: float (beats)
+- tessitura_center: int (MIDI) [optional]
+- pitch_span_semitones: int
+- max_unique_pitches: int
+- token_policy: lexical|vowel|br|fx_vowel
+- repetition_policy: {{allow_loop: bool, motif_len_beats: number}}
 
-TASK:
-For each part, generate a detailed hint that matches the assigned role.
-Return as JSON array: [{{"idx": 1, "role": "silence", "plan_hint": "..."}}, ...]
+ROLE DEFAULTS (if unspecified; soft, adaptable):
+- silence: force_silence=1
+- chorus: force_silence=0; token_policy=lexical; onset_count_min=4; onset_count_max=10; duration_min=0.4; pitch_span_semitones=5; max_unique_pitches=5; tessitura_center={tonic_center}
+- prechorus: force_silence=0; token_policy=lexical; onset_count_min=3; onset_count_max=8; duration_min=0.5; pitch_span_semitones=5; tessitura_center={tonic_center}
+- whisper/spoken: token_policy=lexical; onset_count_min=1; onset_count_max=4; duration_min=1.0; pitch_span_semitones=1; max_unique_pitches=2; tessitura_center={tonic_center}
+- phrase_spot: onset_count_min=2; onset_count_max=5; phrase_window_beats=[[{ts.get('beats_per_bar',4)}*0.5, {ts.get('beats_per_bar',4)}*1.5]]; tessitura_center={tonic_center}
+- vocoder: token_policy=vowel; max_unique_pitches=1; onset_count_min=1; duration_min=2.0; tessitura_center={tonic_center}
+- vocal_fx: token_policy=fx_vowel; onset_count_min=1; onset_count_max=2; duration_min=0.5; tessitura_center={tonic_center}
+- breaths: token_policy=br; onset_count_min=1; onset_count_max=4; duration_min=0.2; tessitura_center={tonic_center}
 
-Return only the JSON array, no other text."""
+SOFT TONAL GUIDANCE:
+- For roles with small pitch_span or max_unique_pitches=1, prefer tessitura_center near tonic or dominant; stay generally within key/scale.
+- Phrase windows must lie within the part window; avoid suggesting onsets beyond the section length.
+- Avoid placeholder syllables in hints; tokens are decided later.
+
+OUTPUT JSON (strict):
+- Return JSON array: [{{"idx": 1, "role": "chorus", "plan_hint": "entry_beats=[2.0]; onset_count_min=3; ..."}}, ...]
+- Allowed keys: idx, role, plan_hint. No extra fields.
+"""
 
         if user_prompt:
             hint_prompt += f"\n\nUSER GUIDANCE:\n{user_prompt}"
@@ -923,9 +986,11 @@ Return only the JSON array, no other text."""
         if genai is None or not API_KEYS:
             raise RuntimeError("Hint generation unavailable: no LLM SDK or API key")
         
-        # Use session override if available, otherwise config
+        # Use session override if available, otherwise config (no flash fallback)
         global SESSION_MODEL_OVERRIDE
-        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+        if not model_name:
+            model_name = "gemini-2.5-pro"
         print(f"[DEBUG] Hint Generation using model: {model_name}")
         
         # Plan generation should be highly deterministic
@@ -985,14 +1050,44 @@ Return only the JSON array, no other text."""
                                 if role not in valid_roles or role in ['unknown', '']:
                                     role = 'silence'
                                 
-                                # Consistency validation
-                                if role == 'silence':
-                                    if not any(k in hint.lower() for k in ['instrumental', 'silence', 'no vocal', 'no vocals']):
-                                        hint = 'Instrumental only. Maintain vocal silence.'
-                                elif role == 'chorus':
-                                    if any(k in hint.lower() for k in ['instrumental only', 'maintain vocal silence', 'no vocal', 'no vocals']):
+                                # Consistency validation (numeric plan_hint aware)
+                                # If force_silence=1 appears with a non-silence role → coerce to silence
+                                try:
+                                    fs_flag = False
+                                    if 'force_silence' in hint:
+                                        # naive parse: look for '=1' after key
+                                        fs_flag = 'force_silence=1' in hint.replace(' ', '')
+                                    if fs_flag and role != 'silence':
                                         role = 'silence'
-                                        hint = 'Instrumental only. Maintain vocal silence.'
+                                    if role == 'silence':
+                                        # normalize hint to minimal form
+                                        hint = 'force_silence=1'
+                                    else:
+                                        # for non-silence roles, ensure we do not carry a silence flag
+                                        if 'force_silence' in hint:
+                                            # remove any force_silence=x segments
+                                            parts = [p.strip() for p in hint.split(';') if p.strip()]
+                                            parts = [p for p in parts if not p.strip().startswith('force_silence=')]
+                                            hint = '; '.join(parts)
+                                        # Enforce role-based token_policy defaults and remove contradictory token policies
+                                        try:
+                                            def _enforce_token_policy(h: str, pol: str) -> str:
+                                                parts_local = [p.strip() for p in h.split(';') if p.strip()]
+                                                parts_local = [p for p in parts_local if not p.lower().startswith('token_policy=')]
+                                                parts_local.append(f'token_policy={pol}')
+                                                return '; '.join(parts_local)
+                                            if role in ('whisper','spoken','phrase_spot','chorus','prechorus','verse','bridge','intro','outro','backing','harmony','doubles','response','rap','chant','tag'):
+                                                # lexical-required roles
+                                                hint = _enforce_token_policy(hint, 'lexical')
+                                            elif role in ('vocal_fx','vocoder','talkbox','scat','vowels'):
+                                                # vowel-based textures
+                                                hint = _enforce_token_policy(hint, 'fx_vowel' if role=='vocal_fx' else 'vowel')
+                                            elif role == 'breaths':
+                                                hint = _enforce_token_policy(hint, 'br')
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
                                 
                                 mapped.append({
                                     "idx": i+1, 
@@ -1099,9 +1194,11 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
         # No planner available → hard fail per user preference
         raise RuntimeError("Planning unavailable: no LLM SDK or API key")
     # Build prompt
-    # Use session override if available, otherwise config
+    # Use session override if available, otherwise config (no flash fallback)
     global SESSION_MODEL_OVERRIDE
-    model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+    model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+    if not model_name:
+        model_name = "gemini-2.5-pro"
     try:
         if REQUESTED_SWITCH_MODEL:
             model_name = REQUESTED_SWITCH_MODEL
@@ -2117,9 +2214,11 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         except Exception:
             return ["word" if (i % 3 == 0) else '-' for i in range(N)]
 
-    # Use session override if available, otherwise config
+    # Use session override if available, otherwise config (no flash fallback)
     global SESSION_MODEL_OVERRIDE
-    model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+    model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+    if not model_name:
+        model_name = "gemini-2.5-pro"
     try:
         if REQUESTED_SWITCH_MODEL:
             model_name = REQUESTED_SWITCH_MODEL
@@ -2468,16 +2567,28 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append(mapping_repetition_block)
     prompt_parts.append(chant_variance_block)
     if section_role == 'outro':
-        prompt_parts.append("OUTRO REPETITION POLICY (outro only):\n- Avoid überlange 1–2‑Wort‑Loops; für Fade‑outs lieber wenige prägnante Fragmente mit line_breaks und Mikro‑Variation statt langer Wiederholungsketten.\n- Keine Hook‑Fragment‑Spam; sparse Callbacks reichen.\n\n")
+        prompt_parts.append("OUTRO REPETITION POLICY (outro only):\n- Avoid overlong 1–2-word loops; for fade-outs prefer a few concise fragments with line_breaks and micro-variation instead of long repetition chains.\n- No hook-fragment spam; sparse callbacks are sufficient.\n\n")
     prompt_parts.append(line_integrity_block)
     prompt_parts.append("[soft|global] PROSODY CHECKLIST:\n- Place strong verbs on ascending motion; use falling imagery on descending lines.\n- Use internal rhyme/assonance sparingly (≈1 per part) to enhance memorability.\n\n")
     prompt_parts.append("SMOOTHNESS / LEGATO (global):\n- Avoid choppy delivery. Map key content syllables to longer or stressed notes; keep very short notes for function words or continuations.\n- Prefer open vowels (a/ah/o/ai) on sustained notes; avoid long held consonants; move codas to the next onset if needed.\n- Group lines into phrase windows and keep within-phrase legato (minimize micro-gaps).\n\n")
-    prompt_parts.append("NONSENSE BUDGET (only if allowed):\n- Wenn Nonsens‑Silben genutzt werden, setze sie sparsam ein (kleiner Anteil) und variiere sie; vermeide back‑to‑back Nonsense‑Zeilen.\n\n")
+    prompt_parts.append("NONSENSE BUDGET (only if allowed):\n- If nonsense syllables are used, apply them sparingly (small proportion) and vary them; avoid back-to-back nonsense lines.\n\n")
     prompt_parts.append(diction_block)
     prompt_parts.append("CAPITALIZATION POLICY:\n- Use Title Case only for the exact hook_canonical string if one exists; otherwise use normal sentence case. Avoid arbitrary ALL CAPS.\n\n")
     prompt_parts.append("VOCAL COLOR:\n- On high notes, keep closed vowels (i/e) short; sustain open vowels (a/ah/o/ai) on long/stressed notes.\n\n")
     prompt_parts.append(dramaturgy_block)
     prompt_parts.append("ADAPTIVE MODE (soft):\n- Always return aligned words/spans for this part. If mapping feels forced, include a short 'note_adaptation_vision' and a 'placement_difficulty' in [0..1] describing the challenge.\n- The vision should suggest phrasing windows, downbeat targets for the title-drop, and whether melisma/merges would help; avoid prescriptive micro-edits.\n\n")
+    # DECISION rubric for model-controlled silence
+    prompt_parts.append("DECISION: intentional_silence (hard):\n")
+    prompt_parts.append("- Set intentional_silence=true (and return words=[], melisma_spans=[]) if any applies:\n")
+    prompt_parts.append("  • Plan/Hints indicate 'instrumental only' / 'maintain vocal silence' / 'no vocals'.\n")
+    prompt_parts.append("  • The note grid provides no clear musical window (majority of onsets are micro-slots < ≈1/4 beat for potential content).\n")
+    prompt_parts.append("  • Role is breaths/vocal_fx but there is no plausible small window for 1–2 short onsets without crowding.\n")
+    prompt_parts.append("- Otherwise set intentional_silence=false and provide words + melisma_spans.\n\n")
+    # Role-specific hard guidelines for token types
+    if section_role == 'breaths':
+        prompt_parts.append("ROLE=breaths (hard):\n- Output tokens MUST be '[br]' only (1–2 events typical); no lexical words or vowel placeholders.\n- If no plausible short window exists, set intentional_silence=true.\n\n")
+    if section_role in ('whisper','spoken'):
+        prompt_parts.append("ROLE=whisper/spoken (hard):\n- Use lexical words/phrases. Do NOT use pure vowel placeholders like 'Ah', 'Ooh', 'Mmm' as tokens.\n- Keep phrasing minimal and intimate; avoid dense onsets.\n\n")
     prompt_parts.append("SYNTHV RULES (hard):\n")
     prompt_parts.append("- '+' usage: Allowed only as a continuation indicator when absolutely necessary (it will be mapped to '-' in export). Prefer melisma via spans instead. No in-word hyphenation. One token = one word.\n")
     prompt_parts.append("- Phrase starts: After a rest, the first note MUST be a content syllable (never '-').\n")
@@ -2492,7 +2603,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append("- Monosyllables on many onsets: Prefer a 2-syllable synonym; else at most one '-' continuation; avoid '- -'.\n")
     prompt_parts.append("- Placement: New syllables on note onsets; sustain open vowels (a/ah/o/ai) on long stressed notes; do not hold consonant codas.\n")
     if section_role in ('breaths',):
-        prompt_parts.append("- '[br]' usage: Only on dedicated short rest notes; never inside words; nie als einziges Token bei 1-Note-Teilen (nutze stattdessen einen kurzen Content-Impuls, falls nötig).\n")
+        prompt_parts.append("- '[br]' usage: Only on dedicated short rest notes; never inside words; never as the only token in 1-note segments (use a short content impulse instead, if needed).\n")
     prompt_parts.append("- Optional phoneme_hints per note (e.g., [k a t]) for ambiguous words (separate list).\n\n")
     prompt_parts.append("MELISMA / SYLLABLE MAPPING (policy):\n- High melisma mode (melisma_bias≥0.6): Prefer holding vowels across weak beats using '-' on continuation onsets. Do NOT introduce new content words on every micro-onset.\n- Low melisma mode (melisma_bias<0.6): Prefer 1:1 (one syllable per onset), but allow melisma on long/stressed notes.\n- REDUCE EXCESSIVE MELISMA: Avoid more than 2 consecutive '-' tokens; prefer meaningful content over empty sustains.\n\n")
     prompt_parts.append("ILLUSTRATIVE EXAMPLES:\n")
@@ -2526,16 +2637,21 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         attempts = 0
         nonlocal_model = [model]
         while attempts < max_attempts:
-            attempts += 1
             try:
                 resp = nonlocal_model[0].generate_content(prompt_text, safety_settings=safety_settings, generation_config=generation_config)
                 raw = getattr(resp, "text", "") or ""
                 cleaned = raw.strip().replace("```json", "").replace("```", "")
                 obj = json.loads(cleaned)
-                return obj if isinstance(obj, dict) else None
+                # Minimal hard validation: only retry on fatal/empty
+                if isinstance(obj, dict):
+                    w = obj.get('words'); s = obj.get('melisma_spans')
+                    if (obj.get('intentional_silence') is True) or (isinstance(w, list) and isinstance(s, list) and len(w) >= 1 and len(s) >= 1):
+                        return obj
+                # else -> fatal/empty
+                raise ValueError("fatal or empty stage-1 output")
             except Exception as e:
                 err = str(e).lower()
-                # Treat various quota/rate signals as rotation triggers
+                # Treat various quota/rate signals as rotation triggers (do NOT consume attempts)
                 if ('429' in err) or ('quota' in err) or ('rate limit' in err) or ('resource exhausted' in err) or ('exceeded' in err):
                     qtype = _classify_quota_error(err)
                     KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
@@ -2582,11 +2698,14 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
                             wait_s = 60 if qtype == 'per-hour' else 300
                         _interruptible_backoff(wait_s, config, context_label="Lyrics words cooldown")
                         continue
-                # Non-quota/transient error: log once and retry quickly
+                    # after rotation, immediately retry without consuming attempts
+                    continue
+                # Non-quota/transient error: log once and retry quickly (consumes attempt)
                 try:
                     print(Fore.YELLOW + f"[Lyrics] Model error (transient): {str(e)[:160]}" + Style.RESET_ALL)
                 except Exception:
                     pass
+                attempts += 1
                 time.sleep(1)
                 continue
         return None
@@ -2725,19 +2844,306 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         pass
     return tokens if ok else tokens
 # --- Lyrics-first STAGE 1: Free text with syllables (no grid constraint) ---
-def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, user_prompt: str | None = None, history_context: str | None = None, theme_len_bars: int | float | None = None) -> Dict:
+def _plan_lyrical_concept(config: Dict, genre: str, inspiration: str, section_role: str, section_label: str | None = None, user_prompt: str | None = None, history_context: str | None = None, cfg: Dict | None = None) -> Dict:
+    """Stage 1a: Plan lyrical concept, theme, and emotional direction for a section."""
+    # Input validation
+    if not isinstance(config, dict):
+        print("[Concept Planning Error] Invalid config: must be dict")
+        return {}
+    if not isinstance(genre, str) or not genre.strip():
+        print("[Concept Planning Error] Invalid genre: must be non-empty string")
+        return {}
+    if not isinstance(inspiration, str) or not inspiration.strip():
+        print("[Concept Planning Error] Invalid inspiration: must be non-empty string")
+        return {}
+    if not isinstance(section_role, str) or not section_role.strip():
+        print("[Concept Planning Error] Invalid section_role: must be non-empty string")
+        return {}
+    
+    try:
+        import google.generativeai as genai_local
+        model_name = config.get('lyrics_model', 'gemini-2.5-pro')
+        language = str(config.get("lyrics_language", "English"))
+        key_scale = str(cfg.get("key_scale", "") if cfg else config.get("key_scale", "")).strip()
+        
+        # Extract key information for tonal context
+        try:
+            def _infer_root_from_key(ks: str) -> int:
+                """Infer MIDI root note from key string like 'C major' or 'A minor'."""
+                if not ks:
+                    return 60
+                ks_lower = ks.lower().strip()
+                note_map = {'c': 0, 'c#': 1, 'db': 1, 'd': 2, 'd#': 3, 'eb': 3, 'e': 4, 'f': 5, 'f#': 6, 'gb': 6, 'g': 7, 'g#': 8, 'ab': 8, 'a': 9, 'a#': 10, 'bb': 10, 'b': 11}
+                for note, semitone in note_map.items():
+                    if ks_lower.startswith(note):
+                        return 60 + semitone  # C4 = 60
+                return 60
+            tonic_midi = _infer_root_from_key(key_scale) if key_scale else 60
+        except Exception:
+            tonic_midi = 60
+            
+        concept_prompt = f"""You are a lyrical concept specialist. Plan the conceptual foundation for a {genre} track section.
+
+GLOBAL CONTEXT:
+- Genre: {genre} | Key/Scale: {key_scale} | Tonic: {tonic_midi}
+- Section: {section_label} | Role: {section_role}
+- User Inspiration: {inspiration}
+
+CONCEPTUAL PLANNING:
+- Define the core emotional theme for this section
+- Establish the narrative perspective (1st/2nd/3rd person)
+- Identify key imagery and metaphors to use
+- Plan the overall mood and atmosphere
+- Consider how this section fits into the larger song narrative
+
+ROLE-SPECIFIC CONCEPT:
+- {section_role}: Plan appropriate conceptual approach
+- Consider the section's function in the song structure
+- Ensure concept aligns with the role's purpose
+
+OUTPUT (JSON):
+{{
+  "core_theme": "string - main emotional/narrative theme",
+  "perspective": "string - narrative voice (I/you/we/they)",
+  "key_imagery": ["string", ...] - 3-5 key visual/metaphorical elements",
+  "mood": "string - overall emotional atmosphere",
+  "narrative_function": "string - how this section advances the story",
+  "tone": "string - vocal delivery approach (intimate/ethereal/aggressive/etc)"
+}}"""
+        
+        # Add retry and API key rotation logic
+        max_attempts = max(3, len(API_KEYS))
+        attempts = 0
+        quota_rotation_count = 0
+        
+        while attempts < max_attempts:
+            try:
+                # Configure model with current API key
+                model = genai_local.GenerativeModel(model_name=model_name)
+                
+                resp = model.generate_content(concept_prompt)
+                raw = _extract_text_from_response(resp) or ""
+                cleaned = raw.strip().replace("```json", "").replace("```", "")
+                payload = _extract_json_object(cleaned)
+                concept = json.loads(payload or cleaned)
+                
+                if isinstance(concept, dict) and concept:
+                    return concept
+                else:
+                    raise ValueError("Empty or invalid concept response")
+                    
+            except Exception as e:
+                err = str(e).lower()
+                if ('429' in err) or ('quota' in err) or ('rate limit' in err) or ('resource exhausted' in err) or ('exceeded' in err):
+                    qtype = _classify_quota_error(err)
+                    KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
+                    try:
+                        cd = 60 if qtype not in ('per-hour','per-day') else 3600
+                        KEY_COOLDOWN_UNTIL[CURRENT_KEY_INDEX] = max(KEY_COOLDOWN_UNTIL.get(CURRENT_KEY_INDEX,0), time.time()+cd)
+                        avail = []
+                        now = time.time()
+                        for ix, _ in enumerate(API_KEYS):
+                            tleft = max(0.0, KEY_COOLDOWN_UNTIL.get(ix, 0) - now)
+                            avail.append(f"#{ix+1}:{'OK' if tleft<=0 else f'cooldown {int(tleft)}s'}")
+                        print(Fore.MAGENTA + Style.BRIGHT + "[Concept Planning:Quota] " + Style.NORMAL + Fore.WHITE + f"signal={qtype}; keys=" + ", ".join(avail) + Style.RESET_ALL)
+                    except Exception:
+                        pass
+                    
+                    # Try to rotate to next available key
+                    n = len(API_KEYS)
+                    rotated = False
+                    stride = max(1, int(globals().get('KEY_ROTATION_STRIDE', 1)))
+                    for off in range(1, n+1):
+                        idx = (CURRENT_KEY_INDEX + off*stride) % n
+                        if time.time() < KEY_COOLDOWN_UNTIL.get(idx, 0):
+                            continue
+                        try:
+                            globals()['CURRENT_KEY_INDEX'] = idx
+                            genai.configure(api_key=API_KEYS[idx])
+                            rotated = True
+                            break
+                        except Exception:
+                            continue
+                    
+                    if not rotated:
+                        wait_s = 3
+                        if _all_keys_daily_exhausted():
+                            _schedule_hourly_probe_if_needed()
+                            wait_s = _seconds_until_hourly_probe()
+                        _interruptible_backoff(wait_s, config, context_label="Concept Planning cooldown")
+                        quota_rotation_count += 1
+                        continue
+                    else:
+                        continue
+                else:
+                    # Non-quota error: brief pause then retry and count attempt
+                    time.sleep(0.5)
+                    attempts += 1
+                    continue
+        
+        print(f"[Concept Planning Error] Failed after {max_attempts} attempts")
+        return {}
+        
+    except Exception as e:
+        print(f"[Concept Planning Error] Unexpected error: {e}")
+        return {}
+
+def _plan_lyrical_phrases(config: Dict, genre: str, section_role: str, concept: Dict, notes: List[Dict], theme_len_bars: int | float, bpm: int | float, ts: Dict, cfg: Dict | None = None) -> Dict:
+    """Stage 1b: Plan phrase structure and lyrical content based on concept and musical constraints."""
+    # Input validation
+    if not isinstance(config, dict):
+        print("[Phrase Planning Error] Invalid config: must be dict")
+        return {}
+    if not isinstance(concept, dict):
+        print("[Phrase Planning Error] Invalid concept: must be dict")
+        return {}
+    if not isinstance(notes, list):
+        print("[Phrase Planning Error] Invalid notes: must be list")
+        return {}
+    if not isinstance(theme_len_bars, (int, float)) or theme_len_bars <= 0:
+        print("[Phrase Planning Error] Invalid theme_len_bars: must be positive number")
+        return {}
+    if not isinstance(bpm, (int, float)) or bpm <= 0:
+        print("[Phrase Planning Error] Invalid bpm: must be positive number")
+        return {}
+    
+    try:
+        import google.generativeai as genai_local
+        model_name = config.get('lyrics_model', 'gemini-2.5-pro')
+        
+        # Calculate musical constraints
+        bpb = max(1, int(ts.get('beats_per_bar', 4)))
+        total_beats = float(theme_len_bars) * bpb
+        num_notes = len(notes)
+        
+        phrase_prompt = f"""You are a lyrical phrase specialist. Structure the conceptual foundation into singable phrases.
+
+CONCEPTUAL FOUNDATION:
+- Core Theme: {concept.get('core_theme', 'Unknown')}
+- Perspective: {concept.get('perspective', 'Unknown')}
+- Key Imagery: {concept.get('key_imagery', [])}
+- Mood: {concept.get('mood', 'Unknown')}
+- Tone: {concept.get('tone', 'Unknown')}
+
+MUSICAL CONSTRAINTS:
+- Section Role: {section_role}
+- Total Beats: {total_beats} | Notes: {num_notes}
+- BPM: {bpm} | Time Signature: {bpb}/4
+
+PHRASE STRUCTURE PLANNING:
+- Plan 2-4 main phrases that fit the musical structure
+- Each phrase should be 1-2 lines, 4-8 words
+- Consider natural breathing points and musical phrasing
+- Ensure phrases work with the note count and timing
+- Maintain the established mood and imagery
+
+ROLE-SPECIFIC PHRASING:
+- {section_role}: Structure phrases appropriately for this role
+- Consider repetition, development, or contrast as needed
+- Ensure phrases serve the section's musical function
+
+OUTPUT (JSON):
+{{
+  "phrases": ["string", ...] - 2-4 main lyrical phrases",
+  "phrase_breaks": [int, ...] - note indices where phrases end",
+  "repetition_strategy": "string - how to handle repetition",
+  "breathing_points": [int, ...] - note indices for natural pauses",
+  "emotional_arc": "string - how emotion develops through phrases"
+}}"""
+        
+        # Add retry and API key rotation logic
+        max_attempts = max(3, len(API_KEYS))
+        attempts = 0
+        quota_rotation_count = 0
+        
+        while attempts < max_attempts:
+            try:
+                # Configure model with current API key
+                model = genai_local.GenerativeModel(model_name=model_name)
+                
+                resp = model.generate_content(phrase_prompt)
+                raw = _extract_text_from_response(resp) or ""
+                cleaned = raw.strip().replace("```json", "").replace("```", "")
+                payload = _extract_json_object(cleaned)
+                phrases = json.loads(payload or cleaned)
+                
+                if isinstance(phrases, dict) and phrases:
+                    return phrases
+                else:
+                    raise ValueError("Empty or invalid phrases response")
+                    
+            except Exception as e:
+                err = str(e).lower()
+                if ('429' in err) or ('quota' in err) or ('rate limit' in err) or ('resource exhausted' in err) or ('exceeded' in err):
+                    qtype = _classify_quota_error(err)
+                    KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
+                    try:
+                        cd = 60 if qtype not in ('per-hour','per-day') else 3600
+                        KEY_COOLDOWN_UNTIL[CURRENT_KEY_INDEX] = max(KEY_COOLDOWN_UNTIL.get(CURRENT_KEY_INDEX,0), time.time()+cd)
+                        avail = []
+                        now = time.time()
+                        for ix, _ in enumerate(API_KEYS):
+                            tleft = max(0.0, KEY_COOLDOWN_UNTIL.get(ix, 0) - now)
+                            avail.append(f"#{ix+1}:{'OK' if tleft<=0 else f'cooldown {int(tleft)}s'}")
+                        print(Fore.MAGENTA + Style.BRIGHT + "[Phrase Planning:Quota] " + Style.NORMAL + Fore.WHITE + f"signal={qtype}; keys=" + ", ".join(avail) + Style.RESET_ALL)
+                    except Exception:
+                        pass
+                    
+                    # Try to rotate to next available key
+                    n = len(API_KEYS)
+                    rotated = False
+                    stride = max(1, int(globals().get('KEY_ROTATION_STRIDE', 1)))
+                    for off in range(1, n+1):
+                        idx = (CURRENT_KEY_INDEX + off*stride) % n
+                        if time.time() < KEY_COOLDOWN_UNTIL.get(idx, 0):
+                            continue
+                        try:
+                            globals()['CURRENT_KEY_INDEX'] = idx
+                            genai.configure(api_key=API_KEYS[idx])
+                            rotated = True
+                            break
+                        except Exception:
+                            continue
+                    
+                    if not rotated:
+                        wait_s = 3
+                        if _all_keys_daily_exhausted():
+                            _schedule_hourly_probe_if_needed()
+                            wait_s = _seconds_until_hourly_probe()
+                        _interruptible_backoff(wait_s, config, context_label="Phrase Planning cooldown")
+                        quota_rotation_count += 1
+                        continue
+                    else:
+                        continue
+                else:
+                    # Non-quota error: brief pause then retry and count attempt
+                    time.sleep(0.5)
+                    attempts += 1
+                    continue
+        
+        print(f"[Phrase Planning Error] Failed after {max_attempts} attempts")
+        return {}
+        
+    except Exception as e:
+        print(f"[Phrase Planning Error] Unexpected error: {e}")
+        return {}
+
+def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, user_prompt: str | None = None, history_context: str | None = None, theme_len_bars: int | float | None = None, cfg: Dict | None = None) -> Dict:
     try:
         import google.generativeai as genai_local
     except Exception:
         raise RuntimeError("Lyrics Stage-1 unavailable: no LLM SDK")
     try:
-        # Use session override if available, otherwise config
+        # Use session override if available, otherwise config (no flash fallback)
         global SESSION_MODEL_OVERRIDE
-        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+        if not model_name:
+            model_name = "gemini-2.5-pro"
         generation_config = {"response_mime_type": "application/json", "temperature": float(config.get("lyrics_temperature", config.get("temperature", 0.6)))}
         model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
         language = str(config.get("lyrics_language", "English"))
-        key_scale = str(config.get("key_scale", "")).strip()
+        # Use artifact key_scale if available, otherwise fallback to config
+        key_scale = str(cfg.get("key_scale", "") if cfg else config.get("key_scale", "")).strip()
         section_role = _normalize_section_role(section_label)
         # Prefer planned role from section_description if available (e.g., "[Plan] role=prechorus")
         try:
@@ -2823,6 +3229,10 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
             role_gate_block.append("ROLE-SPECIFIC: Scat → musical syllables only; vary vowels; avoid monotony; no semantics.")
         elif is_vowels:
             role_gate_block.append("ROLE-SPECIFIC: Vowels → hold open vowels on long notes; no semantics; pure sustain.")
+        elif section_role in ['whisper', 'hum']:
+            role_gate_block.append("ROLE-SPECIFIC: Whisper/Hum → atmospheric, breathy, minimal meaningful words; create mood through texture; avoid pure vowels unless absolutely necessary.")
+        elif section_role in ['adlib', 'vocal_fx', 'vocoder']:
+            role_gate_block.append("ROLE-SPECIFIC: Adlib/VocalFX/Vocoder → experimental vocalizations, varied consonants, creative sound exploration; use meaningful words when possible, reserve pure vowels for special effects.")
         elif is_intro or is_outro or is_breakdown:
             role_gate_block.append("ROLE-SPECIFIC: Intro/Outro/Breakdown → minimal wording; allow silence; spotlight single striking image if any.")
 
@@ -2850,6 +3260,55 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
         except Exception:
             pass
 
+        # Multi-stage content generation
+        print(f"[Lyrics:Multi-Stage] Starting 3-stage content generation for '{section_label}'")
+        
+        # Stage 1a: Conceptual Planning
+        concept = _plan_lyrical_concept(config, genre, inspiration, section_role, section_label, user_prompt, history_context, cfg)
+        print(f"[Lyrics:Concept] Theme: {concept.get('core_theme', 'Unknown')} | Mood: {concept.get('mood', 'Unknown')}")
+        
+        # Stage 1b: Phrase Planning (if we have notes)
+        phrases = {}
+        # Note: We don't have notes at this stage, so we'll skip phrase planning for now
+        # This would be called from the composition stage where notes are available
+        print(f"[Lyrics:Phrases] Skipping phrase planning (no notes available at lyrics stage)")
+        
+        # Stage 1c: Final lyrics generation with concept and phrase guidance
+        
+        # Build enhanced prompt with concept and phrase guidance
+        concept_guidance = ""
+        if concept:
+            concept_guidance = f"""
+CONCEPTUAL FOUNDATION:
+- Core Theme: {concept.get('core_theme', 'Unknown')}
+- Perspective: {concept.get('perspective', 'Unknown')}
+- Key Imagery: {', '.join(concept.get('key_imagery', []))}
+- Mood: {concept.get('mood', 'Unknown')}
+- Tone: {concept.get('tone', 'Unknown')}
+- Narrative Function: {concept.get('narrative_function', 'Unknown')}
+
+CONCEPTUAL GUIDANCE:
+- Use the established theme and imagery consistently
+- Maintain the chosen perspective and mood throughout
+- Ensure the tone matches the vocal delivery approach
+- Advance the narrative as planned for this section
+"""
+        
+        phrase_guidance = ""
+        if phrases and phrases.get('phrases'):
+            phrase_guidance = f"""
+PHRASE STRUCTURE:
+- Planned Phrases: {phrases.get('phrases', [])}
+- Repetition Strategy: {phrases.get('repetition_strategy', 'Unknown')}
+- Emotional Arc: {phrases.get('emotional_arc', 'Unknown')}
+
+PHRASING GUIDANCE:
+- Structure content around the planned phrases
+- Use the repetition strategy appropriately
+- Follow the emotional development arc
+- Maintain natural breathing points
+"""
+
         # Prompt for free lyrics + syllables + optional arranger note (+ optional hook/chorus_lines)
         labels = _get_prompt_labels(config)
         line_ctx = _format_prompt_context_line(
@@ -2868,6 +3327,8 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
         prompt = (
             "ROLE: You are a professional lyricist. Produce singable lyrics for the specified section.\n\n"
             + ("CONTEXT: " + line_ctx + "\n")
+            + concept_guidance
+            + phrase_guidance
             + ("Other tracks (name,role,density): " + json.dumps(ctx_summary) + "\n" if (ctx_summary and not (is_intro or is_outro or is_breakdown)) else "")
             + ("Previous sections (label: text):\n" + history_context + "\n" if ((isinstance(history_context, str) and history_context.strip()) and not (is_intro or is_outro or is_breakdown or is_vowels or is_scat)) else "")
             + (
@@ -2882,15 +3343,23 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
             + "ARRANGEMENT AWARENESS (soft):\n- Complement the existing arrangement; leave space where texture is dense.\n- Text density is flexible; it is fine to have very few or no words in some bars.\n- Optional call-and-response with other tracks; response fragments should be short (≤1 beat), off-beat, and outside lead accents.\n\n"
             + toolbox
             + "META-WORD FILTER (prompt-level):\n- Do NOT output meta/instructional words taken from prompts (e.g., style tags, genre labels, model/file names, parameter keys).\n- Avoid turning instruction descriptors (e.g., 'in the style of ...', 'genre: ...', 'mood: ...') into lyrics.\n- Do not quote [Plan] tags or guidance verbatim; treat them as direction only.\n- If such content would appear, replace it with role-appropriate lyrical text (or use '-' sustain for non-lexical roles).\n\n"
-            + "TEXT SHAPING (soft):\n- Prefer whole words; split only if rhythm truly requires it; avoid frequent splits outside the hook.\n- Favor long sustains on open vowels (ah/oh); keep i/e short.\n- Avoid long single-word chains: keep chants concise and introduce variation or sustains instead of repeating a token many times.\n- Keep instructions style-agnostic; avoid embedding genre/mood labels directly in lyrics.\n- Favor fewer tokens per bar; prefer longer words or '-' sustains over micro-syllables.\n- If a slot feels too short to articulate a new syllable, do not invent one; use '-' or leave space.\n- Keep hook words unbroken wherever possible; only split if musically compelling.\n\n"
+            + "TEXT SHAPING (soft):\n- STRONGLY prefer meaningful minimal words over generic vowels (avoid 'ah/oh/eh' unless absolutely necessary)\n- Use poetic fragments, single words, or short phrases instead of placeholder syllables\n- Prefer whole words; split only if rhythm truly requires it; avoid frequent splits outside the hook.\n- Favor long sustains on open vowels (ah/oh); keep i/e short.\n- Avoid long single-word chains: keep chants concise and introduce variation or sustains instead of repeating a token many times.\n- Keep instructions style-agnostic; avoid embedding genre/mood labels directly in lyrics.\n- Favor fewer tokens per bar; prefer longer words or '-' sustains over micro-syllables.\n- If a slot feels too short to articulate a new syllable, do not invent one; use '-' or leave space.\n- Keep hook words unbroken wherever possible; only split if musically compelling.\n- VOCAL CONTENT PRIORITY: Even for atmospheric roles, use meaningful words when possible\n"
+            + "  • Avoid pure vowel sequences ('Ah Oh Ei') unless role specifically demands it\n"
+            + "  • Use poetic fragments, single meaningful words, or short phrases\n"
+            + "  • Reserve generic vowels only for vocoder/vocal_fx/breath roles\n\n"
             + (f"HOOK TEXT (use verbatim in CHORUS): \"{hook_text_hint}\"\n" if (section_role == 'chorus' and isinstance(hook_text_hint, str) and hook_text_hint) else "")
             + "\nOUTPUT (STRICT JSON):\n{\n  \"words\": [string,...],            // REQUIRED: lyric words in order\n  \"syllables\": [[string,...],...]|null, // OPTIONAL: syllables per word; may be omitted entirely\n  \"arranger_note\": string|null,     // optional 1–2 sentences with rhythmic/contour hints for the next stage\n  \"hook_canonical\": string|null,    // chorus/drop hook phrase, verbatim if provided\n  \"chorus_lines\": [string,...]|null, // optional reusable chorus lines shaped by genre/inspiration\n  \"story\": string|null              // optional 1–3 short sentences capturing the story/theme if present\n}\n\n"
             + "RULES (genre/inspiration-led):\n- Chorus/Drop: favor short, memorable lines as suits the genre and the provided inspiration; repetition permitted.\n- Verse/Bridge: progress narrative or contrast with genre-appropriate imagery; avoid chorus wording.\n- Syllabification is OPTIONAL and orthographic only if provided.\n- Avoid copying user wording; style cues only (EXCEPTION: hook/title is verbatim in CHORUS).\n- Keep overall length reasonable for the given theme length; let genre aesthetics drive exact density.\n"
             + ("- If this is a CHORUS, provide hook_canonical and a small set of short, repeatable lines sized to the part length.\n" if section_role == 'chorus' else "")
             + ("- If this is a CHORUS or the section label implies a drop: begin with the exact HOOK TEXT; keep hook words unbroken and contiguous. Reuse the same hook line across choruses/drops with only micro-variation elsewhere (adapt repetition to part length and musical feel).\n" if (section_role == 'chorus') else "")
+            + ("- For CHORUS sections: ensure the hook appears at least once, preferably at the beginning; use meaningful words for non-hook content.\n" if section_role == 'chorus' else "")
             + ("\nHOOK POLICY (chorus only):\n- If a hook/title exists: include it verbatim where musically fitting for the part length.\n- Keep hook words contiguous; avoid letter-by-letter spelling.\n- Avoid over-hyphenation of hook words; keep them as whole as possible.\n" if section_role == 'chorus' else "")
             + ("\nSILENCE OPTION (when appropriate):\n- If this section is Intro/Outro/Breakdown OR other tracks are very dense, it is acceptable to skip vocals: set words=[] and syllables=[], and set arranger_note='intentional silence: <short rationale>'.\n" if section_role in ('intro','outro','breakdown') else "")
-            + "\nSELF-CHECK & AUTO-REPAIR:\n- Ensure words is a non-empty list (unless intentional silence is used for Intro/Outro/Breakdown).\n- If syllables are provided: best-effort only; do not force 1:1 alignment.\n- If CHORUS and a hook exists: include it once; if absent, provide a short alternative hook line.\n- Avoid nonsense/filler outside deliberately repetitive chant moments.\n"
+            + "\nSELF-CHECK & AUTO-REPAIR:\n- Ensure words is a non-empty list (unless intentional silence is used for Intro/Outro/Breakdown).\n- If syllables are provided: best-effort only; do not force 1:1 alignment.\n- If CHORUS and a hook exists: include it once; if absent, provide a short alternative hook line.\n- Avoid nonsense/filler outside deliberately repetitive chant moments.\n- CONTENT QUALITY CHECK: Prefer meaningful words over generic vowels:\n"
+            + "  • Use poetic fragments, single meaningful words, or short phrases\n"
+            + "  • Avoid pure vowel sequences ('Ah Oh Ei') unless role specifically demands it\n"
+            + "  • Reserve generic vowels only for vocoder/vocal_fx/breath roles\n"
+            + "  • Even atmospheric roles should use meaningful content when possible\n"
         )
 
         # Retry with key rotation and interruptible backoff on quota/429
@@ -3005,15 +3474,17 @@ def _infer_hook_from_text(text: str | None) -> str | None:
         return None
 
 # --- Lyrics-first STAGE 2: Compose notes to syllables (uses full context) ---
-def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: float | int, ts: Dict, theme_len_bars: int, syllables: List[List[str]], arranger_note: str | None, context_tracks_basic: List[Dict] | None = None, key_scale: str | None = None, section_label: str | None = None, hook_canonical: str | None = None, chorus_lines: List[str] | None = None, section_description: str | None = None, lyrics_words: List[str] | None = None) -> Dict:
+def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: float | int, ts: Dict, theme_len_bars: int, syllables: List[List[str]], arranger_note: str | None, context_tracks_basic: List[Dict] | None = None, key_scale: str | None = None, section_label: str | None = None, hook_canonical: str | None = None, chorus_lines: List[str] | None = None, section_description: str | None = None, lyrics_words: List[str] | None = None, cfg: Dict | None = None) -> Dict:
     try:
         import google.generativeai as genai_local
     except Exception:
         return {}
     try:
-        # Use session override if available, otherwise config
+        # Use session override if available, otherwise config (no flash fallback)
         global SESSION_MODEL_OVERRIDE
-        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+        if not model_name:
+            model_name = "gemini-2.5-pro"
         # Use a slightly higher temperature for Stage-2 to avoid deterministic loops
         try:
             _base_t = float(config.get("lyrics_temperature", config.get("temperature", 0.5)))
@@ -3022,27 +3493,59 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         _temp = max(0.3, min(1.0, _base_t))
         generation_config = {"response_mime_type": "application/json", "temperature": _temp}
         model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        # Extract tessitura_center from plan_hint if available
+        hint_tess = None
+        try:
+            # Try to extract tessitura_center from plan_hint
+            if isinstance(arranger_note, str) and 'tessitura_center' in arranger_note:
+                import re
+                match = re.search(r'tessitura_center[:\s]*(\d+)', arranger_note)
+                if match:
+                    hint_tess = int(match.group(1))
+        except Exception:
+            pass
+        
         # Context summary and available scale notes
         try:
-            root_note = int((config.get("root_note") if isinstance(config.get("root_note"), (int,float)) else 60))
-            scale_type = str(config.get("scale_type", (key_scale or "major").split(' ',1)[-1] if key_scale else "major"))
+            # Infer dynamic root_note from key_scale if not explicitly set
+            def _infer_root_from_key(ks: str) -> int:
+                try:
+                    tonic = (ks or "").strip().split()[0].lower()
+                    table = {
+                        'c': 60, 'c#': 61, 'db': 61,
+                        'd': 62, 'd#': 63, 'eb': 63,
+                        'e': 64, 'fb': 64, 'e#': 65,
+                        'f': 65, 'f#': 66, 'gb': 66,
+                        'g': 67, 'g#': 68, 'ab': 68,
+                        'a': 69, 'a#': 70, 'bb': 70,
+                        'b': 71, 'cb': 71
+                    }
+                    return table.get(tonic, 60)
+                except Exception:
+                    return 60
+            if isinstance(config.get("root_note"), (int, float)):
+                root_note = int(config.get("root_note"))
+            else:
+                root_note = _infer_root_from_key(str(key_scale or ""))
+            # Use artifact scale_type if available, otherwise fallback to config
+            scale_type = str(cfg.get("scale_type", "") if cfg else config.get("scale_type", (key_scale or "major").split(' ',1)[-1] if key_scale else "major"))
         except Exception:
             root_note, scale_type = 60, "major"
         scale_notes = get_scale_notes(root_note, scale_type)
         bpb = int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
-        # Compact context of other tracks (accents/register)
-        ctx_summary = []
+        # Full context of other tracks (send full notes of this part)
+        context_full = []
         try:
             for t in (context_tracks_basic or []):
                 nm = get_instrument_name(t)
                 rl = t.get('role','complementary')
+                # Skip current vocal track if present in summary
+                if isinstance(nm, str) and 'vocal' in nm.lower():
+                    continue
                 nts = sorted(t.get('notes', []) or [], key=lambda x: float(x.get('start_beat', 0.0)))
-                accents = [round(float(n.get('start_beat',0.0)) % bpb,3) for n in nts[:64]]
-                reg_lo = min([int(n.get('pitch',60)) for n in nts], default=60)
-                reg_hi = max([int(n.get('pitch',60)) for n in nts], default=72)
-                ctx_summary.append({"name": nm, "role": rl, "accents": accents, "register": [reg_lo, reg_hi]})
+                context_full.append({"name": nm, "role": rl, "notes": nts})
         except Exception:
-            ctx_summary = []
+            context_full = []
         # Build strict composition prompt
         role_norm = _normalize_section_role(section_label)
         # Prefer planned role from section_description if available (e.g., "[Plan] role=prechorus")
@@ -3090,6 +3593,26 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         except Exception:
             pass
 
+        # Extract numeric hint parameters from section_description (if present)
+        hint_tess = None
+        hint_span = None
+        hint_maxup = None
+        try:
+            if isinstance(section_description, str) and section_description:
+                m1 = re.search(r"tessitura_center\s*=\s*(\d+)", section_description, re.IGNORECASE)
+                m2 = re.search(r"pitch_span_semitones\s*=\s*(\d+)", section_description, re.IGNORECASE)
+                m3 = re.search(r"max_unique_pitches\s*=\s*(\d+)", section_description, re.IGNORECASE)
+                if m1:
+                    hint_tess = int(m1.group(1))
+                if m2:
+                    hint_span = int(m2.group(1))
+                if m3:
+                    hint_maxup = int(m3.group(1))
+        except Exception:
+            hint_tess = hint_tess if isinstance(hint_tess, int) else None
+            hint_span = hint_span if isinstance(hint_span, int) else None
+            hint_maxup = hint_maxup if isinstance(hint_maxup, int) else None
+
         labels = _get_prompt_labels(config)
         line_ctx = _format_prompt_context_line(
             {
@@ -3116,29 +3639,69 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             target_wpb = 2.0
 
         prompt = (
-            "ROLE: You are a vocal composer. Compose notes (start_beat,duration,pitch) for the lyrics below; map tokens accordingly.\n\n"
+            "ROLE: You are a vocal composer. Compose notes (start_beat,duration,pitch) for the lyrics below; map tokens accordingly. Keep guidance broadly applicable; avoid hard stylistic constraints.\n\n"
             + ("GLOBAL: " + line_ctx + " bars.\n")
-            + ("Context tracks (name, role, accents, register): " + json.dumps(ctx_summary) + "\n" if (ctx_summary and not (is_intro or is_outro or is_breakdown or is_vowels or is_scat)) else "")
+            + ("CONTEXT TRACKS (full notes for this part):\n" + json.dumps(context_full) + "\n" if (context_full and not (is_intro or is_outro or is_breakdown or is_vowels or is_scat)) else "")
+            + ("PRIOR VOCAL (notes+tokens from previous parts):\n" + json.dumps([x for x in (context_tracks_basic or []) if isinstance(x, dict) and x.get('name')=='__PRIOR_VOCAL__']) + "\n" if any(isinstance(x, dict) and x.get('name')=='__PRIOR_VOCAL__' for x in (context_tracks_basic or [])) else "")
             + ("Arranger note: " + arranger_note.strip() + "\n" if isinstance(arranger_note, str) and arranger_note.strip() else "")
             + ("Planned role: " + role_norm + "\n" if isinstance(role_norm, str) and role_norm else "")
             + ("Plan hint: " + section_description.strip() + "\n" if isinstance(section_description, str) and section_description.strip() else "")
             + ("Hook canonical: \"" + hook_canonical.strip() + "\"\n" if isinstance(hook_canonical, str) and hook_canonical.strip() else "")
             + ("Chorus lines: " + json.dumps([l for l in chorus_lines if isinstance(l, str)]) + "\n" if isinstance(chorus_lines, list) and any(isinstance(l, str) for l in chorus_lines) else "")
             + ("LYRICS TEXT (preferred source):\n" + json.dumps([w for w in (lyrics_words or [])]) + "\n" if isinstance(lyrics_words, list) and lyrics_words else "")
-            + "SYLLABLE INPUT (optional; may be ignored):\n" + json.dumps(syllables or []) + "\n\n"
-            + "AVAILABLE SCALE NOTES: " + json.dumps(scale_notes) + "\n\n"
+            + "SYLLABLE INPUT (optional; may be ignored):\n" + json.dumps(syllables or []) + "\n"
+            + "SYLLABLE-TO-NOTE MAPPING INTELLIGENCE:\n"
+            + "- Analyze syllable count per word and map accordingly:\n"
+            + "  • 1 syllable → 1 note (0.75-1.5 beats)\n"
+            + "  • 2 syllables → 1-2 notes (use melisma '-' SPARINGLY)\n"
+            + "  • 3+ syllables → 2+ notes with melisma for natural flow\n"
+            + "- Consider word stress patterns: stressed syllables get longer notes\n"
+            + "- Match note durations to natural speech rhythm\n"
+            + "- ARTICULATION PRIORITY: Keep words clear and singable\n"
+            + "  • Avoid over-splitting simple words into micro-notes\n"
+            + "  • Prefer longer, more singable note durations\n"
+            + "  • Only use melisma when musically justified, not as default\n\n"
+            + "AVAILABLE SCALE NOTES (prefer these; you may gently quantize pitches to them when plausible): " + json.dumps(scale_notes) + "\n\n"
+            + ("NUMERIC HINTS (from plan):\n"
+               + (f"- tessitura_center={hint_tess}\n" if isinstance(hint_tess, int) else "")
+               + (f"- pitch_span_semitones={hint_span}\n" if isinstance(hint_span, int) else "")
+               + (f"- max_unique_pitches={hint_maxup}\n" if isinstance(hint_maxup, int) else "")
+               + ("\n" if any(isinstance(x, int) for x in (hint_tess, hint_span, hint_maxup)) else "")
+            )
             + f"NONCE: { _nonce }\n\n"
             + "PROSODY & MAPPING POLICY:\n"
             + "- Map exactly one lyric token to one note. Use '-' tokens to extend the previous note (melisma).\n"
             + "- Avoid inserting micro rests (< 0.5 beats); extend the preceding note instead.\n"
             + "- Place stressed syllables on stronger beats and stable tones; function words on weak parts.\n"
             + "- Target onsets per bar ≈ " + str(round(target_wpb,2)) + "; do not exceed it unless musically justified by role/plan.\n"
-            + "- Favor legato and coherent phrase arcs over fragmented mapping.\n\n"
+            + "- Favor legato and coherent phrase arcs over fragmented mapping.\n"
+            + "- DURATION MAPPING: Match note durations to syllable/word complexity:\n"
+            + "  • Short words (1-2 syllables): 0.75-1.5 beats\n"
+            + "  • Medium words (3-4 syllables): 1.5-3.0 beats\n"
+            + "  • Long words (5+ syllables): 2.5-4.0 beats\n"
+            + "  • Use melisma ('-') SPARINGLY for multi-syllable words across multiple notes\n"
+            + "  • Avoid notes shorter than 0.5 beats unless musically essential\n"
+            + "  • PREFER: 1 word = 1 note when possible; only split when rhythmically necessary\n"
+            + "  • AVOID: Over-fragmenting simple words into too many short notes\n\n"
+            + "PITCH & TESSITURA POLICY (hard):\n"
+            + "- Every note MUST include a 'pitch' (int). Choose pitches from AVAILABLE SCALE NOTES.\n"
+            + f"- Center pitches around tessitura_center={hint_tess if hint_tess else 'dynamic root_note'} if present in plan_hint; otherwise around the dynamic root_note and within the comfortable vocal range.\n"
+            + "- For roles that may be monotone (spoken/whisper/hum/vowels/vocal_fx/chant/tag): use 1–2 pitches but STILL CHOOSE a musical center near tessitura_center/root (do NOT default all notes to MIDI 60 unless context/root=60 justifies it).\n"
+            + "- MONOTONE MUSICALITY: Even for limited pitch roles, add subtle variation:\n"
+            + f"  • Use 2-3 pitches within ±2-3 semitones of tessitura_center={hint_tess if hint_tess else 'dynamic root_note'}\n"
+            + "  • Add rhythmic accents and dynamic variation\n"
+            + "  • Create micro-melodies with small pitch inflections\n"
+            + "  • Avoid completely static single-pitch delivery\n"
+            + "- Prefer chord tones of concurrent CONTEXT TRACK notes at each onset; if ambiguous, prefer scale degrees 1/3/5 nearest to tessitura_center.\n"
+            + "- Maintain consistency with PRIOR VOCAL where present; allow small diatonic shifts to avoid flat monotony when musically warranted.\n"
+            + f"- For monotone roles (pitch_span_semitones=0 or max_unique_pitches=1): use single pitch = tessitura_center={hint_tess if hint_tess else 'tonic'} or dominant from scale notes.\n"
+            + "- Quantize suggested pitches to AVAILABLE SCALE NOTES; avoid out-of-scale notes unless vocoder/fx processing is intended.\n\n"
             + "PHRASING HINTS BY ROLE:\n"
             + "- intro/whisper/spoken: fewer onsets, longer durations (≥ 1.0–1.25 beats typical).\n"
-            + "- phrase_spot/prechorus: legato motifs, min durations ≥ 1.0 beats im Zweifel.\n"
-            + "- chorus: klare Bögen; Wiederholung ok; meide Silben-Häckseln (< 0.5 beats).\n"
-            + "- vocal_fx/breaths: sehr sparsam; musikalische Platzierung; viel Raum.\n\n"
+            + "- phrase_spot/prechorus: legato motifs, default min durations ≥ 1.0 beats when in doubt.\n"
+            + "- chorus: clear arcs; repetition is fine; avoid syllable-chopping (< 0.5 beats).\n"
+            + "- vocal_fx/breaths: very sparse; musical placement; lots of space.\n"
+            + "- monotone roles (spoken/whisper/hum/vowels/vocal_fx): add rhythmic variation, micro-melodies (±2-3 semitones), dynamic accents; avoid static single-pitch delivery.\n\n"
             + _vocal_toolbox_block(
                 2,
                 is_chorus=is_chorus,
@@ -3172,8 +3735,8 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + ("PRE-CHORUS FOCUS (role-specific):\n- Build tension and lift into the chorus; rising contour preferred.\n- Reuse a short priming phrase; avoid revealing the hook.\n\n" if is_prechorus else "")
             + ("BRIDGE FOCUS (role-specific):\n- Provide contrast in color/angle; introduce a complementary motif.\n- Keep range moderate; avoid direct chorus wording.\n\n" if is_bridge else "")
             + ("BACKING FOCUS (role-specific):\n- Echo/answer the lead with very short, repeatable fragments.\n- Stay out of the way; simple contours and sparse rhythm.\n\n" if is_backing else "")
-            + ("SPOKEN FOCUS (role-specific):\n- Short spoken fragments with clear vowel nucleus; rhythmically aligned; avoid melody.\n- Keep total duration sparse; prefer longer rests.\n\n" if is_spoken else "")
-            + ("WHISPER FOCUS (role-specific):\n- Very quiet, breathy tokens; minimal content; leave space.\n- Avoid dense onsets; prefer '-' holds on micro-notes.\n\n" if is_whisper else "")
+            + ("SPOKEN FOCUS (role-specific):\n- Short spoken fragments; rhythmically aligned; avoid melody.\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders).\n- Keep total duration sparse; prefer longer rests.\n\n" if is_spoken else "")
+            + ("WHISPER FOCUS (role-specific):\n- Very quiet, breathy words/phrases; leave space.\n- Do NOT use pure vowel placeholders ('Ah/Ooh/Mmm'); use lexical tokens.\n- Avoid dense onsets; prefer '-' holds on micro-notes.\n\n" if is_whisper else "")
             + ("CHANT FOCUS (role-specific):\n- Simple repetitive cells sized to bar; minimal vocabulary; percussive alignment.\n- Avoid lyrical progression; keep motif tight.\n\n" if is_chant else "")
             + ("ADLIB FOCUS (role-specific):\n- Occasional interjections around lead phrases; extremely sparse.\n- Prefer short ascents/descents; avoid stepping on main content.\n\n" if is_adlib else "")
             + ("HARMONY/DOUBLES FOCUS (role-specific):\n- Support lead on sustained notes or exact doubles; do not introduce new text.\n- Keep lower velocity/volume implied; align tightly.\n\n" if (is_harmony or is_doubles) else "")
@@ -3199,9 +3762,9 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "DENSITY-AWARE MAPPING (recommendations):\n- If onset rate feels low: increase melisma; hold open vowels with '-' on weak beats; avoid creating micro rests.\n- If onset rate feels moderate/high: prefer one syllable per note; avoid over-fragmenting short words.\n- Inside a word: do not create gaps; continuation notes must start exactly at previous end.\n- Minimum content duration: avoid launching new content on notes shorter than ≈1/8 beat; prefer '-' sustains.\n\n"
             + "SMOOTHING & LEGATO (recommendations):\n- Avoid very short notelets unless they land on a clear accent; otherwise merge into adjacent durations.\n- Prefer legato within words: extend previous duration instead of inserting micro-gaps/rests.\n- Use inter-word gaps only when musically justified; otherwise smooth by sustain.\n- Long vowels (a/ah/o) should carry sustained notes; consonant clusters avoid fragmentation.\n\n"
             + "MICRO-NOTE HANDLING (soft):\n- Do NOT create new onsets on very short notes; prefer '-' sustain or a rest.\n- For short consecutive notes on the same pitch: map them under a single token; fill intervening notes with '-'.\n- Place consonant attacks primarily on longer or on-beat notes; avoid launching full syllables on micro-notes.\n- When density feels high, lower onset count by sustaining open vowels rather than adding tokens.\n\n"
-            + "AESTHETIC GUIDELINES:\n"
-            + "- Prefer conjunct motion (steps) over leaps; if leaping, resolve by step.\n"
-            + "- Use simple contour shapes (rise–fall or fall–rise) over spans that suit the part length.\n"
+            + "AESTHETIC GUIDELINES (genre/context-led):\n"
+            + "- Prioritize natural, singable contours; prefer stepwise motion; resolve leaps.\n"
+            + "- Match density to context (other tracks, hint onset_count/duration_min); avoid over-filling.\n"
             + "- Land open vowels (a/ah/o/ai) on longer/stressed notes; keep i/e short (especially near the top of range).\n"
             + "- Keep tessitura centered; avoid lingering at register extremes.\n"
             + "- Phrase endings on downbeats or clear rests; avoid trailing micro-gaps (<1/8 beat).\n"
@@ -3213,6 +3776,23 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + ("OUTRO MINIMUM (hard for outro):\n- Output MUST include at least one note and one token.\n- If no lyrics words provided, you MAY use a single sustained open vowel (e.g., 'Ah').\n- Prefer smooth, sustained contour; avoid dense onsets; no empty arrays.\n\n" if is_outro else "")
             + "OUTPUT (STRICT JSON):\n{\n  \"notes\": [{\"start_beat\": number, \"duration_beats\": number, \"pitch\": int}, ...],\n  \"tokens\": [string, ...]\n}\n\n- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
             + "CONSTRAINTS:\n- Map the provided lyrics in order; you MAY split words or use '-' for sustained continuations.\n- Try to keep len(tokens) ≈ number of notes; exact equality is NOT required if musically justified (but avoid large mismatches).\n- Preserve reading order of words; do not spell letter-by-letter.\n- Clamp total beats to theme length (bars * beats_per_bar); no overlaps; no negative durations.\n"
+            + "- HARD: If tokens are provided (len(tokens) ≥ 1), notes MUST NOT be empty (len(notes) ≥ 1). Never return empty notes when tokens exist.\n"
+            + "- DURATION QUALITY: Ensure all note durations are musically appropriate:\n"
+            + "  • No notes shorter than 0.5 beats unless absolutely necessary\n"
+            + "  • Match duration to syllable/word complexity and natural speech rhythm\n"
+            + "  • Create natural, singable phrasing with adequate note lengths\n"
+            + "  • Use melisma ('-') for multi-syllable words rather than creating too many short notes\n"
+            + "- ARTICULATION CLARITY: Prioritize clear, singable word delivery:\n"
+            + "  • Keep simple words (1-2 syllables) as single notes when possible\n"
+            + "  • Avoid over-fragmenting words into micro-notes that are hard to sing\n"
+            + "  • Use longer note durations for better word clarity and musicality\n"
+            + "  • Only split words when rhythmically essential, not as default approach\n"
+            + "- MELISMA RESTRAINT: Use melisma ('-') very sparingly:\n"
+            + "  • Single words (1 syllable): NEVER use melisma\n"
+            + "  • Two-syllable words: Use melisma only if rhythmically compelling\n"
+            + "  • Three+ syllable words: Use melisma judiciously for natural flow\n"
+            + "  • Avoid excessive melisma that makes words unclear or hard to sing\n"
+            + "- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
             + ("- HARD (breaths): If lyrics contain '[br]', produce at least one short note per '[br]'.\n" if is_breaths else "")
             + ("- HARD (vocal_fx): If lyrics are provided, produce at least one short onset; if impossible, prefer intentional silence (model-driven).\n" if is_vocal_fx else "")
         )
@@ -3228,7 +3808,27 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
                     cleaned_local = (raw_local.strip().replace("```json", "").replace("```", ""))
                     payload_slice = _extract_json_object(cleaned_local)
                     obj_local = json.loads(payload_slice or cleaned_local)
-                    return obj_local if isinstance(obj_local, dict) else None
+                    # Minimal hard validation: only retry on fatal/empty
+                    if isinstance(obj_local, dict):
+                        notes2 = obj_local.get('notes'); tokens2 = obj_local.get('tokens')
+                        # Hard prune: if excessive length, trim to max allowed (avoid retries)
+                        MAX_NOTES = 256
+                        if isinstance(notes2, list) and len(notes2) > MAX_NOTES:
+                            obj_local['notes'] = notes2[:MAX_NOTES]
+                        if isinstance(tokens2, list) and len(tokens2) > MAX_NOTES:
+                            obj_local['tokens'] = tokens2[:MAX_NOTES]
+                        # Accept only when consistent: if tokens exist, notes must exist
+                        if isinstance(tokens2, list) and len(tokens2) >= 1:
+                            if isinstance(notes2, list) and len(notes2) >= 1:
+                                return obj_local
+                            raise ValueError('tokens present but notes empty')
+                        # If no tokens, accept when notes exist
+                        if isinstance(notes2, list) and len(notes2) >= 1:
+                            return obj_local
+                        if (isinstance(obj_local.get('notes'), list) and len(obj_local.get('notes')) == 0) and (isinstance(obj_local.get('tokens'), list) and len(obj_local.get('tokens')) == 0):
+                            # Accept empty only when step-1 signaled intentional silence; we don't have that here, so retry once
+                            raise ValueError('empty stage-2 output')
+                    raise ValueError('fatal stage-2 parse')
                 except Exception as e:
                     try:
                         print(Fore.YELLOW + f"[Stage-2 Retry {attempts}] Parse/compose error: {str(e)[:140]}" + Style.RESET_ALL)
@@ -3307,6 +3907,94 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         obj = _call_with_rotation_comp(prompt)
         ok, reason = _validate_stage2_obj(obj or {})
         if ok:
+            # Post-validation: enforce pitch variety & token-note mapping where appropriate
+            try:
+                role_for_var = role_norm
+                notes_chk = obj.get('notes') if isinstance(obj, dict) else []
+                tokens_chk = obj.get('tokens') if isinstance(obj, dict) else []
+                pitches = [int(n.get('pitch', 60)) for n in (notes_chk or []) if isinstance(n, dict) and 'pitch' in n]
+                distinct = len(set(pitches)) if pitches else 0
+                # Longest consecutive same-pitch run
+                longest_run = 0
+                cur_run = 0
+                prev_p = None
+                for p in pitches:
+                    if p == prev_p:
+                        cur_run += 1
+                    else:
+                        cur_run = 1
+                        prev_p = p
+                    if cur_run > longest_run:
+                        longest_run = cur_run
+                # Role-based thresholds
+                monotone_roles = {"spoken","whisper","hum","vowels","vocal_fx","chant","tag"}
+                need_variety = role_for_var not in monotone_roles
+                max_run_allowed = 2 if (role_for_var == 'chorus') else 3
+                # Root/tess center proximity check
+                center_ref = hint_tess if isinstance(hint_tess, int) else root_note
+                center_off_ok = True
+                try:
+                    if pitches:
+                        med = sorted(pitches)[len(pitches)//2]
+                        center_off_ok = (abs(int(med) - int(center_ref)) <= max(4, int(hint_span or 5)))
+                except Exception:
+                    center_off_ok = True
+                variety_ok = True
+                if need_variety and distinct < 2:
+                    variety_ok = False
+                if need_variety and longest_run > max_run_allowed:
+                    variety_ok = False
+                # discourage pathological all-60 when center/root suggests otherwise
+                if pitches and all(p == 60 for p in pitches) and int(center_ref) != 60:
+                    variety_ok = False
+                # Token-note mapping sanity: penalize huge mismatch (prevents '-' floods at export)
+                if isinstance(tokens_chk, list) and isinstance(notes_chk, list) and len(tokens_chk) >= 1 and len(notes_chk) >= 1:
+                    ratio = len(notes_chk) / max(1, len(tokens_chk))
+                    if ratio > 1.8 and role_for_var not in {"vowels","vocal_fx","hum","chant"}:
+                        variety_ok = False
+                if variety_ok:
+                    return obj
+                # Attempt up to 2 guided repairs to increase pitch variety
+                guide = "\nVARIETY/MAPPING FIX (hard): Increase pitch variety for role='" + str(role_for_var) + "'. " \
+                        + (f"Center around tessitura_center={center_ref}; " if isinstance(center_ref, (int,float)) else "") \
+                        + "prefer chord tones of CONTEXT TRACKS; keep tokens/durations similar; avoid large leaps; maintain mapping order. " \
+                        + (f"Allow at most {max_run_allowed} identical consecutive content pitches." if need_variety else "Use 1–2 pitch cells near center, not constant 60.")
+                # If mapping mismatch is high, also request light merges to reduce note count toward token count.
+                if isinstance(tokens_chk, list) and isinstance(notes_chk, list) and len(tokens_chk) >= 1 and len(notes_chk) >= 1:
+                    ratio = len(notes_chk) / max(1, len(tokens_chk))
+                    if ratio > 1.8:
+                        guide += " Reduce number of notes by merging adjacent short notes on same pitch into longer sustains so that note count approaches token count."
+                for _ in range(2):
+                    obj_fix = _call_with_rotation_comp(prompt + guide)
+                    ok_fix, _ = _validate_stage2_obj(obj_fix or {})
+                    if not ok_fix:
+                        continue
+                    notes_fix = obj_fix.get('notes') if isinstance(obj_fix, dict) else []
+                    pitches_fix = [int(n.get('pitch', 60)) for n in (notes_fix or []) if isinstance(n, dict) and 'pitch' in n]
+                    distinct_fix = len(set(pitches_fix)) if pitches_fix else 0
+                    # recompute longest run
+                    longest_run_fix = 0
+                    cur_run = 0
+                    prev_p = None
+                    for p in pitches_fix:
+                        if p == prev_p:
+                            cur_run += 1
+                        else:
+                            cur_run = 1
+                            prev_p = p
+                        if cur_run > longest_run_fix:
+                            longest_run_fix = cur_run
+                    variety_ok2 = True
+                    if need_variety and distinct_fix < 2:
+                        variety_ok2 = False
+                    if need_variety and longest_run_fix > max_run_allowed:
+                        variety_ok2 = False
+                    if pitches_fix and all(p == 60 for p in pitches_fix) and int(center_ref) != 60:
+                        variety_ok2 = False
+                    if variety_ok2:
+                        return obj_fix
+            except Exception:
+                pass
             return obj
         try:
             print(Fore.YELLOW + f"[Stage-2] Invalid schema: {reason}" + Style.RESET_ALL)
@@ -3338,9 +4026,11 @@ def _propose_lyric_note_adjustments(config: Dict, genre: str, inspiration: str, 
     except Exception:
         return {}
     try:
-        # Use session override if available, otherwise config
+        # Use session override if available, otherwise config (no flash fallback)
         global SESSION_MODEL_OVERRIDE
-        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+        if not model_name:
+            model_name = "gemini-2.5-pro"
         generation_config = {"response_mime_type": "application/json", "temperature": float(config.get("lyrics_temperature", config.get("temperature", 0.6)))}
         model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
         # Compute simple stress flags (strong on bar starts and mid-beat in even meters)
@@ -3549,9 +4239,11 @@ def _analyze_user_prompt(config: Dict, genre: str, inspiration: str, user_prompt
     except Exception:
         return {}
     try:
-        # Use session override if available, otherwise config
+        # Use session override if available, otherwise config (no flash fallback)
         global SESSION_MODEL_OVERRIDE
-        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name", "gemini-2.5-flash")
+        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name")
+        if not model_name:
+            model_name = "gemini-2.5-pro"
         generation_config = {"response_mime_type": "application/json", "temperature": float(config.get("plan_temperature", config.get("lyrics_temperature", config.get("temperature", 0.4))))}
         try:
             if isinstance(config.get("max_output_tokens"), int):
@@ -3790,14 +4482,14 @@ def _apply_note_adjustments_conservative(notes: List[Dict], tokens: List[str], p
     except Exception:
         return notes, tokens
 # --- OpenUtau UST Export (helper) ---
-def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllables_per_theme: List[List[str]], ts: Dict, bpm: float | int, output_path: str, section_length_bars: int | float | None = None) -> bool:
+def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int, syllables_per_theme: List[List[str]], ts: Dict, bpm: float | int, output_path: str, section_length_bars: int | float | None = None) -> bool:
     """
     Write a minimal UST file for OpenUtau for one track across all themes.
     Simplified version to avoid duplicates and ensure proper note lengths.
     """
     try:
-        # Use quarter-note beat as base for tick conversion to keep song length consistent
-        ticks_per_unit = TICKS_PER_BEAT
+        # Use quarter-note beats consistently for all timing; 1 beat = 1 quarter
+        ticks_per_unit = int(TICKS_PER_BEAT)
         lines = []
         lines.append("[#VERSION]")
         lines.append("UST Version=1.20")
@@ -3808,42 +4500,43 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         lines.append("Mode2=True")
         lines.append(f"TimeBase={TICKS_PER_BEAT}")
 
-        # Internal: sanitize lyric token for UST/SynthV export
-        def _sanitize_ust_token(token: str) -> str:
+        # Internal: sanitize lyric token for UST/SynthV export (aware of previous content)
+        def _sanitize_ust_token(token: str, *, prev_was_content: bool) -> str:
             try:
                 t = (token or '').strip()
                 if not t:
-                    return 'R'
+                    return '-' if prev_was_content else 'R'
                 # Strip brackets/quotes
-                for ch in ['(', ')', '[', ']', '{', '}', '"', '"', '"', ''', ''']:
+                for ch in ['(', ')', '[', ']', '{', '}', '"', '“', '”', '‘', '’']:
                     t = t.replace(ch, '')
                 t = t.strip()
                 if not t:
-                    return 'R'
+                    return '-' if prev_was_content else 'R'
                 # Collapse lingering hyphens
                 t = t.replace('--', '-')
                 if t == '-':
                     return '-'
-                # Very short consonant-only artifacts → prefer rest
+                # Very short consonant-only artifacts → prefer sustain if continuing, else rest
                 import re
                 if re.fullmatch(r"[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]", t):
-                    return 'R'
+                    return '-' if prev_was_content else 'R'
                 return t
             except Exception:
-                return 'R'
+                return '-' if prev_was_content else 'R'
 
         beats_per_bar = float(ts.get('beats_per_bar', 4.0))
         
-        # Calculate section length
-        if section_length_bars is not None:
-            section_len_beats = float(section_length_bars) * beats_per_bar
-        else:
-            section_len_beats = beats_per_bar * 8.0
+        # Calculate section length (STRICT): require explicit section_length_bars
+        if section_length_bars is None or float(section_length_bars) <= 0:
+            raise ValueError("UST export requires section_length_bars; got None/<=0")
+        section_len_beats = float(section_length_bars) * beats_per_bar
         
         note_blocks = []
         
         # Absolute timeline in beats; we emit rests to preserve spacing between parts/notes
         current_beat = 0.0
+        # Cursor für absolute Position (für partgenaues Auffüllen)
+        abs_cursor_beats = 0.0
         
         # Process each part sequentially - ensure we process ALL parts from loaded JSON
         total_parts = len(themes) if themes else 0
@@ -3853,130 +4546,221 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
             th = themes[part_idx] if part_idx < len(themes) else {}
             trks = th.get('tracks', []) or []
             part_start = float(part_idx) * float(section_len_beats)
-            # Detect role of selected track (if available)
+            # Harte Partgrenzen (absolut, in Viertel-Noten-Beats)
+            part_start_abs = float(part_idx) * float(section_len_beats)
+            part_end_abs = float(part_idx + 1) * float(section_len_beats)
+            # Strikt: genau den übergebenen Track verwenden; kein heuristisches Umschalten
             role_norm = None
             if 0 <= track_index < len(trks):
                 try:
                     role_norm = str(trks[track_index].get('role','')).strip().lower() or None
                 except Exception:
                     role_norm = None
+            target_idx = track_index if (0 <= track_index < len(trks)) else -1
 
-            if not (0 <= track_index < len(trks)):
-                # Fill entire part as rest to maintain song timeline
-                if current_beat < part_start:
-                    gap = part_start - current_beat
-                    if gap > 0.0:
-                        if note_blocks and note_blocks[-1]["Lyric"] == "R":
-                            note_blocks[-1]["Length"] += int(round(gap * ticks_per_unit))
+            if not (0 <= target_idx < len(trks)):
+                # Vollständigen Part als Rest ausgeben – konsistent über abs_cursor_beats
+                # Rest bis Partbeginn
+                if abs_cursor_beats < part_start_abs - 1e-6:
+                    gap_to_part = part_start_abs - abs_cursor_beats
+                    rest_ticks = int(round(gap_to_part * ticks_per_unit))
+                    if rest_ticks > 0:
+                        if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                            note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
                         else:
-                            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap * ticks_per_unit))})
-                    current_beat = part_start
-                if note_blocks and note_blocks[-1]["Lyric"] == "R":
-                    note_blocks[-1]["Length"] += int(round(section_len_beats * ticks_per_unit))
+                            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                    abs_cursor_beats = part_start_abs
+                # Rest für die komplette Partlänge
+                full_part_ticks = int(round(section_len_beats * ticks_per_unit))
+                if full_part_ticks > 0:
+                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + full_part_ticks)
                 else:
-                    note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(section_len_beats * ticks_per_unit))})
-                current_beat = part_start + section_len_beats
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": full_part_ticks})
+                abs_cursor_beats = part_end_abs
                 continue
             
-            notes_loc = sorted(trks[track_index].get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
-            toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
+            notes_loc = sorted(trks[target_idx].get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
+            # Prefer tokens directly from the selected track to avoid index mismatches across parts
+            toks_loc = []
+            try:
+                toks_loc = trks[target_idx].get('lyrics') or trks[target_idx].get('tokens') or []
+            except Exception:
+                toks_loc = []
+            if not toks_loc:
+                toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
 
-            # Ensure tokens length covers notes; rests will not consume tokens
-            if len(toks_loc) < len(notes_loc):
-                toks_loc = list(toks_loc) + ['-'] * (len(notes_loc) - len(toks_loc))
+            # force_silence nur bei explizitem Flag erzwingen (String oder numerisch)
+            force_silence = False
+            try:
+                hint_theme = str(th.get('plan_hint', '') or '')
+                hint_track = ''
+                try:
+                    hint_track = str(trks[target_idx].get('plan_hint', '') or '') if (0 <= target_idx < len(trks)) else ''
+                except Exception:
+                    hint_track = ''
+                hint_all = (hint_theme + ' ' + hint_track).replace(' ', '').lower()
+                if 'force_silence=1' in hint_all:
+                    force_silence = True
+                # Zusätzlich: numerische Flags am Theme/Track berücksichtigen
+                if not force_silence:
+                    fs_theme = th.get('force_silence')
+                    fs_track = (trks[target_idx].get('force_silence') if (0 <= target_idx < len(trks)) else None)
+                    if fs_theme in (1, True, '1', 'true') or fs_track in (1, True, '1', 'true'):
+                        force_silence = True
+            except Exception:
+                force_silence = False
 
-            # If no notes for this part, emit a part-length rest to preserve spacing
-            if not notes_loc:
-                # Bring timeline up to part_start, then fill part
-                if current_beat < part_start:
-                    gap = part_start - current_beat
-                    if gap > 0.0:
-                        if note_blocks and note_blocks[-1]["Lyric"] == "R":
-                            note_blocks[-1]["Length"] += int(round(gap * ticks_per_unit))
+            # Do NOT pad tokens with '-' to cover extra notes; extra notes will be treated as continuations
+
+            # If no notes for this part, handle based on silence type
+            if not notes_loc or force_silence:
+                if force_silence or not toks_loc:
+                    # Vollständige Stille → exakt auf Partgrenzen mit 'R' füllen (ohne Doppel-Padding)
+                    # Rest bis Partbeginn (falls nötig)
+                    if abs_cursor_beats < part_start_abs - 1e-6:
+                        gap_to_part = part_start_abs - abs_cursor_beats
+                        rest_ticks = int(round(gap_to_part * ticks_per_unit))
+                        if rest_ticks > 0:
+                            if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                                note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
                         else:
-                            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap * ticks_per_unit))})
-                    current_beat = part_start
-                if note_blocks and note_blocks[-1]["Lyric"] == "R":
-                    note_blocks[-1]["Length"] += int(round(section_len_beats * ticks_per_unit))
+                                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                        abs_cursor_beats = part_start_abs
+                    # Rest für komplette Partlänge
+                    full_part_ticks = int(round((part_end_abs - abs_cursor_beats) * ticks_per_unit))
+                    if full_part_ticks > 0:
+                        if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                            note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + full_part_ticks)
                 else:
-                    note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(section_len_beats * ticks_per_unit))})
+                    note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": full_part_ticks})
+                abs_cursor_beats = part_end_abs
+                continue
+                # Keine Noten, aber Tokens vorhanden: gleichmäßig verteilen
+                slots = max(1, len(toks_loc))
+                slot_beats = max(section_len_beats / float(slots), 0.25)
+                abs_start_token = part_start_abs
+                for tok in toks_loc:
+                    lyric_str = _sanitize_ust_token(str(tok), prev_was_content=False)
+                    dur_beats = min(slot_beats, max(0.25, (part_start_abs + section_len_beats) - abs_start_token))
+                    note_ticks = int(round(dur_beats * ticks_per_unit))
+                    note_blocks.append({"Lyric": lyric_str if lyric_str not in ('', None) else 'R', "NoteNum": 67, "Length": max(120, note_ticks)})
+                    abs_start_token += slot_beats
+                    current_beat = part_start + (abs_start_token - part_start_abs)
+                    abs_cursor_beats = max(abs_cursor_beats, abs_start_token)
+                if abs_start_token < part_start_abs + section_len_beats - 1e-6:
+                    tail_ticks = int(round(((part_start_abs + section_len_beats) - abs_start_token) * ticks_per_unit))
+                    if tail_ticks > 0:
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": tail_ticks})
                 current_beat = part_start + section_len_beats
+                abs_cursor_beats = max(abs_cursor_beats, part_start_abs + section_len_beats)
                 continue
 
-            # Ensure we are at least at this part's start
-            if current_beat < part_start:
-                gap_to_part = part_start - current_beat
-                if gap_to_part > 0.0:
-                    if note_blocks and note_blocks[-1]["Lyric"] == "R":
-                        note_blocks[-1]["Length"] += int(round(gap_to_part * ticks_per_unit))
-                    else:
-                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap_to_part * ticks_per_unit))})
-                current_beat = part_start
+            # STRIKT: Pro Part genau section_len_beats abbilden (8 Bars)
+            # (part_start_abs/part_end_abs sind oben bereits definiert)
 
-            # Emit notes and needed rests before each note to align absolute starts
+            # Ensure we are at least at this part's start
+            if abs_cursor_beats < part_start_abs - 1e-6:
+                gap_to_part = part_start_abs - abs_cursor_beats
+                rest_ticks = int(round(gap_to_part * ticks_per_unit))
+                if rest_ticks > 0:
+                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
+                    else:
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                current_beat = part_start
+                abs_cursor_beats = part_start_abs
+
+            # Cursor bis zum Partbeginn auffüllen
+            if abs_cursor_beats < part_start_abs - 1e-6:
+                gap_to_part = part_start_abs - abs_cursor_beats
+                rest_ticks = int(round(gap_to_part * ticks_per_unit))
+                if rest_ticks > 0:
+                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
+                    else:
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                abs_cursor_beats = part_start_abs
+
+            # Erkennen, ob Noten absolute Starts enthalten (statt partrelativ)
+            is_absolute = False
+            try:
+                if notes_loc:
+                    min_local_start = min(float(x.get('start_beat', 0.0)) for x in notes_loc)
+                    is_absolute = (min_local_start >= (section_len_beats * 0.5))
+            except Exception:
+                is_absolute = False
+
+            # Noten in Part-Koordinaten verarbeiten
             tok_i = 0
+            prev_was_content = False
+            SMALL_GAP_BEATS = 1.0/4.0
             for n in notes_loc:
                 try:
-                    local_start = float(n.get('start_beat', 0.0))
-                    d = max(0.0, float(n.get('duration_beats', 0.0)))
+                    local_start = max(0.0, float(n.get('start_beat', 0.0)))
+                    d_beats = max(0.0, float(n.get('duration_beats', 0.0)))
                     p = int(n.get('pitch', 60))
-
-                    abs_start = part_start + max(0.0, local_start)
-                    # Emit rest if there is a gap to the next note start
-                    if abs_start > current_beat:
-                        gap = abs_start - current_beat
-                        # Merge micro-gaps by extending previous note if very small
-                        if gap <= small_gap_units and note_blocks and note_blocks[-1]["Lyric"] != "R":
-                            note_blocks[-1]["Length"] += int(round(gap * ticks_per_unit))
-                            current_beat = abs_start
+                    abs_start = (local_start if is_absolute else (part_start_abs + local_start))
+                    if abs_start >= part_end_abs - 1e-6:
+                        break
+                    # Rest bis Notenstart
+                    if abs_cursor_beats < abs_start - 1e-6:
+                        gap = abs_start - abs_cursor_beats
+                        rest_ticks = int(round(gap * ticks_per_unit))
+                        if rest_ticks > 0:
+                            if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                                note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
                         else:
-                            if note_blocks and note_blocks[-1]["Lyric"] == "R":
-                                note_blocks[-1]["Length"] += int(round(gap * ticks_per_unit))
-                            else:
-                                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap * ticks_per_unit))})
-                            current_beat = abs_start
-
-                    # Prepare lyric for this note (consume one token if available)
+                                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                        abs_cursor_beats = abs_start
+                    # Token wählen
                     lyr_tok = toks_loc[tok_i] if tok_i < len(toks_loc) else '-'
-                    tok_i += 1
-                    # Rely on model-provided token; exporter does not invent content
-                    raw_token = (str(lyr_tok) if lyr_tok is not None else '').strip()
-                    lyr = _sanitize_ust_token(raw_token)
-
-                    # Clamp duration to remaining time in this part
-                    part_end = part_start + section_len_beats
-                    remaining = max(0.0, part_end - current_beat)
-                    d = max(0.0, min(d, remaining))
-                    if d <= 0.0:
+                    tok_i += 1 if tok_i < len(toks_loc) else 0
+                    raw = (str(lyr_tok) if lyr_tok is not None else '').strip()
+                    # Dauer an Partende begrenzen
+                    d_beats = min(d_beats, max(0.0, part_end_abs - abs_start))
+                    if d_beats <= 0.0:
                         continue
-                    # Clamp pitch and length
-                    ltk = max(120, int(round(d * ticks_per_unit)))
-                    # Note lengths remain as composed; no role-based shortening
-                    # Slightly higher airy range
-                    clamped_pitch = max(60, min(p, 79))
-                    # Merge '-' as extension of previous content instead of new note
-                    if lyr == '-' and note_blocks:
-                        if note_blocks[-1].get('Lyric') not in ('-', 'R'):
-                            note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + ltk)
+                    note_ticks = max(120, int(round(d_beats * ticks_per_unit)))
+                    # Dynamische Clamp um Center, falls verfügbar (nutze tessitura_center aus Plan-Track, sonst Standard)
+                    try:
+                        center_ref = None
+                        if 0 <= target_idx < len(trks):
+                            center_ref = trks[target_idx].get('tessitura_center')
+                            if isinstance(center_ref, str) and center_ref.isdigit():
+                                center_ref = int(center_ref)
+                        if isinstance(center_ref, (int, float)):
+                            lo = int(max(36, center_ref - 12))
+                            hi = int(min(96, center_ref + 12))
+                            clamped_pitch = max(lo, min(p, hi))
                         else:
-                            # If previous is not content, fall back to a rest of equivalent length
-                            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": ltk})
+                            clamped_pitch = max(MIDI_NOTE_C4, min(p, MIDI_NOTE_G5))
+                    except Exception:
+                        clamped_pitch = max(MIDI_NOTE_C4, min(p, MIDI_NOTE_G5))
+                    # '-' verlängert vorherigen Content; sonst neuen Block
+                    if raw == '-':
+                        if note_blocks and note_blocks[-1].get('Lyric') not in ('-', 'R'):
+                            note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + note_ticks)
+                        else:
+                            note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": note_ticks})
+                        prev_was_content = False
                     else:
-                        note_blocks.append({"Lyric": lyr, "NoteNum": clamped_pitch, "Length": ltk})
-                    current_beat += d
+                        lyric_str = _sanitize_ust_token(raw, prev_was_content=prev_was_content)
+                        prev_was_content = (lyric_str not in ('-', 'R'))
+                        note_blocks.append({"Lyric": lyric_str, "NoteNum": clamped_pitch, "Length": note_ticks})
+                    abs_cursor_beats = min(part_end_abs, abs_start + d_beats)
                 except Exception:
                     continue
 
-            # If the part has leftover time after the last note, pad with a rest up to part end
-            part_end = part_start + section_len_beats
-            if current_beat < part_end:
-                gap_tail = part_end - current_beat
-                if gap_tail > 0.0:
-                    if note_blocks and note_blocks[-1]["Lyric"] == "R":
-                        note_blocks[-1]["Length"] += int(round(gap_tail * ticks_per_unit))
+            # Part bis zum Ende mit Rest auffüllen
+            if abs_cursor_beats < part_end_abs - 1e-6:
+                rest_ticks_tail = int(round((part_end_abs - abs_cursor_beats) * ticks_per_unit))
+                if rest_ticks_tail > 0:
+                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks_tail)
                     else:
-                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": int(round(gap_tail * ticks_per_unit))})
-                current_beat = part_end
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks_tail})
+                abs_cursor_beats = part_end_abs
         
         # If still empty, add a minimal rest
         if not note_blocks:
@@ -3998,6 +4782,34 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         lines.append("VoiceDir=")
         lines.append("[#TRACKEND]")
 
+        # Final padding to enforce exact total song length in UST timeline
+        try:
+            total_parts = len(themes) if isinstance(themes, list) else 0
+            bpb_loc = int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
+            total_song_beats = float(total_parts) * float(section_length_bars) * float(bpb_loc)
+            if abs_cursor_beats < total_song_beats - 1e-6:
+                tail_ticks = int(round((total_song_beats - abs_cursor_beats) * ticks_per_unit))
+                if tail_ticks > 0:
+                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + tail_ticks)
+                    else:
+                        # Append tail rest
+                        lines.append(f"[#NOTE{len(note_blocks):04d}]")
+                        lines.append(f"Length={tail_ticks}")
+                        lines.append("Lyric=R")
+                        lines.append("NoteNum=60")
+                        lines.append("Intensity=100")
+                        lines.append("Modulation=0")
+        except Exception:
+            pass
+
+        # Diagnostics: log export parameters for bar math transparency
+        try:
+            total_parts = len(themes) if isinstance(themes, list) else 0
+            bpb_loc = int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
+            print(Style.DIM + f"[Export] parts={total_parts}, part_length_bars={section_length_bars}, beats_per_bar={bpb_loc}, total_bars={int(total_parts*float(section_length_bars))}" + Style.RESET_ALL)
+        except Exception:
+            pass
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(lines))
         print(Fore.GREEN + f"Exported UST: {output_path}" + Style.RESET_ALL)
@@ -4055,34 +4867,18 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         current_index = 0
         abs_cursor_beats = 0.0
         beats_per_bar = int(ts.get('beats_per_bar', 4))
-        # Determine section length (beats); if provided via section_length_bars, use deterministically
-        section_length_beats = None
+        # Determine section length (beats); prefer explicit bars, else fallback to 8 bars
         try:
             bpb = int(ts.get('beats_per_bar', 4))
-            if isinstance(section_length_bars, (int, float)) and float(section_length_bars) > 0:
-                section_length_beats = float(section_length_bars) * float(bpb)
-            else:
-                # Heuristik (Fallback): Median der Part-Dauern in Part 1 über alle Tracks
-                durations = []
-            if themes and themes[0].get('tracks'):
-                for tr in themes[0]['tracks']:
-                        notes0 = tr.get('notes', []) or []
-                        if notes0:
-                            starts = [float(x.get('start_beat', 0.0)) for x in notes0]
-                            ends = [float(x.get('start_beat', 0.0)) + max(0.0, float(x.get('duration_beats', 0.0))) for x in notes0]
-                            dur = max(ends) - min(starts)
-                            if dur > 0:
-                                durations.append(dur)
-                if durations:
-                    durations.sort()
-                    mid = durations[len(durations)//2]
-                    bars = max(1, int(round(mid / max(1, bpb))))
-                    bars = max(2, min(bars, 32))
-                    section_length_beats = float(bars * bpb)
         except Exception:
-            section_length_beats = None
+            bpb = 4
+        # STRICT: require provided section_length_bars
+        if not isinstance(section_length_bars, (int, float)) or float(section_length_bars) <= 0:
+            raise ValueError("UST export requires section_length_bars; got None/<=0")
+        # Use quarter-note beats: section length in beats = bars * beats_per_bar
+        section_length_beats = float(section_length_bars) * float(bpb)
 
-        # Absolute/relative: bei gegebener Partlänge strikt relative Offsets verwenden
+        # Absolute/relative: if part length is known, strictly use relative offsets
         treat_as_relative = True
         try:
             if (section_length_bars is None) and section_length_beats is not None and len(themes) >= 2:
@@ -4106,29 +4902,8 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         except Exception:
             treat_as_relative = True
 
-        # Compute total song length in beats. Bei bekannter Partlänge strikt N * section_length_beats
-        song_total_beats = 0.0
-        try:
-            if section_length_beats is not None and isinstance(themes, list) and len(themes) > 0:
-                    song_total_beats = float(len(themes)) * float(section_length_beats)
-            elif section_length_beats is None:
-                # Fallback: konservative Ableitung aus Arrangement, wenn Partlänge unbekannt
-                derived_total = 0.0
-                for pi, th in enumerate(themes or []):
-                    trks_all = th.get('tracks', [])
-                    for ti, tr in enumerate(trks_all):
-                        for n in tr.get('notes', []) or []:
-                            try:
-                                s = float(n.get('start_beat', 0.0))
-                                d = max(0.0, float(n.get('duration_beats', 0.0)))
-                                abs_end = (s + d)
-                                if abs_end > derived_total:
-                                    derived_total = abs_end
-                            except Exception:
-                                continue
-                song_total_beats = float(derived_total)
-        except Exception:
-            song_total_beats = 0.0
+        # Compute total song length in beats strictly by parts
+        song_total_beats = float(max(0, len(themes))) * float(section_length_beats)
 
         # Process each part and find the vocal track
         for part_idx, th in enumerate(themes):
@@ -4150,9 +4925,30 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                     break
             
             if not vocal_track:
-                # No vocal track in this part; advance cursor to the end of the section to keep alignment
+                # No vocal track in this part; emit explicit rest covering this entire part
                 if section_length_beats is not None and treat_as_relative:
-                    abs_cursor_beats = max(abs_cursor_beats, float(part_idx + 1) * float(section_length_beats))
+                    part_start_abs = float(part_idx) * float(section_length_beats)
+                    part_end_abs = float(part_idx + 1) * float(section_length_beats)
+                    # If we're before the part, add rest up to part start
+                    if abs_cursor_beats < part_start_abs - 1e-6:
+                        gap_to_part = part_start_abs - abs_cursor_beats
+                        rest_ticks = int(round(gap_to_part * ticks_per_beat))
+                        if rest_ticks > 0:
+                            if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                                note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
+                            else:
+                                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                        abs_cursor_beats = part_start_abs
+                    # Add a full-part rest (or remaining segment) up to part end
+                    if abs_cursor_beats < part_end_abs - 1e-6:
+                        fill_len = part_end_abs - abs_cursor_beats
+                        rest_ticks = int(round(fill_len * ticks_per_beat))
+                        if rest_ticks > 0:
+                            if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                                note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
+                            else:
+                                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                        abs_cursor_beats = part_end_abs
                 continue
                 
             notes = sorted(vocal_track.get('notes', []), key=lambda n: float(n.get('start_beat', 0.0)))
@@ -4166,9 +4962,30 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                 except Exception:
                     pass
             if not notes:
-                # No notes in this part; advance cursor to the end of the section to keep alignment
+                # No notes in this part; emit explicit rest to preserve full part length
                 if section_length_beats is not None and treat_as_relative:
-                    abs_cursor_beats = max(abs_cursor_beats, float(part_idx + 1) * float(section_length_beats))
+                    part_start_abs = float(part_idx) * float(section_length_beats)
+                    part_end_abs = float(part_idx + 1) * float(section_length_beats)
+                    # If we're before the part, add rest up to part start
+                    if abs_cursor_beats < part_start_abs - 1e-6:
+                        gap_to_part = part_start_abs - abs_cursor_beats
+                        rest_ticks = int(round(gap_to_part * ticks_per_beat))
+                        if rest_ticks > 0:
+                            if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                                note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
+                            else:
+                                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                        abs_cursor_beats = part_start_abs
+                    # Add rest for the entire (remaining) part
+                    if abs_cursor_beats < part_end_abs - 1e-6:
+                        fill_len = part_end_abs - abs_cursor_beats
+                        rest_ticks = int(round(fill_len * ticks_per_beat))
+                        if rest_ticks > 0:
+                            if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                                note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks)
+                            else:
+                                note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks})
+                        abs_cursor_beats = part_end_abs
                 continue
             # Reconcile token count to notes count to avoid dropping parts due to minor mismatches
             if len(sylls) != len(notes):
@@ -4295,19 +5112,40 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
                             pass
                     prev_was_content = (lyric_str != '-' and lyric_str.lower() != 'r')
                     continuation_count = 0
-                # Clamp pitch to a safe singing range; airy default slightly higher
-                note_num = max(60, min(pitch, 79))  # C4 to G5 range
+                # Clamp pitch dynamisch um tessitura_center (falls vorhanden), sonst Standard C4–G5
+                try:
+                    center_ref = None
+                    if 0 <= track_index < len(trks):
+                        center_ref = trks[track_index].get('tessitura_center')
+                        if isinstance(center_ref, str) and center_ref.isdigit():
+                            center_ref = int(center_ref)
+                    if isinstance(center_ref, (int, float)):
+                        lo = int(max(36, center_ref - 12))
+                        hi = int(min(96, center_ref + 12))
+                        note_num = max(lo, min(pitch, hi))
+                    else:
+                        note_num = max(MIDI_NOTE_C4, min(pitch, MIDI_NOTE_G5))
+                except Exception:
+                    note_num = max(MIDI_NOTE_C4, min(pitch, MIDI_NOTE_G5))
                 if note_len_ticks > 0:
                     note_blocks.append({"Lyric": lyric_str, "NoteNum": note_num, "Length": max(5, note_len_ticks)})
                     last_end = max(abs_start + (note_len_ticks / float(ticks_per_beat) if ticks_per_beat else 0.0), last_end)
                 # If we reached the part end, stop this part
                 if part_end_abs is not None and last_end >= part_end_abs - 1e-6:
                     break
+            # Update cursor to last emitted end
             abs_cursor_beats = max(abs_cursor_beats, last_end)
-            # Ensure cursor advances to at least the end of this part to keep parts aligned
+            # Ensure the part fills bis zum Partende: falls noch Rest im Part übrig, füge 'R' bis part_end_abs hinzu
             if part_end_abs is not None and abs_cursor_beats < part_end_abs - 1e-6:
+                gap_to_part_end = max(0.0, part_end_abs - abs_cursor_beats)
+                rest_ticks_tail = int(round(gap_to_part_end * ticks_per_beat))
+                if rest_ticks_tail > 0:
+                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + rest_ticks_tail)
+                    else:
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": rest_ticks_tail})
                 abs_cursor_beats = part_end_abs
-                # Continue processing all parts - don't stop early based on song length
+            # Continue processing all parts - don't stop early based on song length
 
             
 
@@ -4328,62 +5166,17 @@ def _export_openutau_ust_for_track(themes: List[Dict], track_index: int, syllabl
         except Exception:
             pass
 
-        # If we have a known song length, ensure track ends exactly there by adding a final rest if needed
+        # Ensure full song length coverage – falls Cursor < gesamter Songlänge, padde mit Rest bis exakt song_total_beats
         try:
             if song_total_beats and abs_cursor_beats < song_total_beats - 1e-6:
                 tail_rest_ticks = int(round((song_total_beats - abs_cursor_beats) * ticks_per_beat))
                 if tail_rest_ticks > 0:
-                    note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": tail_rest_ticks})
+                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
+                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + tail_rest_ticks)
+                    else:
+                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": tail_rest_ticks})
         except Exception:
             pass
-
-        # Always ensure full song length coverage - add silence for parts without vocals
-        try:
-            bpb_local = int(ts.get('beats_per_bar', 4))
-        except Exception:
-            bpb_local = 4
-        try:
-            section_len_loc = float(section_length_beats or (bpb_local * 8))
-        except Exception:
-            section_len_loc = float(bpb_local * 8)
-        
-        # Calculate total song length
-        total_song_beats = len(themes) * section_len_loc
-        
-        # Process each part to ensure full coverage
-        for part_idx, th in enumerate(themes or []):
-            trks = th.get('tracks', []) or []
-            if not (0 <= track_index < len(trks)):
-                # Skip missing track - no notes needed
-                continue
-                
-            notes_loc = sorted(trks[track_index].get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
-            # Use syllables_per_theme for this part (guaranteed to exist for all 16 parts)
-            toks_loc = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
-            
-            if not (notes_loc and toks_loc):
-                # Skip part without vocals - no notes needed
-                continue
-                
-            if len(toks_loc) < len(notes_loc):
-                # pad with '-' to align
-                toks_loc = list(toks_loc) + ['-'] * (len(notes_loc) - len(toks_loc))
-            part_off = float(part_idx) * section_len_loc
-            for n, tkn in zip(notes_loc, toks_loc):
-                try:
-                    s = float(n.get('start_beat', 0.0)) + part_off
-                    d = max(0.0, float(n.get('duration_beats', 0.0)))
-                    p = int(n.get('pitch', 60))
-                    # Ensure minimum note length for UST compatibility (120ms = 5 ticks at 125 BPM)
-                    ltk = max(120, int(round(d * ticks_per_beat)))  # Minimum 120 ticks (250ms) for better musicality
-                    lyr = _sanitize_ust_token(str(tkn), prev_was_content=True)
-                    if lyr in ('', None):
-                        lyr = '-'
-                    # Clamp pitch to realistic range and ensure valid note
-                    clamped_pitch = max(48, min(p, 72))  # C3 to C5 range for better musicality
-                    note_blocks.append({"Lyric": lyr, "NoteNum": clamped_pitch, "Length": ltk})
-                except Exception:
-                    continue
         
         # If still empty, add a minimal rest to make the UST loadable
         if not note_blocks:
@@ -4512,9 +5305,13 @@ def _create_midi_from_ust(ust_path: str, bpm: float | int, ts: Dict, output_file
             bpb = int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
         except Exception:
             bpb = 4
+        try:
+            bval = int(ts.get('beat_value', 4)) if isinstance(ts, dict) else 4
+        except Exception:
+            bval = 4
         midi = MIDIFile(1, removeDuplicates=True, deinterleave=False)
         midi.addTempo(track=0, time=0, tempo=float(bpm))
-        midi.addTimeSignature(track=0, time=0, numerator=bpb, denominator=4, clocks_per_tick=24)
+        midi.addTimeSignature(track=0, time=0, numerator=bpb, denominator=bval, clocks_per_tick=24)
 
         current_ticks = 0
         for is_rest, note_num, length_ticks in notes:
@@ -4524,6 +5321,12 @@ def _create_midi_from_ust(ust_path: str, bpm: float | int, ts: Dict, output_file
                 if not is_rest:
                     midi.addNote(track=0, channel=0, pitch=int(note_num), time=time_beats, duration=dur_beats, volume=100)
                 current_ticks += length_ticks
+        
+        # Ensure MIDI file has correct total length
+        total_beats = float(current_ticks) / float(TICKS_PER_BEAT)
+        if total_beats > 0:
+            # Add a silent note at the end to ensure correct length
+            midi.addNote(track=0, channel=0, pitch=60, time=total_beats, duration=0.1, volume=0)
 
         # If there are no note events at all, do not write an empty MIDI
         try:
@@ -4756,6 +5559,28 @@ DEFAULT_LENGTH = 16
 init(autoreset=True)
 # Cap for embedding context notes into prompts; too many causes malformed JSON on some models
 MAX_NOTES_IN_CONTEXT = 500
+
+# MIDI Constants
+MIDI_NOTE_C4 = 60
+MIDI_NOTE_G5 = 79
+MIDI_NOTE_C3 = 48
+MIDI_NOTE_C6 = 84
+MIDI_MIN_NOTE = 36
+MIDI_MAX_NOTE = 96
+
+# Timing Constants
+DEFAULT_RETRY_DELAY = 3
+MAX_RETRY_DELAY = 30
+QUOTA_RETRY_DELAY = 3600
+SHORT_RETRY_DELAY = 0.5
+
+# Token Constants
+DEFAULT_MAX_TOKENS = 8192
+MAX_MAX_TOKENS = 65536
+
+# Retry Constants
+DEFAULT_MAX_RETRIES = 6
+MAX_FAILURE_CYCLES = 10
 
 # Constants
 GENERATED_CODE_FILE = os.path.join(script_dir, "generated_code.py")
@@ -5569,25 +6394,31 @@ def _synthesize_notes_from_tokens(tokens: List[str], grid_notes: List[Dict], ts:
             # clamp to section
             if start + dur > total_beats:
                 dur = max(0.25, total_beats - start)
-            # rough pitch: map bar index to scale degree
-            bar = int(start // max(1, beats_per_bar))
-            degree = [0, 2, 4, 5, 7, 9, 11][bar % 7]
-            # choose root from key_scale if available
-            midi_root = 60
+            # Use tessitura_center from plan_hint if available, otherwise derive from key_scale
+            tessitura_center = 60  # Default fallback
             try:
-                ks = str(key_scale or '').lower()
-                roots = {
-                    'c': 60, 'c#': 61, 'db': 61, 'd': 62, 'd#': 63, 'eb': 63, 'e': 64,
-                    'f': 65, 'f#': 66, 'gb': 66, 'g': 67, 'g#': 68, 'ab': 68, 'a': 69,
-                    'a#': 70, 'bb': 70, 'b': 71
-                }
-                for r in roots.keys():
-                    if ks.startswith(r):
-                        midi_root = roots[r]
-                        break
+                # Try to get tessitura_center from the track's plan_hint
+                if hasattr(grid_notes[i], 'get') and 'tessitura_center' in grid_notes[i]:
+                    tessitura_center = int(grid_notes[i].get('tessitura_center', 60))
+                else:
+                    # Fallback: derive from key_scale
+                    ks = str(key_scale or '').lower()
+                    roots = {
+                        'c': 60, 'c#': 61, 'db': 61, 'd': 62, 'd#': 63, 'eb': 63, 'e': 64,
+                        'f': 65, 'f#': 66, 'gb': 66, 'g': 67, 'g#': 68, 'ab': 68, 'a': 69,
+                        'a#': 70, 'bb': 70, 'b': 71
+                    }
+                    for r in roots.keys():
+                        if ks.startswith(r):
+                            tessitura_center = roots[r]
+                            break
             except Exception:
-                midi_root = 60
-            pitch = max(48, min(84, midi_root + degree))
+                tessitura_center = 60
+            
+            # For monotone roles, use tessitura_center directly with small variation
+            # Add subtle variation: ±1-2 semitones around center
+            variation = (i % 3) - 1  # -1, 0, or +1 semitone variation
+            pitch = max(MIDI_NOTE_C3, min(MIDI_NOTE_C6, tessitura_center + variation))
             notes_out.append({"start_beat": round(start, 6), "duration_beats": round(dur, 6), "pitch": int(pitch)})
             i = j
         else:
@@ -6084,8 +6915,14 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
     # Local model override for this step (interactive switch on repeated failures)
     local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
     try:
-        origin = "session default" if SESSION_MODEL_OVERRIDE else "config default"
-        print(Fore.CYAN + f"Model for this step: {local_model_name} ({origin}). Press 1/2/3 to switch for THIS step only; press 0 to set current as session default." + Style.RESET_ALL)
+        cfg_model_name = str(config.get("model_name", "gemini-2.5-pro"))
+        if SESSION_MODEL_OVERRIDE and local_model_name == SESSION_MODEL_OVERRIDE:
+            origin = "session override"
+        elif local_model_name == cfg_model_name:
+            origin = "config default"
+        else:
+            origin = "hotkey"
+        print(Fore.CYAN + f"Model for this step: {local_model_name} ({origin}; config={cfg_model_name}). Press 1/2/3 to switch for THIS step only; press 0 to set current as session default." + Style.RESET_ALL)
     except Exception:
         pass
     json_failure_count = 0
@@ -6115,7 +6952,16 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
     REDUCE_CONTEXT_HALVES = 0
     LAST_CONTEXT_COUNT = 0
     # Show hotkey hint once before we start attempts
-    print_hotkey_hint(config, context=f"Generate: {instrument_name}")
+    # Dynamic hotkey hint reflecting config model and alternate
+    try:
+        cfg_model_name = str(config.get("model_name", "gemini-2.5-pro"))
+        alt_model_name = "gemini-2.5-flash" if cfg_model_name != "gemini-2.5-flash" else "gemini-2.5-pro"
+        print(Fore.CYAN + (
+            f"Hotkeys [Generate: {instrument_name}]: 1={cfg_model_name} (this step), 2={alt_model_name} (this step), 3=custom (this step), 0=set session default, "
+            f"h=halve context (this step), a=auto-escalate (flash→pro after {AUTO_ESCALATE_THRESHOLD} fails [OFF]), d=defer track, r=reset cooldowns"
+        ) + Style.RESET_ALL)
+    except Exception:
+        print_hotkey_hint(config, context=f"Generate: {instrument_name}")
     # Start background hotkey monitor once per process
     global HOTKEY_MONITOR_STARTED
     if not HOTKEY_MONITOR_STARTED:
@@ -6140,15 +6986,21 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
             try:
                 # Offer one-key model switch without blocking
                 if sys.platform == "win32":
-                    print(Fore.CYAN + "Press 1=pro, 2=flash, 3=custom (custom_model_name), s=skip wait; waiting..." + Style.RESET_ALL)
+                    try:
+                        cfg_model_name = str(config.get("model_name", "gemini-2.5-pro"))
+                        alt_model_name = "gemini-2.5-flash" if cfg_model_name != "gemini-2.5-flash" else "gemini-2.5-pro"
+                        print(Fore.CYAN + f"Press 1={cfg_model_name}, 2={alt_model_name}, 3=custom (custom_model_name), s=skip wait; waiting..." + Style.RESET_ALL)
+                    except Exception:
+                        print(Fore.CYAN + "Press 1=pro, 2=flash, 3=custom (custom_model_name), s=skip wait; waiting..." + Style.RESET_ALL)
                     end_t = time.time() + max(0.0, wait_time)
                     while time.time() < end_t:
                         if msvcrt.kbhit():
                             ch = msvcrt.getch().decode().lower()
                             if ch == '1':
-                                local_model_name = 'gemini-2.5-pro'; print(Fore.YELLOW + "Switching to gemini-2.5-pro (this track)." + Style.RESET_ALL); break
+                                local_model_name = str(config.get("model_name", "gemini-2.5-pro")); print(Fore.YELLOW + f"Switching to {local_model_name} (this track)." + Style.RESET_ALL); break
                             if ch == '2':
-                                local_model_name = 'gemini-2.5-flash'; print(Fore.YELLOW + "Switching to gemini-2.5-flash (this track)." + Style.RESET_ALL); break
+                                alt_model_name = "gemini-2.5-flash" if str(config.get("model_name", "gemini-2.5-pro")) != "gemini-2.5-flash" else "gemini-2.5-pro"
+                                local_model_name = alt_model_name; print(Fore.YELLOW + f"Switching to {local_model_name} (this track)." + Style.RESET_ALL); break
                             if ch == '3':
                                 custom = config.get('custom_model_name')
                                 if custom:
@@ -6167,7 +7019,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                 generation_config = {
                     "temperature": config["temperature"],
                     "response_mime_type": "application/json",
-                    "max_output_tokens": config.get("max_output_tokens", 8192)
+                    "max_output_tokens": config.get("max_output_tokens", DEFAULT_MAX_TOKENS)
                 }
 
                 # Poll persistent hotkey (Windows) to change model instantly
@@ -6364,14 +7216,20 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     if json_failure_count == 2:
                         try:
                             print(Fore.CYAN + "\nModel appears to struggle with strict JSON. Switch model for THIS track only?" + Style.RESET_ALL)
-                            print("  1) gemini-2.5-pro\n  2) gemini-2.5-flash\n  3) custom\n  4) keep current")
+                            try:
+                                cfg_model_name = str(config.get("model_name", "gemini-2.5-pro"))
+                                alt_model_name = "gemini-2.5-flash" if cfg_model_name != "gemini-2.5-flash" else "gemini-2.5-pro"
+                                print(f"  1) {cfg_model_name}\n  2) {alt_model_name}\n  3) custom\n  4) keep current")
+                            except Exception:
+                                print("  1) gemini-2.5-pro\n  2) gemini-2.5-flash\n  3) custom\n  4) keep current")
                             sel = input(Fore.GREEN + "> " + Style.RESET_ALL).strip()
                             if sel == '1':
                                 local_model_name = 'gemini-2.5-pro'
                                 attempt_count = 0
                                 continue
                             elif sel == '2':
-                                local_model_name = 'gemini-2.5-flash'
+                                alt_model_name = "gemini-2.5-flash" if str(config.get("model_name", "gemini-2.5-pro")) != "gemini-2.5-flash" else "gemini-2.5-pro"
+                                local_model_name = alt_model_name
                                 attempt_count = 0
                                 continue
                             elif sel == '3':
@@ -6391,90 +7249,93 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     print(Fore.YELLOW + f"Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
                     time.sleep(wait_time)
                     continue
-                response_data = json.loads(json_payload)
-
-                if isinstance(response_data, dict) and "notes" not in response_data and isinstance(response_data.get("pattern_blocks"), list):
-                    # Accept compact format without explicit notes array
-                    response_data["notes"] = []
-                if not isinstance(response_data, dict) or "notes" not in response_data:
-                    raise TypeError("The generated data is not a valid JSON object with a 'notes' key.")
-
-                notes_list = response_data["notes"]
-                # Optional compact pattern support
                 try:
-                    pattern_blocks = response_data.get("pattern_blocks")
-                    if isinstance(pattern_blocks, list):
-                        expanded = _expand_pattern_blocks(pattern_blocks, length, config["time_signature"]["beats_per_bar"])
-                        if expanded:
-                            if isinstance(notes_list, list):
-                                notes_list = notes_list + expanded
-                            else:
-                                notes_list = expanded
-                except Exception:
-                    pass
-                sustain_events = response_data.get("sustain_pedal", []) # Get sustain events or an empty list
+                    response_data = json.loads(json_payload)
 
-                # --- NEW: Check for special silence signal ---
-                if isinstance(notes_list, list) and len(notes_list) == 1:
-                    note = notes_list[0]
-                    if note.get("pitch") == 0 and note.get("start_beat") == 0 and note.get("duration_beats") == 0 and note.get("velocity") == 0:
-                        print(Fore.GREEN + f"Recognized intentional silence for {instrument_name}. The track will be empty." + Style.RESET_ALL)
-                        return {
+                    if isinstance(response_data, dict) and "notes" not in response_data and isinstance(response_data.get("pattern_blocks"), list):
+                        # Accept compact format without explicit notes array
+                        response_data["notes"] = []
+                    if not isinstance(response_data, dict) or "notes" not in response_data:
+                        raise TypeError("The generated data is not a valid JSON object with a 'notes' key.")
+
+                    notes_list = response_data["notes"]
+                    # Optional compact pattern support
+                    try:
+                        pattern_blocks = response_data.get("pattern_blocks")
+                        if isinstance(pattern_blocks, list):
+                            expanded = _expand_pattern_blocks(pattern_blocks, length, config["time_signature"]["beats_per_bar"])
+                            if expanded:
+                                if isinstance(notes_list, list):
+                                    notes_list = notes_list + expanded
+                                else:
+                                    notes_list = expanded
+                    except Exception:
+                        pass
+                    sustain_events = response_data.get("sustain_pedal", []) # Get sustain events or an empty list
+
+                    # --- NEW: Check for special silence signal ---
+                    if isinstance(notes_list, list) and len(notes_list) == 1:
+                        note = notes_list[0]
+                        if note.get("pitch") == 0 and note.get("start_beat") == 0 and note.get("duration_beats") == 0 and note.get("velocity") == 0:
+                            print(Fore.GREEN + f"Recognized intentional silence for {instrument_name}. The track will be empty." + Style.RESET_ALL)
+                            return {
+                                "instrument_name": instrument_name,
+                                "program_num": program_num,
+                                "role": role,
+                                "notes": [], # Return a valid track with no notes
+                                "sustain_pedal": []
+                            }, total_token_count
+
+                    if not isinstance(notes_list, list):
+                        raise TypeError("The 'notes' field is not a valid list.")
+                    if not isinstance(sustain_events, list):
+                        raise TypeError("The 'sustain_pedal' field is not a valid list.")
+
+                    # --- Data Validation ---
+                    required_keys = {"pitch", "start_beat", "duration_beats", "velocity"}
+                    validated_notes = [
+                        note for note in notes_list 
+                        if isinstance(note, dict) and required_keys.issubset(note.keys())
+                    ]
+                    if len(validated_notes) != len(notes_list):
+                        invalid_count = len(notes_list) - len(validated_notes)
+                        print(Fore.YELLOW + f"Warning: Skipped {invalid_count} invalid note objects" + Style.RESET_ALL)
+                        
+                        # --- Sustain Validation ---
+                        validated_sustain = []
+                        for event in sustain_events:
+                            if not all(k in event for k in ["beat", "action"]):
+                                print(Fore.YELLOW + f"Warning: Skipping invalid sustain event: {event}" + Style.RESET_ALL)
+                                continue
+                            validated_sustain.append(event)
+
+                        print(Fore.GREEN + f"Successfully generated part for {instrument_name}." + Style.RESET_ALL)
+                        return ({
                             "instrument_name": instrument_name,
                             "program_num": program_num,
                             "role": role,
-                            "notes": [], # Return a valid track with no notes
-                            "sustain_pedal": []
-                        }, total_token_count
+                            "notes": validated_notes,
+                            "sustain_pedal": validated_sustain
+                        }, total_token_count)
 
-                if not isinstance(notes_list, list):
-                    raise TypeError("The 'notes' field is not a valid list.")
-                if not isinstance(sustain_events, list):
-                    raise TypeError("The 'sustain_pedal' field is not a valid list.")
+                except (json.JSONDecodeError, TypeError) as e:
+                    print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: Data validation failed for {instrument_name}. Reason: {str(e)}" + Style.RESET_ALL)
+                    # We already checked for blocking, so we just show the text if parsing fails.
+                    if "response_text" in locals():
+                        print(Fore.YELLOW + "Model response was:\n" + response_text + Style.RESET_ALL)
+                    # Counts as content-related error
+                    json_failure_count += 1
+                    failure_for_escalation_count += 1
+                    _escalate_if_needed()
+                    attempt_count += 1
+                    base = 3
+                    wait_time = base * (2 ** max(0, attempt_count - 1))
+                    jitter = random.uniform(0, 1.5)
+                    wait_time = min(30, wait_time + jitter)
+                    print(Fore.YELLOW + f"Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
+                    _wait_with_optional_switch(wait_time)
+                    continue
 
-                # --- Data Validation ---
-                validated_notes = []
-                for note in notes_list:
-                    if not all(k in note for k in ["pitch", "start_beat", "duration_beats", "velocity"]):
-                         print(Fore.YELLOW + f"Warning: Skipping invalid note object: {note}" + Style.RESET_ALL)
-                         continue
-                    validated_notes.append(note)
-                
-                # --- Sustain Validation ---
-                validated_sustain = []
-                for event in sustain_events:
-                    if not all(k in event for k in ["beat", "action"]):
-                        print(Fore.YELLOW + f"Warning: Skipping invalid sustain event: {event}" + Style.RESET_ALL)
-                        continue
-                    validated_sustain.append(event)
-
-
-                print(Fore.GREEN + f"Successfully generated part for {instrument_name}." + Style.RESET_ALL)
-                return {
-                    "instrument_name": instrument_name,
-                    "program_num": program_num,
-                    "role": role,
-                    "notes": validated_notes,
-                    "sustain_pedal": validated_sustain
-                }, total_token_count
-
-            except (json.JSONDecodeError, TypeError) as e:
-                print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: Data validation failed for {instrument_name}. Reason: {str(e)}" + Style.RESET_ALL)
-                # We already checked for blocking, so we just show the text if parsing fails.
-                if "response_text" in locals():
-                    print(Fore.YELLOW + "Model response was:\n" + response_text + Style.RESET_ALL)
-                # Counts as content-related error
-                json_failure_count += 1
-                failure_for_escalation_count += 1
-                _escalate_if_needed()
-                attempt_count += 1
-                base = 3
-                wait_time = base * (2 ** max(0, attempt_count - 1))
-                jitter = random.uniform(0, 1.5)
-                wait_time = min(30, wait_time + jitter)
-                print(Fore.YELLOW + f"Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
-                _wait_with_optional_switch(wait_time)
-                continue
             except Exception as e:
                 error_message = str(e).lower()
                 if "429" in error_message and "quota" in error_message:
@@ -6551,7 +7412,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     time.sleep(wait_time)
                     continue
 
-            # No additional backoff/count here; cases handled above
+                # No additional backoff/count here; cases handled above
         
         # This part is reached after all retries fail.
         full_failure_count += 1
@@ -7201,7 +8062,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                 generation_config = {
                     "temperature": config["temperature"],
                     "response_mime_type": "application/json",
-                    "max_output_tokens": config.get("max_output_tokens", 8192)
+                    "max_output_tokens": config.get("max_output_tokens", DEFAULT_MAX_TOKENS)
                 }
 
                 # Poll persistent hotkey (Windows) to change model instantly
@@ -7277,7 +8138,12 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                     print(Fore.YELLOW + f"Warning on attempt {attempt + 1}: Could not extract JSON object for {instrument_name}." + Style.RESET_ALL)
                     # Non-blocking quick switch (Windows): press 1/2/3 during next wait window
                     if json_failure_count == 2 and sys.platform == "win32":
-                        print(Fore.CYAN + "Press 1=pro, 2=flash, 3=custom (config.custom_model_name) to switch model for THIS track; continuing attempts..." + Style.RESET_ALL)
+                        try:
+                            cfg_model_name = str(config.get("model_name", "gemini-2.5-pro"))
+                            alt_model_name = "gemini-2.5-flash" if cfg_model_name != "gemini-2.5-flash" else "gemini-2.5-pro"
+                            print(Fore.CYAN + f"Press 1={cfg_model_name}, 2={alt_model_name}, 3=custom (config.custom_model_name) to switch model for THIS track; continuing attempts..." + Style.RESET_ALL)
+                        except Exception:
+                            print(Fore.CYAN + "Press 1=pro, 2=flash, 3=custom (config.custom_model_name) to switch model for THIS track; continuing attempts..." + Style.RESET_ALL)
                     # Auto-escalate: if using flash and threshold exceeded - DISABLED
                     # if AUTO_ESCALATE_TO_PRO and local_model_name == 'gemini-2.5-flash' and json_failure_count >= AUTO_ESCALATE_THRESHOLD:
                     #     local_model_name = 'gemini-2.5-pro'
@@ -7408,8 +8274,10 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                             while time.time() < end_t:
                                 if msvcrt.kbhit():
                                     ch = msvcrt.getch().decode().lower()
-                                    if ch == '1': local_model_name = 'gemini-2.5-pro'; break
-                                    if ch == '2': local_model_name = 'gemini-2.5-flash'; break
+                                    if ch == '1': local_model_name = str(config.get("model_name", "gemini-2.5-pro")); break
+                                    if ch == '2':
+                                        alt_model_name = "gemini-2.5-flash" if str(config.get("model_name", "gemini-2.5-pro")) != "gemini-2.5-flash" else "gemini-2.5-pro"
+                                        local_model_name = alt_model_name; break
                                     if ch == '3':
                                         custom = config.get('custom_model_name')
                                         if custom: local_model_name = custom
@@ -7648,7 +8516,7 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                 generation_config = {
                     "temperature": config["temperature"],
                     "response_mime_type": "application/json",
-                    "max_output_tokens": config.get("max_output_tokens", 8192)
+                    "max_output_tokens": config.get("max_output_tokens", DEFAULT_MAX_TOKENS)
                 }
                 model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
                 safety_settings=[
@@ -7959,7 +8827,7 @@ def generate_single_track_data(config: Dict, length_bars: int, instrument_name: 
             generation_config = {
                 "temperature": config["temperature"],
                 "response_mime_type": "application/json",
-                "max_output_tokens": config.get("max_output_tokens", 8192)
+                "max_output_tokens": config.get("max_output_tokens", DEFAULT_MAX_TOKENS)
             }
             model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
             safety_settings=[
@@ -8173,7 +9041,7 @@ def generate_mpe_single_track_optimization_data(config: Dict, length_bars: int, 
             generation_config = {
                 "temperature": config["temperature"],
                 "response_mime_type": "application/json",
-                "max_output_tokens": config.get("max_output_tokens", 8192)
+                "max_output_tokens": config.get("max_output_tokens", DEFAULT_MAX_TOKENS)
             }
             model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
             safety_settings=[
@@ -9683,38 +10551,91 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 except Exception as e:
                     print(Fore.YELLOW + f"Warning: Could not initialize API keys for lyrics: {e}" + Style.RESET_ALL)
 
-                # Build combined selection list: Final artifacts + Progress files
-                finals = find_final_artifacts(script_dir)
-                progresses = find_progress_files(script_dir)
-                combined = []  # (path, is_final, label)
-                for p in finals:
-                    try:
-                        combined.append((p, True, "[F] " + summarize_artifact(p)))
-                    except Exception:
-                        combined.append((p, True, "[F] " + os.path.basename(p)))
-                for p in progresses:
-                    try:
-                        combined.append((p, False, "[P] " + summarize_progress_file(p)))
-                    except Exception:
-                        combined.append((p, False, "[P] " + os.path.basename(p)))
-
-                if not combined:
-                    print(Fore.YELLOW + "No final artifacts or progress files found." + Style.RESET_ALL)
-                    continue
-
-                for i, (_, _, label) in enumerate(combined):
-                    print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {label}")
+                # --- Resume support for lyrics generation ---
+                run_timestamp = time.strftime("%Y%m%d-%H%M%S")
+                resume_idx = 0
+                out_themes = None
+                resume_data = None  # Store all resume data
                 try:
-                    sel = input(f"{Fore.GREEN}Choose item (1-{len(combined)}): {Style.RESET_ALL}").strip()
-                    idx = int(sel) - 1
+                    pfiles = find_progress_files(script_dir)
+                    # Only consider the most recent matching lyrics progress file
+                    candidate = None
+                    if pfiles:
+                        for pf in pfiles:
+                            pdata = _load_progress_silent(pf)
+                            if not isinstance(pdata, dict):
+                                continue
+                            ptype = str(pdata.get('type',''))
+                            pgen = str(pdata.get('generation_type',''))
+                            if ptype.startswith('lyrics_generation') or pgen in ('new_vocal','existing_track'):
+                                candidate = pf
+                                break
+                    if candidate:
+                        summary = summarize_progress_file(candidate)
+                        ans = input(f"{Fore.CYAN}Resume previous lyrics generation '{os.path.basename(candidate)}' ({summary})? [Y/n]: {Style.RESET_ALL}").strip().lower()
+                        if ans in ('', 'y', 'yes'):
+                            pdata = load_progress(candidate)
+                            if isinstance(pdata, dict) and isinstance(pdata.get('themes'), list):
+                                resume_data = pdata  # Store complete resume data
+                                out_themes = pdata['themes']
+                                try:
+                                    resume_idx = int(pdata.get('current_theme_index', 0)) + 1
+                                    if resume_idx < 0:
+                                        resume_idx = 0
+                                except Exception:
+                                    resume_idx = 0
+                                rt = str(pdata.get('timestamp','')).strip()
+                                if rt:
+                                    run_timestamp = rt
+                                print(Fore.GREEN + f"Resuming lyrics generation from part {resume_idx+1}." + Style.RESET_ALL)
+                        else:
+                            # Ablehnung -> alten Progress verwerfen
+                            try:
+                                os.remove(candidate)
+                                print(Fore.YELLOW + f"Discarded previous lyrics progress: {os.path.basename(candidate)}" + Style.RESET_ALL)
+                            except Exception:
+                                pass
                 except Exception:
-                    print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL)
-                    continue
-                if not (0 <= idx < len(combined)):
-                    print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL)
-                    continue
+                    pass
 
-                selected_path, is_final, _ = combined[idx]
+                # If no resume, proceed with normal artifact selection
+                if out_themes is None:
+                    # Build combined selection list: Final artifacts + Progress files
+                    finals = find_final_artifacts(script_dir)
+                    progresses = find_progress_files(script_dir)
+                    combined = []  # (path, is_final, label)
+                    for p in finals:
+                        try:
+                            combined.append((p, True, "[F] " + summarize_artifact(p)))
+                        except Exception:
+                            combined.append((p, True, "[F] " + os.path.basename(p)))
+                    for p in progresses:
+                        try:
+                            combined.append((p, False, "[P] " + summarize_progress_file(p)))
+                        except Exception:
+                            combined.append((p, False, "[P] " + os.path.basename(p)))
+
+                    if not combined:
+                        print(Fore.YELLOW + "No final artifacts or progress files found." + Style.RESET_ALL)
+                        continue
+
+                    for i, (_, _, label) in enumerate(combined):
+                        print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {label}")
+                    try:
+                        sel = input(f"{Fore.GREEN}Choose item (1-{len(combined)}): {Style.RESET_ALL}").strip()
+                        idx = int(sel) - 1
+                    except Exception:
+                        print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL)
+                        continue
+                    if not (0 <= idx < len(combined)):
+                        print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL)
+                        continue
+
+                    selected_path, is_final, _ = combined[idx]
+                else:
+                    # Resume case - use dummy values
+                    selected_path = None
+                    is_final = False
 
                 # Helper: best-effort extraction from progress files for lyrics
                 def _extract_from_progress_for_lyrics(pdata: Dict) -> tuple:
@@ -9736,19 +10657,60 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         themes = pdata.get('themes') or pdata.get('all_themes_data') or pdata.get('themes_to_optimize')
                     return cfg, themes, length_bars
 
-                if is_final:
+                if out_themes is not None:
+                    # Resume case - use existing data
+                    cfg = {}
+                    themes = out_themes
+                    theme_len_bars = 8  # Default fallback
+                    num_parts = len(out_themes) if isinstance(out_themes, list) else 0
+                    print(Style.DIM + f"[Resume] Using existing themes data with {num_parts} parts." + Style.RESET_ALL)
+                elif is_final:
                     artifact = load_final_artifact(selected_path)
                     if not artifact:
                         continue
                     cfg = artifact.get('config', {})
                     themes = artifact.get('themes', [])
-                    theme_len_bars = int(artifact.get('length', previous_settings.get('length', DEFAULT_LENGTH)))
+                    # STRIKT: Partlänge ausschließlich aus artifact['length']
+                    if 'length' not in artifact:
+                        print(Fore.RED + "Final artifact missing 'length' (bars per part)." + Style.RESET_ALL)
+                        continue
+                    theme_len_bars = int(artifact['length'])
+                    # Anzahl Parts ausschließlich aus theme_definitions bestimmen
+                    try:
+                        theme_defs = artifact.get('theme_definitions')
+                        num_parts = int(len(theme_defs)) if isinstance(theme_defs, list) else int(len(themes) if isinstance(themes, list) else 0)
+                    except Exception:
+                        num_parts = int(len(themes) if isinstance(themes, list) else 0)
+                    try:
+                        print(Style.DIM + f"[Export] Using part_length_bars={theme_len_bars} from final artifact (length); parts={num_parts} from theme_definitions." + Style.RESET_ALL)
+                    except Exception:
+                        pass
                 else:
                     pdata = load_progress(selected_path)
                     if not pdata:
                         print(Fore.YELLOW + "Could not load the selected progress file." + Style.RESET_ALL)
                         continue
-                    cfg, themes, theme_len_bars = _extract_from_progress_for_lyrics(pdata)
+                    cfg, themes, _lb = _extract_from_progress_for_lyrics(pdata)
+                    # STRIKT: Bevorzugt 'theme_length', sonst 'length'; keine stillen Fallbacks
+                    if 'theme_length' in pdata and isinstance(pdata.get('theme_length'), (int, float)):
+                        theme_len_bars = int(pdata.get('theme_length'))
+                        src = 'theme_length'
+                    elif 'length' in pdata and isinstance(pdata.get('length'), (int, float)):
+                        theme_len_bars = int(pdata.get('length'))
+                        src = 'length'
+                    else:
+                        print(Fore.RED + "Progress missing 'theme_length'/'length' (bars per part)." + Style.RESET_ALL)
+                        continue
+                    # Anzahl Parts aus theme_definitions (Fallback: themes)
+                    try:
+                        theme_defs = pdata.get('theme_definitions')
+                        num_parts = int(len(theme_defs)) if isinstance(theme_defs, list) else int(len(themes) if isinstance(themes, list) else 0)
+                    except Exception:
+                        num_parts = int(len(themes) if isinstance(themes, list) else 0)
+                    try:
+                        print(Style.DIM + f"[Export] Using part_length_bars={theme_len_bars} from progress ({src}); parts={num_parts} from theme_definitions." + Style.RESET_ALL)
+                    except Exception:
+                        pass
                 if not themes:
                     print(Fore.YELLOW + "Selected item has no themes to process." + Style.RESET_ALL)
                     continue
@@ -9757,20 +10719,29 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 base_tracks = themes[0].get('tracks', []) if themes and isinstance(themes[0], dict) else []
                 if not base_tracks:
                     print(Fore.YELLOW + "Artifact has no tracks in first part." + Style.RESET_ALL); continue
-                for i, tr in enumerate(base_tracks):
-                    print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {get_instrument_name(tr)} ({tr.get('role','complementary')})")
-                extra_opt = len(base_tracks) + 1
-                print(f"{Fore.YELLOW}{extra_opt}.{Style.RESET_ALL} Generate NEW Vocal Track (notes + lyrics + UST)")
-                try:
-                    tsel = input(f"{Fore.GREEN}Choose track (1-{len(base_tracks)} or {extra_opt} for NEW): {Style.RESET_ALL}").strip()
-                    track_choice = int(tsel)
-                except Exception:
-                    print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL); continue
-                if not (1 <= track_choice <= extra_opt):
-                    print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL); continue
-                new_vocal_track_mode = (track_choice == extra_opt)
-                if not new_vocal_track_mode:
-                    track_idx = track_choice - 1
+                
+                # For resume case, determine track settings from existing data
+                if out_themes is not None:
+                    # Resume case - determine track settings from existing data
+                    new_vocal_track_mode = True  # Assume new vocal track for resume
+                    track_idx = 0  # Default fallback
+                    print(Style.DIM + f"[Resume] Using existing track configuration." + Style.RESET_ALL)
+                else:
+                    # Normal case - ask user to choose track
+                    for i, tr in enumerate(base_tracks):
+                        print(f"{Fore.YELLOW}{i+1}.{Style.RESET_ALL} {get_instrument_name(tr)} ({tr.get('role','complementary')})")
+                    extra_opt = len(base_tracks) + 1
+                    print(f"{Fore.YELLOW}{extra_opt}.{Style.RESET_ALL} Generate NEW Vocal Track (notes + lyrics + UST)")
+                    try:
+                        tsel = input(f"{Fore.GREEN}Choose track (1-{len(base_tracks)} or {extra_opt} for NEW): {Style.RESET_ALL}").strip()
+                        track_choice = int(tsel)
+                    except Exception:
+                        print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL); continue
+                    if not (1 <= track_choice <= extra_opt):
+                        print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL); continue
+                    new_vocal_track_mode = (track_choice == extra_opt)
+                    if not new_vocal_track_mode:
+                        track_idx = track_choice - 1
 
                 # Prepare constants
                 genre = cfg.get('genre', 'Unknown')
@@ -9782,48 +10753,13 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 section_len_beats = theme_len_bars * beats_per_bar
 
                 # Create a copy of all themes and fill lyrics for the selected track index across parts
-                out_themes = json.loads(json.dumps(themes))
-                # --- Resume support for lyrics generation ---
-                run_timestamp = time.strftime("%Y%m%d-%H%M%S")
-                resume_idx = 0
+                if out_themes is None:
+                    out_themes = json.loads(json.dumps(themes))
+                # Schneide auf die definierte Anzahl Parts zu
                 try:
-                    pfiles = find_progress_files(script_dir)
-                    # Only consider the most recent matching lyrics progress file
-                    candidate = None
-                    if pfiles:
-                        for pf in pfiles:
-                            pdata = _load_progress_silent(pf)
-                            if not isinstance(pdata, dict):
-                                continue
-                            ptype = str(pdata.get('type',''))
-                            pgen = str(pdata.get('generation_type',''))
-                            if ptype.startswith('lyrics_generation') or pgen in ('new_vocal','existing_track'):
-                                candidate = pf
-                                break
-                    if candidate:
-                        summary = summarize_progress_file(candidate)
-                        ans = input(f"{Fore.CYAN}Resume previous lyrics generation '{os.path.basename(candidate)}' ({summary})? [Y/n]: {Style.RESET_ALL}").strip().lower()
-                        if ans in ('', 'y', 'yes'):
-                            pdata = load_progress(candidate)
-                            if isinstance(pdata, dict) and isinstance(pdata.get('themes'), list):
-                                out_themes = pdata['themes']
-                                try:
-                                    resume_idx = int(pdata.get('current_theme_index', 0)) + 1
-                                    if resume_idx < 0:
-                                        resume_idx = 0
-                                except Exception:
-                                    resume_idx = 0
-                                rt = str(pdata.get('timestamp','')).strip()
-                                if rt:
-                                    run_timestamp = rt
-                                print(Fore.GREEN + f"Resuming lyrics generation from part {resume_idx+1}." + Style.RESET_ALL)
-                        else:
-                            # Ablehnung -> alten Progress verwerfen
-                            try:
-                                os.remove(candidate)
-                                print(Fore.YELLOW + f"Discarded previous lyrics progress: {os.path.basename(candidate)}" + Style.RESET_ALL)
-                            except Exception:
-                                pass
+                    if isinstance(out_themes, list) and isinstance(num_parts, int) and num_parts > 0:
+                        out_themes = out_themes[:num_parts]
+                        print(Style.DIM + f"[Export] Trimmed themes to {len(out_themes)} part(s) based on theme_definitions." + Style.RESET_ALL)
                 except Exception:
                     pass
                 try:
@@ -9833,11 +10769,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         print(Fore.CYAN + f"Generating lyrics (word-first) for track '{get_instrument_name(base_tracks[track_idx])}' across {len(out_themes)} part(s)..." + Style.RESET_ALL)
                 except Exception:
                     pass
-                # Prompt (optional)
-                try:
-                    user_guidance = input(f"{Fore.CYAN}Optional: Add a short guidance for the lyric style/content (or press Enter): {Style.RESET_ALL}").strip()
-                except Exception:
-                    user_guidance = ""
+                # Prompt (optional) - use saved data if resuming
+                if resume_data is not None:
+                    user_guidance = resume_data.get('user_guidance', '')
+                    print(Style.DIM + f"[Resume] Using saved guidance: '{user_guidance}'" + Style.RESET_ALL)
+                else:
+                    try:
+                        user_guidance = input(f"{Fore.CYAN}Optional: Add a short guidance for the lyric style/content (or press Enter): {Style.RESET_ALL}").strip()
+                    except Exception:
+                        user_guidance = ""
 
                 # Stage-0: Analyze user prompt into structured directives
                 # Ensure themes are present (configurable artifact loading)
@@ -9945,14 +10885,22 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 except Exception:
                     ANALYSIS_CTX = {}
                 try:
-                    # Step 0a: Prompt Analysis (already done above)
-                    # Step 0b: Plan vocal roles
-                    print(Style.DIM + "[Step 0b] Planning vocal roles..." + Style.RESET_ALL)
-                    roles = _plan_vocal_roles(config, genre, inspiration, bpm, ts, summaries, ANALYSIS_CTX, user_guidance)
-                    
-                    # Step 0c: Generate hints with consistency validation
-                    print(Style.DIM + "[Step 0c] Generating hints with consistency validation..." + Style.RESET_ALL)
-                    plan_items = _generate_vocal_hints(config, genre, inspiration, bpm, ts, summaries, roles, ANALYSIS_CTX, user_guidance)
+                    # Step 0: Planning - skip if resuming
+                    if resume_data is not None:
+                        # Use saved plan data
+                        roles = resume_data.get('roles', [])
+                        plan_items = resume_data.get('plan_items', [])
+                        ANALYSIS_CTX = resume_data.get('analysis_ctx', {})
+                        print(Style.DIM + "[Resume] Using saved plan data (skipping Step 0)" + Style.RESET_ALL)
+                    else:
+                        # Step 0a: Prompt Analysis (already done above)
+                        # Step 0b: Plan vocal roles
+                        print(Style.DIM + "[Step 0b] Planning vocal roles..." + Style.RESET_ALL)
+                        roles = _plan_vocal_roles(config, genre, inspiration, bpm, ts, summaries, ANALYSIS_CTX, user_guidance, cfg)
+                        
+                        # Step 0c: Generate hints with consistency validation
+                        print(Style.DIM + "[Step 0c] Generating hints with consistency validation..." + Style.RESET_ALL)
+                        plan_items = _generate_vocal_hints(config, genre, inspiration, bpm, ts, summaries, roles, ANALYSIS_CTX, user_guidance, cfg)
                     
                     # Print plan at call site for visibility
                     try:
@@ -10228,6 +11176,11 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     it['plan_hint'] = _hint_for(str(it.get('role','verse')))
                 except Exception:
                     pass
+                # Build index map before printing to avoid stale/undefined lookups
+                try:
+                    plan_by_idx = {int(it.get('idx', i)): it for i, it in enumerate(plan_items) if isinstance(it, dict)}
+                except Exception:
+                    plan_by_idx = {}
                 # Print plan for user visibility
                 try:
                     if plan_items:
@@ -10237,7 +11190,10 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             lab = s.get('label', f"Part_{idx+1}")
                             it = None
                             try:
-                                it = next((p for p in plan_items if int(p.get('idx', -1)) == idx), None)
+                                # Use normalized map to avoid showing stale/contradictory role/hint
+                                it = plan_by_idx.get(idx)
+                                if not it:
+                                    it = next((p for p in plan_items if int(p.get('idx', -1)) == idx), None)
                             except Exception:
                                 it = None
                             role = str((it or {}).get('role', '') or 'silence')
@@ -10276,8 +11232,111 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 except Exception:
                     pass
 
-                
-                plan_by_idx = {int(it.get('idx', i)): it for i, it in enumerate(plan_items) if isinstance(it, dict)}
+                # Export ONLY UST for the selected track AFTER all parts are generated (SynthV/UTAU friendly)
+                if out_themes:  # Only export if generation was successful
+                    try:
+                        timestamp = time.strftime('%Y%m%d-%H%M%S')
+                        export_name = (get_instrument_name(out_themes[0]['tracks'][-1]) if new_vocal_track_mode else get_instrument_name(base_tracks[track_idx]))
+                        ust_path = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.ust")
+                        # Collect syllables per theme (already generated into out_themes)
+                        syllables_per_theme = []
+                        # Ensure we have tokens for ALL parts from loaded JSON
+                        for part_idx in range(len(out_themes) if out_themes else 0):
+                            if part_idx < len(out_themes):
+                                th = out_themes[part_idx]
+                            else:
+                                th = {}
+                            trks = th.get('tracks', [])
+                            idx_eff = (len(trks)-1) if new_vocal_track_mode else track_idx
+                            if 0 <= idx_eff < len(trks):
+                                toks = trks[idx_eff].get('lyrics')
+                                if not toks:
+                                    toks = trks[idx_eff].get('tokens') or []
+                                syllables_per_theme.append(toks)
+                            else:
+                                syllables_per_theme.append([])
+                        _export_openutau_ust_for_track(
+                            out_themes,
+                            (len(out_themes[0].get('tracks',[]))-1) if new_vocal_track_mode else track_idx,
+                            syllables_per_theme,
+                            ts,
+                            bpm,
+                            ust_path,
+                            section_length_bars=theme_len_bars
+                        )
+                        print(Fore.GREEN + f"\n✓ UST automatisch exportiert: {ust_path}" + Style.RESET_ALL)
+                        
+                        # Successfully exported -> remove progress file from this run
+                        try:
+                            prog_file = os.path.join(script_dir, get_progress_filename(cfg or config, run_timestamp))
+                            if os.path.exists(prog_file):
+                                os.remove(prog_file)
+                        except Exception:
+                            pass
+                        # Emvoice flat TXT (both for existing and NEW vocal track)
+                        export_track_index = (len(out_themes[0].get('tracks', [])) - 1) if new_vocal_track_mode else track_idx
+                        txt_all = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}_emvoice.txt")
+                        txt_by_part = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}_emvoice_by_part.txt")
+                        _export_emvoice_txt_for_track(out_themes, export_track_index, syllables_per_theme, txt_all, txt_by_part)
+                        print(Fore.GREEN + f"✓ Emvoice TXT exportiert: {txt_all}" + Style.RESET_ALL)
+                        
+                        # Ask to export a MIDI of the modified single track
+                        try:
+                            ans = input(f"{Fore.CYAN}Export modified single-track MIDI as well? [y/N]: {Style.RESET_ALL}").strip().lower()
+                        except Exception:
+                            ans = 'n'
+                        if ans in ('y', 'yes'):
+                            try:
+                                # Build MIDI directly from the just-exported UST so notes match 1:1
+                                midi_out = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.mid")
+                                ok = _create_midi_from_ust(ust_path, bpm, ts, midi_out)
+                                if not ok:
+                                    # Fallback: assemble single-track MIDI from themes to ensure export even with sparse vocals
+                                    try:
+                                        section_len_beats = float(theme_len_bars) * float(int(ts.get('beats_per_bar', 4)))
+                                    except Exception:
+                                        section_len_beats = 4.0 * float(theme_len_bars)
+                                    # Gather absolute notes for the selected vocal track
+                                    notes_abs = []
+                                    export_idx = (len(out_themes[0].get('tracks', [])) - 1) if new_vocal_track_mode else track_idx
+                                    for pi, th in enumerate(out_themes):
+                                        trks_loc = th.get('tracks', []) or []
+                                        if 0 <= export_idx < len(trks_loc):
+                                            for n in (trks_loc[export_idx].get('notes', []) or []):
+                                                try:
+                                                    s = float(n.get('start_beat', 0.0)) + float(pi) * section_len_beats
+                                                    d = max(0.0, float(n.get('duration_beats', 0.0)))
+                                                    p = int(n.get('pitch', 60))
+                                                    notes_abs.append({'start_beat': s, 'duration_beats': d, 'pitch': p})
+                                                except Exception:
+                                                    continue
+                                    if notes_abs:
+                                        single_song = {
+                                            'bpm': bpm,
+                                            'time_signature': ts,
+                                            'key_scale': (cfg or config).get('key_scale',''),
+                                            'tracks': [{
+                                                'instrument_name': 'Synth Vocal',
+                                                'program_num': 0,
+                                                'role': 'vocal',
+                                                'notes': sorted(notes_abs, key=lambda x: x['start_beat'])
+                                            }]
+                                        }
+                                        try:
+                                            create_midi_from_json(single_song, cfg or config, midi_out)
+                                            print(Fore.GREEN + f"Exported single-track MIDI (fallback): {midi_out}" + Style.RESET_ALL)
+                                            ok = True
+                                        except Exception as ee:
+                                            print(Fore.YELLOW + f"Fallback MIDI export failed: {ee}" + Style.RESET_ALL)
+                                    else:
+                                        print(Fore.YELLOW + "No vocal notes found across themes; skipping MIDI write." + Style.RESET_ALL)
+                                if ok:
+                                    print(Fore.GREEN + f"Exported single-track MIDI: {midi_out}" + Style.RESET_ALL)
+                            except Exception as e:
+                                print(Fore.YELLOW + f"MIDI export failed: {e}" + Style.RESET_ALL)
+                    except Exception:
+                        pass
+
                 history_lines: List[str] = []
                 # Optional: limit parts per run to reduce request bursts (set 0 or omit to disable)
                 parts_limit = int(config.get('lyrics_parts_per_run', 0) or 0)
@@ -10369,7 +11428,14 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             plan_text = (" \n[Plan] " + ", ".join(plan_bits)) if plan_bits else ""
                         except Exception:
                             plan_text = ""
-                        desc_part = (desc + plan_text + "\n" + anchors_text).strip()
+                        # Ensure role hint is explicitly embedded for the prompt (first token wins)
+                        role_for_desc = ''
+                        try:
+                            role_for_desc = str((plan_by_idx.get(part_idx) or {}).get('role','')).strip()
+                        except Exception:
+                            role_for_desc = ''
+                        role_line = (f"[Plan] role={role_for_desc}\n" if role_for_desc else "")
+                        desc_part = (desc + "\n" + role_line + plan_text + "\n" + anchors_text).strip()
                         # Lyrics-first (two stages): 1) Free lyrics + syllables, 2) Compose notes
                         try:
                             target_wpb_seed = float((cfg or config).get('lyrics_target_words_per_bar', 2.0)) if isinstance((cfg or config).get('lyrics_target_words_per_bar'), (int, float)) else 2.0
@@ -10389,6 +11455,30 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     "role": _t.get('role','complementary'),
                                     "notes": _t_notes
                                 })
+                            # Add prior vocal track history (notes + tokens) from previous parts
+                            try:
+                                prior_hist = []
+                                for pk in range(0, part_idx):
+                                    if 0 <= pk < len(out_themes):
+                                        th_prev = out_themes[pk]
+                                        tr_prev = None
+                                        for tprev in (th_prev.get('tracks', []) or []):
+                                            if tprev.get('__final_vocal__'):
+                                                tr_prev = tprev; break
+                                        if tr_prev is None:
+                                            continue
+                                        prev_notes = sorted(tr_prev.get('notes', []) or [], key=lambda n: float(n.get('start_beat', 0.0)))
+                                        prev_tokens = tr_prev.get('lyrics', []) or []
+                                        prior_hist.append({
+                                            "part": pk+1,
+                                            "label": th_prev.get('label', f'Part {pk+1}'),
+                                            "notes": prev_notes,
+                                            "tokens": prev_tokens
+                                        })
+                                if prior_hist:
+                                    seed_context_basic.append({"name": "__PRIOR_VOCAL__", "role": "vocal_history", "history": prior_hist})
+                            except Exception:
+                                pass
                         except Exception:
                             seed_context_basic = []
                         # Seed history is the same aggregation we build later; if empty, pass ""
@@ -10397,13 +11487,21 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         except Exception:
                             history_text_seed = ""
                         # STAGE 1: free-form lyrics with optional syllables (no grid binding)
-                        # Skip LLM when planned role is explicit 'silence'. If non-silence role has an instrumental-only hint, drop the hint (standard role fallback later) and still call LLM.
+                        # Role 'silence' handling controlled by config: skip or still call LLM
                         try:
                             planned_role = str((plan_by_idx.get(part_idx) or {}).get('role','')).lower()
                         except Exception:
                             planned_role = ''
-                        if planned_role == 'silence':
-                            stage1 = {"words": [], "syllables": [], "arranger_note": "intentional silence: per plan"}
+                        skip_role_silence = bool((cfg or config).get('skip_role_silence_parts', 1))
+                        # Hard skip also when plan_hint contains force_silence=1 (numeric) and config allows skipping
+                        try:
+                            planned_hint = str((plan_by_idx.get(part_idx) or {}).get('plan_hint','') or '')
+                        except Exception:
+                            planned_hint = ''
+                        has_force_silence = ('force_silence=1' in planned_hint.replace(' ', ''))
+                        if (planned_role == 'silence' or has_force_silence) and skip_role_silence:
+                            # Hard skip: no Step-1, treat as silence
+                            stage1 = {"words": [], "syllables": [], "arranger_note": "intentional silence: per plan (skipped by config)"}
                         else:
                             # sanitize hint at call site already done; proceed with generation
                             try:
@@ -10411,7 +11509,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 cfg or config, genre, inspiration, 'Synth Vocal', bpm, ts,
                                 section_label=label, section_description=desc_part,
                                 context_tracks_basic=seed_context_basic, user_prompt=user_guidance,
-                                history_context=history_text_seed, theme_len_bars=theme_len_bars
+                                history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg
                             )
                             except Exception:
                                 # If Stage-1 fails, treat this part as intentional silence (robustness)
@@ -10444,7 +11542,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         section_role_local = _normalize_section_role(label)
                         is_silence_allowed = section_role_local in ('intro', 'outro', 'breakdown')
                         has_intentional_silence = bool(model_silence) or (isinstance(arranger_note, str) and ('intentional silence' in arranger_note.lower()))
-                        if (isinstance(words, list) and isinstance(syllables, list) and len(words) == 0 and len(syllables) == 0 and (is_silence_allowed or has_intentional_silence)):
+                        silence_cfg = bool((cfg or config).get('silence_skipping_enabled', 1))
+                        if silence_cfg and (isinstance(words, list) and isinstance(syllables, list) and len(words) == 0 and len(syllables) == 0 and (is_silence_allowed or has_intentional_silence)):
                             track_data = {"instrument_name": 'Synth Vocal', "program_num": 0, "role": 'vocal', "notes": [], "lyrics": []}
                             try:
                                 print(Style.DIM + f"[Composer] '{label}': accepted explicit silence for this section." + Style.RESET_ALL)
@@ -10455,7 +11554,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 history_lines.append(f"{label}: [silence]")
                             except Exception:
                                 pass
-                        elif model_silence:
+                        elif silence_cfg and model_silence:
                             # Model explicitly requested silence → accept directly
                             try:
                                 print(Style.DIM + f"[Composer] '{label}': model-declared intentional silence." + Style.RESET_ALL)
@@ -10466,7 +11565,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 history_lines.append(f"{label}: [silence]")
                             except Exception:
                                 pass
-                        elif not (isinstance(words, list) and words):
+                        elif silence_cfg and not (isinstance(words, list) and words):
                             # Treat as intentional silence to avoid aborting the run
                             try:
                                 print(Fore.YELLOW + Style.BRIGHT + f"[Composer] Stage-1 returned no words for '{label}'. Treating as intentional silence for this part." + Style.RESET_ALL)
@@ -10492,10 +11591,10 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             else:
                                 stage2 = _compose_notes_for_syllables(
                                     cfg or config, genre, inspiration, 'Synth Vocal', bpm, ts, theme_len_bars,
-                                    (stage1.get('syllables') if isinstance(stage1.get('syllables'), list) else []), arranger_note, context_tracks_basic=seed_context_basic, key_scale=(cfg or config).get('key_scale',''), section_label=label,
+                                    (stage1.get('syllables') if isinstance(stage1.get('syllables'), list) else []), arranger_note, context_tracks_basic=seed_context_basic, key_scale=cfg.get('key_scale') if cfg else config.get('key_scale',''), section_label=label,
                                     hook_canonical=(stage1.get('hook_canonical') if isinstance(stage1.get('hook_canonical'), str) else None),
                                     chorus_lines=(stage1.get('chorus_lines') if isinstance(stage1.get('chorus_lines'), list) else None),
-                                    section_description=(plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part, lyrics_words=(words or [])
+                                    section_description=(plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part, lyrics_words=(words or []), cfg=cfg
                                 )
                             # Enforce role-based timing to slow down overly hasty mapping
                             notes2 = stage2.get('notes') if isinstance(stage2, dict) else None
@@ -10508,7 +11607,11 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             # Accept empty result if explicit silence is intended/allowed
                             silence_ok = (section_role_local in ('intro','outro','breakdown','silence','spoken','breaths')) or has_intentional_silence
                             # Also allow empty results for chorus roles with "Instrumental focus" hints
-                            if section_role_local == 'chorus' and isinstance(section_description, str) and ('instrumental focus' in section_description.lower() or 'instrumental only' in section_description.lower()):
+                            try:
+                                _desc_for_check = (plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part
+                            except Exception:
+                                _desc_for_check = desc_part
+                            if section_role_local == 'chorus' and isinstance(_desc_for_check, str) and ('instrumental focus' in _desc_for_check.lower() or 'instrumental only' in _desc_for_check.lower()):
                                 silence_ok = True
                             # Very relaxed validation: allow empty results for any silence sections, and be more forgiving with length mismatches
                             # Also accept if we have words but no notes/tokens (fallback case)
@@ -10582,7 +11685,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         track_idx_effective = len(trks) - 1
                         # Save progress after creating/overwriting vocal for this part
                         try:
-                            save_progress({
+                            progress_data = {
                                 'type': 'lyrics_generation_new_track',
                                 'config': cfg or config,
                                 'themes': out_themes,
@@ -10591,7 +11694,16 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 'current_track_index': track_idx_effective,
                                 'generation_type': 'new_vocal',
                                 'timestamp': run_timestamp
-                            }, script_dir, run_timestamp)
+                            }
+                            # Add plan data if available (only save once at the beginning)
+                            if part_idx == 0:
+                                progress_data.update({
+                                    'user_guidance': user_guidance,
+                                    'roles': roles,
+                                    'plan_items': plan_items,
+                                    'analysis_ctx': ANALYSIS_CTX
+                                })
+                            save_progress(progress_data, script_dir, run_timestamp)
                         except Exception:
                             pass
                     else:
@@ -10668,8 +11780,14 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         })
                     try:
                         planned_role_dbg = str((plan_by_idx.get(part_idx) or {}).get('role','')).strip() or _normalize_section_role(label)
-                        first_note = float(notes[0].get('start_beat', 0.0)) if notes else 0.0
-                        print(Fore.CYAN + Style.BRIGHT + "[Lyrics:Request] " + Style.NORMAL + Fore.WHITE + f"Part {part_idx+1}/{len(out_themes)} · '{label}' · role={planned_role_dbg} · first_note={first_note:.3f} · notes={len(notes)} → words+syllables" + Style.RESET_ALL)
+                        # Respect skip config: don't log a Lyrics:Request for parts planned as silence when skipping is enabled
+                        try:
+                            _skip_role_silence = bool((cfg or config).get('skip_role_silence_parts', 1))
+                        except Exception:
+                            _skip_role_silence = True
+                        if not (_skip_role_silence and planned_role_dbg.lower() == 'silence'):
+                            first_note = float(notes[0].get('start_beat', 0.0)) if notes else 0.0
+                            print(Fore.CYAN + Style.BRIGHT + "[Lyrics:Request] " + Style.NORMAL + Fore.WHITE + f"Part {part_idx+1}/{len(out_themes)} · '{label}' · role={planned_role_dbg} · first_note={first_note:.3f} · notes={len(notes)} → words+syllables" + Style.RESET_ALL)
                     except Exception:
                         pass
                     # Build textual history context from all prior parts for this track (full history)
@@ -10769,7 +11887,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         except Exception:
                             pass
                         try:
-                            save_progress({
+                            progress_data = {
                                 'type': 'lyrics_generation_existing_track',
                                 'config': cfg or config,
                                 'themes': out_themes,
@@ -10778,7 +11896,16 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 'current_track_index': track_idx_effective,
                                 'generation_type': 'existing_track',
                                 'timestamp': run_timestamp
-                            }, script_dir, run_timestamp)
+                            }
+                            # Add plan data if available (only save once at the beginning)
+                            if part_idx == 0:
+                                progress_data.update({
+                                    'user_guidance': user_guidance,
+                                    'roles': roles,
+                                    'plan_items': plan_items,
+                                    'analysis_ctx': ANALYSIS_CTX
+                                })
+                            save_progress(progress_data, script_dir, run_timestamp)
                         except Exception:
                             pass
                     # Adaptive pass-2: if the model signals difficulty/vision, allow broader note optimization
@@ -10787,7 +11914,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         meta = LYRICS_PART_META.get(adapt_key) or {}
                         pd = meta.get('placement_difficulty')
                         vision = meta.get('note_adaptation_vision')
-                        if isinstance(pd, (int, float)) and pd >= float((cfg or config).get('lyrics_adaptation_threshold', 0.35)):
+                        # Add safety check to prevent infinite loops
+                        if isinstance(pd, (int, float)) and pd >= float((cfg or config).get('lyrics_adaptation_threshold', 0.35)) and pd < 0.8:
                             print(Style.DIM + f"[Notes-Adapt] Activating adaptive optimization for '{label}' (difficulty={pd:.2f})" + Style.RESET_ALL)
                             # Temporarily relax adjustment mode for this part
                             local_cfg = {**(cfg or config)}
@@ -10797,25 +11925,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             plan = _propose_lyric_note_adjustments(local_cfg, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes, tokens, label, desc, context_tracks=[t for j,t in enumerate(trks) if j != track_idx_effective])
                             adjusted_notes, adjusted_tokens = _apply_note_adjustments_conservative(notes, tokens, plan)
                             notes = adjusted_notes; tokens = adjusted_tokens
+                        elif isinstance(pd, (int, float)) and pd >= 0.8:
+                            print(Style.DIM + f"[Notes-Adapt] Difficulty too high ({pd:.2f}), skipping adaptive optimization to prevent infinite loop" + Style.RESET_ALL)
                         # If NEW track and still hard to place -> constrained re-generation of notes, then re-run words
                         if new_vocal_track_mode and isinstance(pd, (int, float)) and pd >= 0.6:
                             try:
-                                constraints_text = "[Constraints] max_onsets_per_bar=4; min_duration_beats=0.4"
-                                desc_regen = (desc + "\n" + constraints_text).strip()
-                                regen_data, _ = generate_instrument_track_data(
-                                    cfg or config, theme_len_bars, 'Synth Vocal', 0,
-                                    trks, 'vocal', track_idx_effective, len(trks), 'assistant',
-                                    label, desc_regen, out_themes[:part_idx], part_idx
-                                )
-                                if regen_data and regen_data.get('notes'):
-                                    trks[track_idx_effective] = regen_data
-                                    target_tr = trks[track_idx_effective]
-                                    notes = sorted(target_tr.get('notes', []), key=lambda n: float(n.get('start_beat', 0.0)))
-                                    tokens = _generate_lyrics_words_with_spans(
-                                        cfg or config, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes,
-                                        section_label=label, section_description=desc_regen, context_tracks_basic=context_basic,
-                                        user_prompt=user_guidance, history_context=history_text
-                                    )
+                                print(Style.DIM + f"[Notes-Adapt] Difficulty too high ({pd:.2f}), skipping regeneration to avoid infinite loop" + Style.RESET_ALL)
+                                # Instead of regenerating, just use the existing notes with simpler lyrics
+                                if not tokens or len(tokens) < 3:
+                                    tokens = ["la", "la", "la"]  # Simple fallback
                             except Exception:
                                 pass
                     except Exception:
@@ -10831,10 +11949,16 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     plan = {}
                     adjusted_notes, adjusted_tokens = notes, tokens
                     if not (isinstance(target_tr, dict) and target_tr.get('__final_vocal__')):
-                        plan = _propose_lyric_note_adjustments(cfg or config, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes, tokens, label, desc, context_tracks=[t for j,t in enumerate(trks) if j != track_idx_effective])
-                        adjusted_notes, adjusted_tokens = _apply_note_adjustments_conservative(notes, tokens, plan)
-                        target_tr['notes'] = adjusted_notes
-                        target_tr['lyrics'] = adjusted_tokens
+                        # Add safety check to prevent infinite loops
+                        try:
+                            plan = _propose_lyric_note_adjustments(cfg or config, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes, tokens, label, desc, context_tracks=[t for j,t in enumerate(trks) if j != track_idx_effective])
+                            adjusted_notes, adjusted_tokens = _apply_note_adjustments_conservative(notes, tokens, plan)
+                            target_tr['notes'] = adjusted_notes
+                            target_tr['lyrics'] = adjusted_tokens
+                        except Exception as e:
+                            print(Style.DIM + f"[Notes-Adapt] Error in note adjustments: {e}, using original notes" + Style.RESET_ALL)
+                            target_tr['notes'] = notes
+                            target_tr['lyrics'] = tokens
                     else:
                         target_tr['notes'] = notes
                         target_tr['lyrics'] = tokens
@@ -10856,105 +11980,6 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     except Exception:
                         pass
 
-                # Export ONLY UST for the selected track (SynthV/UTAU friendly)
-                try:
-                    timestamp = time.strftime('%Y%m%d-%H%M%S')
-                    export_name = (get_instrument_name(out_themes[0]['tracks'][-1]) if new_vocal_track_mode else get_instrument_name(base_tracks[track_idx]))
-                    ust_path = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.ust")
-                    # Collect syllables per theme (already generated into out_themes)
-                    syllables_per_theme = []
-                    # Ensure we have tokens for ALL parts from loaded JSON
-                    for part_idx in range(len(out_themes) if out_themes else 0):
-                        if part_idx < len(out_themes):
-                            th = out_themes[part_idx]
-                            trks = th.get('tracks', [])
-                            idx_eff = (len(trks)-1) if new_vocal_track_mode else track_idx
-                            if 0 <= idx_eff < len(trks):
-                                toks = trks[idx_eff].get('lyrics')
-                                if not toks:
-                                    toks = trks[idx_eff].get('tokens') or []
-                                syllables_per_theme.append(toks)
-                            else:
-                                syllables_per_theme.append([])
-                        else:
-                            syllables_per_theme.append([])
-                    _export_openutau_ust_for_track(
-                        out_themes,
-                        (len(out_themes[0].get('tracks',[]))-1) if new_vocal_track_mode else track_idx,
-                        syllables_per_theme,
-                        ts,
-                        bpm,
-                        ust_path,
-                        section_length_bars=theme_len_bars
-                    )
-                    # Successfully exported -> remove progress file from this run
-                    try:
-                        prog_file = os.path.join(script_dir, get_progress_filename(cfg or config, run_timestamp))
-                        if os.path.exists(prog_file):
-                            os.remove(prog_file)
-                    except Exception:
-                        pass
-                    # Emvoice flat TXT (both for existing and NEW vocal track)
-                    export_track_index = (len(out_themes[0].get('tracks', [])) - 1) if new_vocal_track_mode else track_idx
-                    txt_all = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}_emvoice.txt")
-                    txt_by_part = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}_emvoice_by_part.txt")
-                    _export_emvoice_txt_for_track(out_themes, export_track_index, syllables_per_theme, txt_all, txt_by_part)
-                    # Ask to export a MIDI of the modified single track
-                    try:
-                        ans = input(f"{Fore.CYAN}Export modified single-track MIDI as well? [y/N]: {Style.RESET_ALL}").strip().lower()
-                    except Exception:
-                        ans = 'n'
-                    if ans in ('y', 'yes'):
-                        try:
-                            # Build MIDI directly from the just-exported UST so notes match 1:1
-                            midi_out = os.path.join(script_dir, f"lyrics_{export_name}_{timestamp}.mid")
-                            ok = _create_midi_from_ust(ust_path, bpm, ts, midi_out)
-                            if not ok:
-                                # Fallback: assemble single-track MIDI from themes to ensure export even with sparse vocals
-                                try:
-                                    section_len_beats = float(theme_len_bars) * float(int(ts.get('beats_per_bar', 4)))
-                                except Exception:
-                                    section_len_beats = 4.0 * float(theme_len_bars)
-                                # Gather absolute notes for the selected vocal track
-                                notes_abs = []
-                                export_idx = (len(out_themes[0].get('tracks', [])) - 1) if new_vocal_track_mode else track_idx
-                                for pi, th in enumerate(out_themes):
-                                    trks_loc = th.get('tracks', []) or []
-                                    if 0 <= export_idx < len(trks_loc):
-                                        for n in (trks_loc[export_idx].get('notes', []) or []):
-                                            try:
-                                                s = float(n.get('start_beat', 0.0)) + float(pi) * section_len_beats
-                                                d = max(0.0, float(n.get('duration_beats', 0.0)))
-                                                p = int(n.get('pitch', 60))
-                                                notes_abs.append({'start_beat': s, 'duration_beats': d, 'pitch': p})
-                                            except Exception:
-                                                continue
-                                if notes_abs:
-                                    single_song = {
-                                        'bpm': bpm,
-                                        'time_signature': ts,
-                                        'key_scale': (cfg or config).get('key_scale',''),
-                                        'tracks': [{
-                                            'instrument_name': 'Synth Vocal',
-                                            'program_num': 0,
-                                            'role': 'vocal',
-                                            'notes': sorted(notes_abs, key=lambda x: x['start_beat'])
-                                        }]
-                                    }
-                                    try:
-                                        create_midi_from_json(single_song, cfg or config, midi_out)
-                                        print(Fore.GREEN + f"Exported single-track MIDI (fallback): {midi_out}" + Style.RESET_ALL)
-                                        ok = True
-                                    except Exception as ee:
-                                        print(Fore.YELLOW + f"Fallback MIDI export failed: {ee}" + Style.RESET_ALL)
-                                else:
-                                    print(Fore.YELLOW + "No vocal notes found across themes; skipping MIDI write." + Style.RESET_ALL)
-                            if ok:
-                                print(Fore.GREEN + f"Exported single-track MIDI: {midi_out}" + Style.RESET_ALL)
-                        except Exception as e:
-                            print(Fore.YELLOW + f"MIDI export failed: {e}" + Style.RESET_ALL)
-                except Exception:
-                    pass
             elif action == 'advanced_opt':
                 print_header("Advanced Optimization Options")
                 artifacts = find_final_artifacts(script_dir)
@@ -11531,8 +12556,8 @@ def combine_and_save_final_song(config, generated_themes, script_dir, timestamp)
         final_base = build_final_song_basename(config, generated_themes, timestamp)
         final_filename = os.path.join(script_dir, f"{final_base}.mid")
 
-        # small delay to ensure clean file sorting by date
-        time.sleep(3)
+        # Small delay to ensure clean file sorting by date
+        time.sleep(config.get('retry_delay', DEFAULT_RETRY_DELAY))
 
         create_midi_from_json(final_song_data, config, final_filename)
 
