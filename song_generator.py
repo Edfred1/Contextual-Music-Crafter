@@ -918,7 +918,7 @@ def _generate_vocal_hints(config: Dict, genre: str, inspiration: str, bpm: float
                         'e': 64, 'fb': 64, 'e#': 65,
                         'f': 65, 'f#': 66, 'gb': 66,
                         'g': 67, 'g#': 68, 'ab': 68,
-                        'a': 69, 'a#': 70, 'bb': 70,
+                        'a': 57, 'a#': 58, 'bb': 58,  # A3 instead of A4
                         'b': 71, 'cb': 71
                     }
                     return table.get(tonic, 60)
@@ -3643,8 +3643,8 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
                         'e': 64, 'fb': 64, 'e#': 65,
                         'f': 65, 'f#': 66, 'gb': 66,
                         'g': 67, 'g#': 68, 'ab': 68,
-                        'a': 69, 'a#': 70, 'bb': 70,
-                        'b': 71, 'cb': 71
+                        'a': 57, 'a#': 58, 'bb': 58,  # A3 instead of A4
+                        'b': 59, 'cb': 59
                     }
                     return table.get(tonic, 60)
                 except Exception:
@@ -3767,31 +3767,49 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         except Exception:
             target_wpb = 2.0
 
+        # Structured basic instructions like instrument prompts
+        basic_instructions = (
+            f"**Role:** Vocal Composer\n"
+            + f"**Section:** {line_ctx} bars\n"
+            + f"**Song Key:** {scale_type.upper()} - Root: {root_note} (MIDI {root_note})\n"
+            + f"**Available Notes:** {scale_notes}\n"
+            + f"**Planned Role:** {role_norm}\n" if isinstance(role_norm, str) and role_norm else ""
+            + f"**Section Description:** {section_description.strip()}\n" if isinstance(section_description, str) and section_description.strip() else ""
+            + f"**Hook:** \"{hook_canonical.strip()}\"\n" if isinstance(hook_canonical, str) and hook_canonical.strip() else ""
+        )
+
+        # Context information
+        context_info = ""
+        if context_full:
+            context_info += f"**Context Tracks (other instruments in this section):**\n{json.dumps(context_full)}\n\n"
+        if any(isinstance(x, dict) and x.get('name')=='__PRIOR_VOCAL__' for x in (context_tracks_basic or [])):
+            context_info += f"**Previous Vocal Parts:**\n{json.dumps([x for x in (context_tracks_basic or []) if isinstance(x, dict) and x.get('name')=='__PRIOR_VOCAL__'])}\n\n"
+        if isinstance(arranger_note, str) and arranger_note.strip():
+            context_info += f"**Arranger Note:** {arranger_note.strip()}\n\n"
+
+        # Lyrics information
+        lyrics_info = ""
+        if isinstance(lyrics_words, list) and lyrics_words:
+            lyrics_info += f"**Lyrics to Set:**\n{json.dumps([w for w in lyrics_words])}\n\n"
+        lyrics_info += f"**Syllable Input (optional):**\n{json.dumps(syllables or [])}\n\n"
+
         prompt = (
-            "ROLE: You are a vocal composer. Compose notes (start_beat,duration,pitch) for the lyrics below; map tokens accordingly. Keep guidance broadly applicable; avoid hard stylistic constraints.\n\n"
-            + ("GLOBAL: " + line_ctx + " bars.\n")
-            + ("CONTEXT TRACKS (full notes for this part):\n" + json.dumps(context_full) + "\n" if context_full else "")
-            + ("PRIOR VOCAL (notes+tokens from previous parts):\n" + json.dumps([x for x in (context_tracks_basic or []) if isinstance(x, dict) and x.get('name')=='__PRIOR_VOCAL__']) + "\n" if any(isinstance(x, dict) and x.get('name')=='__PRIOR_VOCAL__' for x in (context_tracks_basic or [])) else "")
-            + ("Arranger note: " + arranger_note.strip() + "\n" if isinstance(arranger_note, str) and arranger_note.strip() else "")
-            + ("Planned role: " + role_norm + "\n" if isinstance(role_norm, str) and role_norm else "")
-            + ("Plan hint: " + section_description.strip() + "\n" if isinstance(section_description, str) and section_description.strip() else "")
-            + ("Hook canonical: \"" + hook_canonical.strip() + "\"\n" if isinstance(hook_canonical, str) and hook_canonical.strip() else "")
-            + ("Chorus lines: " + json.dumps([l for l in chorus_lines if isinstance(l, str)]) + "\n" if isinstance(chorus_lines, list) and any(isinstance(l, str) for l in chorus_lines) else "")
-            + ("LYRICS TEXT (preferred source):\n" + json.dumps([w for w in (lyrics_words or [])]) + "\n" if isinstance(lyrics_words, list) and lyrics_words else "")
-            + "SYLLABLE INPUT (optional; may be ignored):\n" + json.dumps(syllables or []) + "\n"
+            basic_instructions + "\n"
+            + context_info
+            + lyrics_info
             + "SYLLABLE-TO-NOTE MAPPING INTELLIGENCE:\n"
             + "- Analyze syllable count per word and map accordingly:\n"
-            + "  • 1 syllable → 1 note (0.75-1.5 beats)\n"
+            + "  • 1 syllable → 1 note (1.0-2.0 beats) - NO SHORTER!\n"
             + "  • 2 syllables → 1-2 notes (use melisma '-' SPARINGLY)\n"
             + "  • 3+ syllables → 2+ notes with melisma for natural flow\n"
             + "- Consider word stress patterns: stressed syllables get longer notes\n"
             + "- Match note durations to natural speech rhythm\n"
             + "- ARTICULATION PRIORITY: Keep words clear and singable\n"
-            + "  • Avoid over-splitting simple words into micro-notes\n"
+            + "  • **AVOID MICRO-NOTES**: Never create notes < 0.6 beats\n"
             + "  • Prefer longer, more singable note durations\n"
             + "  • Only use melisma when musically justified, not as default\n\n"
             + f"🎵 SONG KEY: {scale_type.upper()} - Root: {root_note} (MIDI {root_note})\n"
-            + f"🎵 USE ONLY THESE PITCHES: {scale_notes}\n\n"
+            + f"🎵 AVAILABLE PITCHES: {scale_notes}\n\n"
             + ("NUMERIC HINTS (from plan):\n"
                + (f"- tessitura_center={hint_tess}\n" if isinstance(hint_tess, int) else "")
                + (f"- pitch_span_semitones={hint_span}\n" if isinstance(hint_span, int) else "")
@@ -3811,17 +3829,25 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "  • Use melisma ('-') when it serves the musical expression\n"
             + "  • Balance between clear articulation and smooth flow\n"
             + "  • Think about breathing and natural pauses\n"
-            + "  • Avoid over-fragmenting words unless it serves a musical purpose\n\n"
+            + "  • Avoid over-fragmenting words unless it serves a musical purpose\n"
+            + "  • **Micro-timing for Groove**: Slightly anticipate beats (pushing) for urgency, or delay them (pulling) for relaxed feel\n"
+            + "  • **Human Feel**: Add subtle rhythmic variation to avoid robotic precision\n\n"
             + "MUSICAL EXCELLENCE:\n"
             + "- Every note needs a pitch value - this is required for the system to function.\n"
-            + f"- Use ONLY these scale notes: {scale_notes}\n"
-            + f"- Center melodies around root note {root_note} (MIDI {root_note})\n"
             + "- Create melodies that would make a professional vocalist excited to perform them.\n\n"
             + "CREATIVE INTERPRETATION:\n"
             + "- Each vocal role has its own character - interpret this musically.\n"
             + "- Listen to the backing music - create melodies that complement the overall sound.\n"
             + "- Think like a singer - where would you naturally breathe, emphasize, or add expression?\n"
             + "- Use pitch movement to support the emotional narrative of the lyrics.\n\n"
+            + "**MUSICAL STRUCTURE & EVOLUTION:**\n"
+            + "- **Motif Development**: Introduce a core melodic idea and develop it through variation, repetition, and contrast\n"
+            + "- **Avoid Robotic Repetition**: Don't just repeat the same pattern - evolve and grow your musical ideas\n"
+            + "- **Tension & Release**: Build musical tension through pitch movement and resolve it at phrase endings\n"
+            + "- **Voice-leading**: Create smooth melodic movement between notes - think about how each note leads to the next\n"
+            + "- **Passing Tones**: Use scale notes predominantly, but occasional passing tones can add musical interest\n"
+            + "- **Clarity through Space**: Don't create a constant wall of sound - use rests effectively for musical impact\n"
+            + "- **Dynamic Phrasing**: Use pitch variation to create accents and shape the energy of your phrases\n\n"
             + "CADENCE & FORM:\n"
             + "- Favor cadences on scale degrees 1/3/5; use 4→3 and 7→1 resolutions near phrase ends.\n"
             + "- One ornamental gesture per 4 bars; otherwise prefer stepwise motion and clear arcs.\n"
@@ -3853,24 +3879,34 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "- Create phrases that feel organic and authentic to the musical context\n\n"
             + "COMPOSITION RULES:\n"
             + "- Compose freely from the provided lyrics; you MAY split words into syllables as needed, or keep whole words.\n"
+            + "- **MINIMUM DURATION**: Each note ≥ 0.6 beats for natural, singable phrasing.\n"
             + "- Respect a comfortable vocal range; avoid large leaps; prefer stepwise motion and land on stable tones for strong beats.\n"
             + "- Avoid overlapping notes; connect continuation notes end-to-start; place rests only between words/phrases if musically justified.\n"
             + "- Align key content to strong beats or context accents; avoid crowding when other tracks are dense.\n\n"
-            + "REQUIRED OUTPUT FORMAT:\n"
+            + "**IMPORTANT RULES:**\n"
+            + '1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with "{" and ending with "}".\n'
+            + f'2.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n'
+            + f'3.  **Minimum Duration:** Each note ≥ 0.6 beats for natural, singable phrasing.\n'
+            + f'4.  **Required Fields:** Every note MUST have: start_beat, duration_beats, pitch\n'
+            + f'5.  **Timing is Absolute:** start_beat is the absolute position from the beginning of the section.\n\n'
+            + "**OUTPUT FORMAT:**\n"
             + "- Return JSON with 'notes' array containing objects with: start_beat, duration_beats, pitch\n"
-            + "- Example: {\"notes\": [{\"start_beat\": 0.0, \"duration_beats\": 1.5, \"pitch\": 69}, {\"start_beat\": 2.0, \"duration_beats\": 1.0, \"pitch\": 71}]}\n"
-            + "- **CRITICAL**: Every note MUST have all three fields: start_beat, duration_beats, pitch\n\n"
+            + f"- Example: {{\"notes\": [{{\"start_beat\": 0.0, \"duration_beats\": 1.5, \"pitch\": {root_note}}}, {{\"start_beat\": 2.0, \"duration_beats\": 1.0, \"pitch\": {root_note + 2}}}, {{\"start_beat\": 3.0, \"duration_beats\": 1.5, \"pitch\": {root_note + 4}}}]}}\n"
+            + f"- **VARIETY EXAMPLE**: Notice how the example uses {root_note}, {root_note + 2}, and {root_note + 4} - different scale notes!\n\n"
             + "VARIATION POLICY:\n"
             + "- Prefer subtle variation over strict loops, unless the context suggests repetition.\n"
             + "- For spoken/whisper roles, repetition of words is acceptable; prioritize timing/placement over pitch variety.\n"
-            + "- Aim for musical intent: when in doubt, choose clarity and groove over forced variation.\n\n"
+            + "- Aim for musical intent: when in doubt, choose clarity and groove over forced variation.\n"
+            + f"- **SCALE EXPLORATION**: Challenge yourself to use at least 3-4 different notes from {scale_notes}!\n"
+            + f"- **ROOT NOTE RETURN**: Always return to {root_note} (MIDI {root_note}) to ground your melody.\n\n"
+            + "**ROLE-SPECIFIC GUIDANCE:**\n"
             # Role-specific guidance blocks (only emitted for the active role)
             + ("VERSE FOCUS (role-specific):\n- Advance the narrative with concrete images.\n- Keep phrasing punchy and rhythmic; prefer short words/lines.\n- Two-phrase A–A' per 4 bars; A' is a minimal variation.\n\n" if is_verse else "")
             + ("PRE-CHORUS FOCUS (role-specific):\n- Build tension and lift into the chorus; rising contour preferred.\n- Reuse a short priming phrase; avoid revealing the hook.\n\n" if is_prechorus else "")
             + ("BRIDGE FOCUS (role-specific):\n- Provide contrast in color/angle; introduce a complementary motif.\n- Keep range moderate; avoid direct chorus wording.\n\n" if is_bridge else "")
-            + ("BACKING FOCUS (role-specific):\n- Echo/answer the lead with very short, repeatable fragments.\n- Stay out of the way; simple contours and sparse rhythm.\n\n" if is_backing else "")
-            + ("SPOKEN FOCUS (role-specific):\n- Short spoken fragments; rhythmically aligned; use 1-2 pitches for musicality.\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders).\n- Keep total duration sparse; prefer longer rests.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_spoken else "")
-            + ("WHISPER FOCUS (role-specific):\n- Very quiet, breathy words/phrases; leave space.\n- Do NOT use pure vowel placeholders ('Ah/Ooh/Mmm'); use lexical tokens.\n- Avoid dense onsets; prefer '-' holds on micro-notes.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_whisper else "")
+            + ("BACKING FOCUS (role-specific):\n- Echo/answer the lead with musical phrases; avoid micro-fragments.\n- Stay out of the way; simple contours and sparse rhythm.\n- **MINIMUM DURATION**: Each note ≥ 0.5 beats for musical coherence.\n\n" if is_backing else "")
+            + ("SPOKEN FOCUS (role-specific):\n- Natural spoken phrases with musical rhythm; use 1-2 pitches for musicality.\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders).\n- **MINIMUM DURATION**: Each note ≥ 0.6 beats for natural speech flow.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_spoken else "")
+            + ("WHISPER FOCUS (role-specific):\n- Very quiet, breathy words/phrases; leave space.\n- Do NOT use pure vowel placeholders ('Ah/Ooh/Mmm'); use lexical tokens.\n- **MINIMUM DURATION**: Each note ≥ 0.6 beats for natural breathy flow.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_whisper else "")
             + ("CHANT FOCUS (role-specific):\n- Simple repetitive cells sized to bar; minimal vocabulary; percussive alignment.\n- Avoid lyrical progression; keep motif tight.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_chant else "")
             + ("ADLIB FOCUS (role-specific):\n- Occasional interjections around lead phrases; extremely sparse.\n- Prefer short ascents/descents; avoid stepping on main content.\n\n" if is_adlib else "")
             + ("HARMONY/DOUBLES FOCUS (role-specific):\n- Support lead on sustained notes or exact doubles; do not introduce new text.\n- Keep lower velocity/volume implied; align tightly.\n\n" if (is_harmony or is_doubles) else "")
@@ -3929,6 +3965,11 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
             + ("- HARD (breaths): If lyrics contain '[br]', produce at least one short note per '[br]'.\n" if is_breaths else "")
             + ("- HARD (vocal_fx): If lyrics are provided, produce at least one short onset; if impossible, prefer intentional silence (model-driven).\n" if is_vocal_fx else "")
+            + "\n**FINAL REMINDER:**\n"
+            + f"- Use ONLY these scale notes: {scale_notes}\n"
+            + f"- Center melodies around {root_note} (MIDI {root_note})\n"
+            + "- Each note ≥ 0.6 beats for singable phrasing\n"
+            + "- Return valid JSON with 'notes' array\n"
         )
         # Retry wrapper for Stage-2 similar to Stage-1
         def _call_with_rotation_comp(prompt_text: str) -> dict | None:
@@ -4847,8 +4888,8 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
                     d_beats = min(d_beats, max(0.0, part_end_abs - abs_start))
                     if d_beats <= 0.0:
                         continue
-                    # Minimum duration 0.4 beats, then in ticks
-                    note_ticks = int(round(max(0.4, d_beats) * ticks_per_unit))
+                    # Minimum duration 0.6 beats, then in ticks
+                    note_ticks = int(round(max(0.6, d_beats) * ticks_per_unit))
                     # Dynamic clamp around center, if available
                     try:
                         if isinstance(center_ref, (int, float)):
@@ -6509,8 +6550,8 @@ def _synthesize_notes_from_tokens(tokens: List[str], grid_notes: List[Dict], ts:
                     ks = str(key_scale or '').lower()
                     roots = {
                         'c': 60, 'c#': 61, 'db': 61, 'd': 62, 'd#': 63, 'eb': 63, 'e': 64,
-                        'f': 65, 'f#': 66, 'gb': 66, 'g': 67, 'g#': 68, 'ab': 68, 'a': 69,
-                        'a#': 70, 'bb': 70, 'b': 71
+                        'f': 65, 'f#': 66, 'gb': 66, 'g': 67, 'g#': 68, 'ab': 68, 'a': 57,  # A3 instead of A4
+                        'a#': 58, 'bb': 58, 'b': 59
                     }
                     for r in roots.keys():
                         if ks.startswith(r):
