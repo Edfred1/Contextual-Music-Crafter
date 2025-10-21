@@ -395,10 +395,9 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         preview = []
 
     # Prompt (legacy): ask for exactly num_slots tokens
-    # Use artifact lyrics_language if available, otherwise fallback to config
-    language = str(cfg.get("lyrics_language", "") if cfg else config.get("lyrics_language", "English"))
-    # Use artifact key_scale if available, otherwise fallback to config
-    key_scale = str(cfg.get("key_scale", "") if cfg else config.get("key_scale", "")).strip()
+    # Use unified fallback logic for consistent data source handling
+    language = str(_get_config_value(cfg, config, "lyrics_language", "English"))
+    key_scale = str(_get_config_value(cfg, config, "key_scale", "")).strip()
     vocab = {
         "context_instruments": (context_tracks_basic or []),
         "style_keywords": [genre, inspiration][:8]
@@ -418,16 +417,23 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         + "- Favor singable vowels on longer/stressed notes (a/ah/o); keep i/e short near upper range.\n"
         + "- Encourage motif coherence: reuse short lexical cells with subtle variation; avoid semantic noise.\n"
         + "- For spoken/whisper roles: remain tonally centered in wording and pacing; minimal pitch implication is fine but keep phrase arcs musical.\n"
-        + "- Melisma budget: default ≤ 20% of onsets; allow up to 35% only if melisma_bias ≥ 0.7.\n"
-        + "- STRICT MELISMA CONTROL: Avoid more than 2 consecutive '-' tokens; prefer meaningful content over empty sustains.\n"
-        + "- QUALITY OVER MELISMA: Better to use shorter, meaningful words than excessive melisma that makes lyrics unclear.\n"
+        + "- Melisma budget: default ≤ 30% of onsets; allow up to 45% only if melisma_bias ≥ 0.6.\n"
+        + "- NATURAL PHRASING: Think like a singer, not a note generator. Create flowing phrases that make sense together.\n"
+        + "- SENTENCE COHERENCE: Avoid choppy, word-by-word delivery. Group words into meaningful phrases with natural pauses.\n"
+        + "- VOCAL FLOW: Use melisma to connect words within phrases, not just to fill musical gaps.\n"
         + "\nStrict output format (JSON only):\n"
         + "{\n  \"syllables\": [string, string, ...]\n}\n\n"
         + f"Constraints:\n- The array length MUST be exactly {num_slots}.\n"
         + "- No null/empty items.\n- Avoid placeholder syllables like 'la/na/da' as content; prefer meaningful minimal words.\n"
         + "- Prefer open vowels on long/high notes; place lexical stresses roughly on stress=1 notes.\n"
         + "- Keep 1:1 mapping: one token per onset. Use '-' only to continue a previous word (melisma); never on a fresh onset.\n"
+        + "- PHRASING PRIORITY: Think like a singer delivering a coherent message. Group words into meaningful phrases.\n"
+        + "- AVOID CHOPPINESS: Don't create isolated words with long pauses. Create flowing, understandable phrases.\n"
+        + "- MINIMUM PHRASE LENGTH: Create phrases of 3-5 words minimum, not single isolated words.\n"
+        + "- AVOID MICRO-NOTES: Don't split words into tiny fragments. Keep words intact when possible.\n"
         + "- Multi-syllable words: split when ≥2 onsets; avoid over-splitting. Monosyllables across many onsets: prefer a 2-syllable synonym; else at most one '-'.\n"
+        + "- ANTI-MICRO-NOTE RULE: If you have many short notes (0.4-0.75 beats), group them into longer phrases instead of splitting words.\n"
+        + "- PHRASE COHERENCE: Create complete thoughts, not word fragments. Each phrase should make sense on its own.\n"
         + "- CHORUS (only if a hook exists): place the hook on strong downbeats; repeat 2–3× with micro-variation (semantic core intact).\n"
         + "- VERSE (optional): adopt a bulletin structure (headline → two surreal segments → closing sting) if a news/report vibe is intended.\n"
         + "- Nonsense budget ≤ 10% of tokens only if nonsense is allowed/used; vary syllables; avoid back-to-back nonsense lines.\n"
@@ -449,13 +455,13 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         return ["la" for _ in range(num_slots)]
 
     try:
-        # Use session override if available, otherwise config (no flash fallback)
+        # Use session override if available, otherwise unified fallback logic
         global SESSION_MODEL_OVERRIDE
-        model_name = SESSION_MODEL_OVERRIDE or config.get("model_name") or config.get("model")
+        model_name = SESSION_MODEL_OVERRIDE or _get_config_value(cfg, config, "model_name") or config.get("model")
         if REQUESTED_SWITCH_MODEL:
             model_name = REQUESTED_SWITCH_MODEL
         if not model_name:
-            model_name = config.get("model_name", "gemini-2.5-pro")
+            model_name = "gemini-2.5-pro"
         try:
             if REQUESTED_SWITCH_MODEL:
                 model_name = REQUESTED_SWITCH_MODEL
@@ -1615,7 +1621,7 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
                     if isinstance(p, dict):
                         lp = {
                             "target_wpb": (float(p.get('target_wpb')) if isinstance(p.get('target_wpb'), (int, float)) else None),
-                            "melisma_bias": (max(0.15, min(0.4, float(p.get('melisma_bias')))) if isinstance(p.get('melisma_bias'), (int, float)) else None),
+                            "melisma_bias": (max(0.25, min(0.55, float(p.get('melisma_bias')))) if isinstance(p.get('melisma_bias'), (int, float)) else None),
                             "min_word_beats": (float(p.get('min_word_beats')) if isinstance(p.get('min_word_beats'), (int, float)) else None),
                             "allow_nonsense": (int(p.get('allow_nonsense')) if isinstance(p.get('allow_nonsense'), (int, float)) else None)
                         }
@@ -2151,28 +2157,30 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         preview = []
         full_notes = []
 
-    # Use artifact lyrics_language if available, otherwise fallback to config
-    language = str(cfg.get("lyrics_language", "") if cfg else config.get("lyrics_language", "English"))
-    # Use artifact key_scale if available, otherwise fallback to config
-    key_scale = str(cfg.get("key_scale", "") if cfg else config.get("key_scale", "")).strip()
+    # Use unified fallback logic for consistent data source handling
+    language = str(_get_config_value(cfg, config, "lyrics_language", "English"))
+    key_scale = str(_get_config_value(cfg, config, "key_scale", "")).strip()
     vocab_ctx = {"context_instruments": (context_tracks_basic or []), "style_keywords": [genre, inspiration][:8]}
 
-    # Soft preferences (auto-derived; config values are treated as hints, not hard overrides)
-    cfg_target_wpb = None
-    cfg_melisma_bias = None
-    cfg_min_word_beats = None
-    cfg_allow_nonsense = None
+    # Soft preferences using unified fallback logic
+    cfg_target_wpb = _get_config_value(cfg, config, 'lyrics_target_words_per_bar')
+    cfg_melisma_bias = _get_config_value(cfg, config, 'lyrics_melisma_bias')
+    cfg_min_word_beats = _get_config_value(cfg, config, 'lyrics_min_word_beats')
+    cfg_allow_nonsense = _get_config_value(cfg, config, 'lyrics_allow_nonsense')
+    
+    # Validate and convert to appropriate types
     try:
-        if isinstance(config.get("lyrics_target_words_per_bar"), (int, float)):
-            cfg_target_wpb = float(config.get("lyrics_target_words_per_bar"))
-        if isinstance(config.get("lyrics_melisma_bias"), (int, float)):
-            cfg_melisma_bias = max(0.0, min(1.0, float(config.get("lyrics_melisma_bias"))))
-        if isinstance(config.get("lyrics_min_word_beats"), (int, float)):
-            cfg_min_word_beats = float(config.get("lyrics_min_word_beats"))
-        if isinstance(config.get("lyrics_allow_nonsense"), int):
-            cfg_allow_nonsense = int(config.get("lyrics_allow_nonsense")) == 1
-    except Exception:
-        cfg_target_wpb = None; cfg_melisma_bias = None; cfg_min_word_beats = None; cfg_allow_nonsense = None
+        if cfg_target_wpb is not None:
+            cfg_target_wpb = float(cfg_target_wpb)
+        if cfg_melisma_bias is not None:
+            cfg_melisma_bias = max(0.0, min(1.0, float(cfg_melisma_bias)))
+        if cfg_min_word_beats is not None:
+            cfg_min_word_beats = float(cfg_min_word_beats)
+        if cfg_allow_nonsense is not None:
+            cfg_allow_nonsense = int(cfg_allow_nonsense) == 1
+    except (ValueError, TypeError):
+        # Reset to None if conversion fails
+        cfg_target_wpb = cfg_melisma_bias = cfg_min_word_beats = cfg_allow_nonsense = None
 
     # Estimate bars in this segment for guidance (heuristic)
     est_bars = None
@@ -2220,8 +2228,8 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         # Chorus: stronger sustain for carpets of short notes
         if role == 'chorus' and short_note_ratio >= 0.4:
             mb_adj += 0.2
-        # Stricter melisma control - reduce default bias and tighten range
-        derived_melisma_bias = max(0.15, min(0.40, base_mb + mb_adj - 0.20))
+        # More natural phrasing - allow higher melisma for better flow
+        derived_melisma_bias = max(0.25, min(0.55, base_mb + mb_adj - 0.10))
 
         if note_durs:
             nd_sorted = sorted(note_durs)
@@ -2243,7 +2251,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
             if isinstance(cfg_target_wpb, (int, float)) else derived_target_wpb
         )
         melisma_bias = (
-            blend*min(0.4, max(0.15, float(cfg_melisma_bias))) + (1.0-blend)*derived_melisma_bias
+            blend*min(0.55, max(0.25, float(cfg_melisma_bias))) + (1.0-blend)*derived_melisma_bias
             if isinstance(cfg_melisma_bias, (int, float)) else derived_melisma_bias
         )
         min_word_beats = (
@@ -2260,6 +2268,8 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
 
     # Fallback if API unavailable
     if genai_local is None or not API_KEYS:
+        print(Fore.RED + "ERROR: API unavailable - using generic fallback lyrics!" + Style.RESET_ALL)
+        print(Fore.RED + "This indicates a serious configuration problem!" + Style.RESET_ALL)
         # Offline fallback without placeholder syllables
         try:
             vocab_words = [
@@ -2697,7 +2707,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     if section_role in ('breaths',):
         prompt_parts.append("- '[br]' usage: Only on dedicated short rest notes; never inside words; never as the only token in 1-note segments (use a short content impulse instead, if needed).\n")
     prompt_parts.append("- Optional phoneme_hints per note (e.g., [k a t]) for ambiguous words (separate list).\n\n")
-    prompt_parts.append("MELISMA / SYLLABLE MAPPING (policy):\n- High melisma mode (melisma_bias≥0.7): Prefer holding vowels across weak beats using '-' on continuation onsets. Do NOT introduce new content words on every micro-onset.\n- Low melisma mode (melisma_bias<0.7): Prefer 1:1 (one syllable per onset), but allow melisma on long/stressed notes.\n- STRICT MELISMA CONTROL: Avoid more than 2 consecutive '-' tokens; prefer meaningful content over empty sustains.\n- QUALITY OVER MELISMA: Better to use shorter, meaningful words than excessive melisma that makes lyrics unclear.\n- MAXIMUM MELISMA: Never exceed 35% of total tokens as melisma, even in high melisma mode.\n\n")
+    prompt_parts.append("MELISMA / SYLLABLE MAPPING (policy):\n- High melisma mode (melisma_bias≥0.6): Create flowing, connected phrases. Use '-' to connect words within meaningful phrases, not just to fill musical gaps.\n- Low melisma mode (melisma_bias<0.6): Prefer 1:1 (one syllable per onset), but allow melisma on long/stressed notes for natural phrasing.\n- NATURAL PHRASING: Think like a singer delivering a message, not a machine placing notes. Group words into coherent phrases.\n- SENTENCE FLOW: Avoid choppy delivery where each word is isolated. Create flowing, understandable phrases with natural pauses.\n- MINIMUM PHRASE LENGTH: Create phrases of 3-5 words minimum, not single isolated words.\n- AVOID MICRO-NOTES: Don't split words into tiny fragments. Keep words intact when possible.\n- VOCAL COHERENCE: Use melisma to enhance meaning and flow, not just to fill musical space.\n- MAXIMUM MELISMA: Never exceed 45% of total tokens as melisma, even in high melisma mode.\n\n")
     prompt_parts.append("ILLUSTRATIVE EXAMPLES:\n")
     prompt_parts.append("- monosyllable over 3 onsets → words=['shine'], spans=[3] ⇒ tokens=['shine','-','-'].\n")
     prompt_parts.append("- 2 words over 3 onsets → words=['o-ver','load'], spans=[1,2] ⇒ tokens=['o-ver','load','-'].\n\n")
@@ -3277,10 +3287,9 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
         temperature = float(config.get("lyrics_temperature", config.get("temperature", 0.6)))
         generation_config = {"response_mime_type": "application/json", "temperature": temperature}
         model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
-        # Use artifact lyrics_language if available, otherwise fallback to config
-        language = str(cfg.get("lyrics_language", "") if cfg else config.get("lyrics_language", "English"))
-        # Use artifact key_scale if available, otherwise fallback to config
-        key_scale = str(cfg.get("key_scale", "") if cfg else config.get("key_scale", "")).strip()
+        # Use unified fallback logic for consistent data source handling
+        language = str(_get_config_value(cfg, config, "lyrics_language", "English"))
+        key_scale = str(_get_config_value(cfg, config, "key_scale", "")).strip()
         section_role = _normalize_section_role(section_label)
         # Prefer planned role from section_description if available (e.g., "[Plan] role=prechorus")
         try:
@@ -3915,8 +3924,8 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "- Prefer words with open vowels (ah, oh, oo, ee) for sustained notes\n"
             + "- Create phrases that feel organic and authentic to the musical context\n\n"
             + "COMPOSITION RULES:\n"
-            + "- Compose freely from the provided lyrics; you MAY split words into syllables as needed, or keep whole words.\n"
-            + "- **MINIMUM DURATION**: Each note ≥ 0.6 beats for natural, singable phrasing.\n"
+            + "- **PHRASE-BASED COMPOSITION**: Keep words intact as much as possible. Only split multi-syllable words when absolutely necessary for musical flow.\n"
+            + "- **MINIMUM DURATION**: Each note ≥ 0.8 beats for natural, singable phrasing. Avoid micro-notes.\n"
             + "- Respect a comfortable vocal range; avoid large leaps; prefer stepwise motion and land on stable tones for strong beats.\n"
             + "- Avoid overlapping notes; connect continuation notes end-to-start; place rests only between words/phrases if musically justified.\n"
             + "- Align key content to strong beats or context accents; avoid crowding when other tracks are dense.\n\n"
@@ -3924,7 +3933,7 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + '1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with "{" and ending with "}".\n'
             + f'2.  **CRITICAL - PITCH REQUIRED:** Every single note MUST have a "pitch" field with a MIDI note number from {scale_notes}.\n'
             + f'3.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n'
-            + f'4.  **Minimum Duration:** Each note ≥ 0.6 beats for natural, singable phrasing.\n'
+            + f'4.  **Minimum Duration:** Each note ≥ 0.8 beats for natural, singable phrasing.\n'
             + f'5.  **Required Fields:** Every note MUST have: start_beat, duration_beats, pitch\n'
             + f'6.  **Timing is Absolute:** start_beat is the absolute position from the beginning of the section.\n\n'
             + "**OUTPUT FORMAT:**\n"
@@ -3935,6 +3944,8 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "VARIATION POLICY:\n"
             + "- Prefer subtle variation over strict loops, unless the context suggests repetition.\n"
             + "- For spoken/whisper roles, repetition of words is acceptable; prioritize timing/placement over pitch variety.\n"
+            + "- **WORD INTEGRITY**: The lyrics were already tokenized for you. Keep words intact on single notes when possible.\n"
+            + "- **ANTI-MICRO-NOTE ENFORCEMENT**: If you see short notes (0.4-0.75 beats), group them into longer phrases instead of creating more micro-notes.\n"
             + "- Aim for musical intent: when in doubt, choose clarity and groove over forced variation.\n"
             + f"- **SCALE EXPLORATION**: Challenge yourself to use at least 3-4 different notes from {scale_notes}!\n"
             + f"- **ROOT NOTE RETURN**: Always return to {root_note} (MIDI {root_note}) to ground your melody.\n\n"
@@ -3997,13 +4008,17 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "  • Avoid over-fragmenting words into micro-notes that are hard to sing\n"
             + "  • Use longer note durations for better word clarity and musicality\n"
             + "  • Only split words when rhythmically essential, not as default approach\n"
-            + "- MELISMA RESTRAINT: Use melisma ('-') very sparingly:\n"
-            + "  • Single words (1 syllable): NEVER use melisma\n"
-            + "  • Two-syllable words: Use melisma only if rhythmically compelling\n"
-            + "  • Three+ syllable words: Use melisma judiciously for natural flow\n"
-            + "  • Avoid excessive melisma that makes words unclear or hard to sing\n"
-            + "  • MAXIMUM MELISMA: Never exceed 35% of total tokens as melisma\n"
-            + "  • QUALITY OVER MELISMA: Better to use shorter, meaningful words than excessive melisma\n"
+            + "- NATURAL PHRASING: Think like a singer delivering a coherent message:\n"
+            + "  • Group words into meaningful phrases, not isolated individual words\n"
+            + "  • Use melisma to connect words within phrases for natural flow\n"
+            + "  • Avoid choppy, word-by-word delivery that breaks sentence meaning\n"
+            + "  • Create flowing, understandable phrases with natural pauses\n"
+            + "  • MINIMUM PHRASE LENGTH: Create phrases of 3-5 words minimum\n"
+            + "  • AVOID MICRO-NOTES: Don't split words into tiny fragments\n"
+            + "  • SINGLE WORDS: Use melisma only if it enhances phrase flow\n"
+            + "  • MULTI-SYLLABLE WORDS: Use melisma to maintain phrase coherence\n"
+            + "  • MAXIMUM MELISMA: Never exceed 45% of total tokens as melisma\n"
+            + "  • VOCAL COHERENCE: Prioritize meaning and flow over strict note-to-syllable mapping\n"
             + "- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
             + ("- HARD (breaths): If lyrics contain '[br]', produce at least one short note per '[br]'.\n" if is_breaths else "")
             + ("- HARD (vocal_fx): If lyrics are provided, produce at least one short onset; if impossible, prefer intentional silence (model-driven).\n" if is_vocal_fx else "")
@@ -5649,6 +5664,111 @@ def _create_midi_from_ust(ust_path: str, bpm: float | int, ts: Dict, output_file
         return False
 
 # --- RESPONSE PARSING HELPERS (Robust JSON extraction) ---
+def _validate_extracted_cfg(cfg: Dict) -> Dict:
+    """Validate and clean extracted cfg data from progress files with explicit warnings."""
+    validated = {}
+    warnings = []
+    
+    # String fields - ensure they're strings and not empty
+    string_fields = ['key_scale', 'root_note', 'scale_type', 'genre', 'inspiration', 'lyrics_language', 'model_name']
+    for field in string_fields:
+        if field in cfg and cfg[field] is not None:
+            value = str(cfg[field]).strip()
+            if value:  # Only include non-empty strings
+                validated[field] = value
+            else:
+                warnings.append(f"Empty string for '{field}' - ignoring")
+        elif field in cfg:
+            warnings.append(f"Null value for '{field}' - ignoring")
+    
+    # Numeric fields - validate ranges
+    if 'bpm' in cfg and cfg['bpm'] is not None:
+        try:
+            bpm_val = float(cfg['bpm'])
+            if 30 <= bpm_val <= 300:  # Reasonable BPM range
+                validated['bpm'] = bpm_val
+            else:
+                warnings.append(f"BPM {bpm_val} out of range (30-300) - ignoring")
+        except (ValueError, TypeError):
+            warnings.append(f"Invalid BPM value '{cfg['bpm']}' - ignoring")
+    
+    if 'part_length' in cfg and cfg['part_length'] is not None:
+        try:
+            length_val = int(cfg['part_length'])
+            if 1 <= length_val <= 64:  # Reasonable length range
+                validated['part_length'] = length_val
+            else:
+                warnings.append(f"Part length {length_val} out of range (1-64) - ignoring")
+        except (ValueError, TypeError):
+            warnings.append(f"Invalid part_length value '{cfg['part_length']}' - ignoring")
+    
+    # Temperature fields - validate 0.0-2.0 range
+    temp_fields = ['temperature', 'lyrics_temperature']
+    for field in temp_fields:
+        if field in cfg and cfg[field] is not None:
+            try:
+                temp_val = float(cfg[field])
+                if 0.0 <= temp_val <= 2.0:
+                    validated[field] = temp_val
+                else:
+                    warnings.append(f"{field} {temp_val} out of range (0.0-2.0) - ignoring")
+            except (ValueError, TypeError):
+                warnings.append(f"Invalid {field} value '{cfg[field]}' - ignoring")
+    
+    # Lyrics-specific numeric fields
+    lyrics_fields = {
+        'lyrics_target_words_per_bar': (0.5, 8.0),
+        'lyrics_melisma_bias': (0.0, 1.0),
+        'lyrics_min_word_beats': (0.1, 4.0),
+        'lyrics_allow_nonsense': (0, 1)
+    }
+    
+    for field, (min_val, max_val) in lyrics_fields.items():
+        if field in cfg and cfg[field] is not None:
+            try:
+                val = float(cfg[field])
+                if min_val <= val <= max_val:
+                    validated[field] = val
+                else:
+                    warnings.append(f"{field} {val} out of range ({min_val}-{max_val}) - ignoring")
+            except (ValueError, TypeError):
+                warnings.append(f"Invalid {field} value '{cfg[field]}' - ignoring")
+    
+    # Time signature - validate structure
+    if 'time_signature' in cfg and cfg['time_signature'] is not None:
+        ts = cfg['time_signature']
+        if isinstance(ts, dict) and 'beats_per_bar' in ts and 'beat_value' in ts:
+            try:
+                beats = int(ts['beats_per_bar'])
+                beat_val = int(ts['beat_value'])
+                if 1 <= beats <= 16 and beat_val in [1, 2, 4, 8, 16]:
+                    validated['time_signature'] = ts
+                else:
+                    warnings.append(f"Invalid time signature {beats}/{beat_val} - ignoring")
+            except (ValueError, TypeError):
+                warnings.append(f"Invalid time signature structure '{ts}' - ignoring")
+        else:
+            warnings.append(f"Invalid time signature format '{ts}' - ignoring")
+    
+    # Print all warnings
+    if warnings:
+        print(Fore.YELLOW + f"JSON Validation Warnings ({len(warnings)}):" + Style.RESET_ALL)
+        for warning in warnings:
+            print(Fore.YELLOW + f"  - {warning}" + Style.RESET_ALL)
+    
+    return validated
+
+def _get_config_value(cfg: Dict, config: Dict, key: str, default=None, warn_missing=True):
+    """Unified fallback logic: cfg -> config -> default with explicit warnings"""
+    if cfg and key in cfg and cfg[key] is not None:
+        return cfg[key]
+    
+    # Warn if falling back to config when cfg was expected
+    if cfg and warn_missing:
+        print(Fore.YELLOW + f"Warning: Missing '{key}' in cfg, using config fallback" + Style.RESET_ALL)
+    
+    return config.get(key, default)
+
 def _extract_text_from_response(response) -> str:
     """Safely extracts raw text from a Gemini response. Returns '' on failure."""
     try:
@@ -10956,30 +11076,33 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     selected_path = None
                     is_final = False
 
-                # Helper: best-effort extraction from progress files for lyrics
+                # Helper: comprehensive extraction from progress files for lyrics
                 def _extract_from_progress_for_lyrics(pdata: Dict) -> tuple:
-                    # Extract original JSON data from the config stored in progress file
+                    """Extract and validate all relevant configuration data from progress files."""
                     stored_config = pdata.get('config') or {}
                     cfg = {}
                     
-                    # Extract musical parameters from stored config (these come from the original JSON)
-                    if 'key_scale' in stored_config:
-                        cfg['key_scale'] = stored_config['key_scale']
-                    if 'root_note' in stored_config:
-                        cfg['root_note'] = stored_config['root_note']
-                    if 'scale_type' in stored_config:
-                        cfg['scale_type'] = stored_config['scale_type']
-                    if 'bpm' in stored_config:
-                        cfg['bpm'] = stored_config['bpm']
-                    if 'genre' in stored_config:
-                        cfg['genre'] = stored_config['genre']
-                    if 'inspiration' in stored_config:
-                        cfg['inspiration'] = stored_config['inspiration']
+                    # Comprehensive extraction of all relevant fields
+                    extraction_fields = [
+                        'key_scale', 'root_note', 'scale_type', 'bpm', 'genre', 'inspiration',
+                        'lyrics_language', 'time_signature', 'part_length', 'temperature',
+                        'lyrics_temperature', 'lyrics_target_words_per_bar', 'lyrics_melisma_bias',
+                        'lyrics_min_word_beats', 'lyrics_allow_nonsense', 'model_name'
+                    ]
+                    
+                    for field in extraction_fields:
+                        if field in stored_config and stored_config[field] is not None:
+                            cfg[field] = stored_config[field]
+                    
+                    # Validate and clean extracted data
+                    cfg = _validate_extracted_cfg(cfg)
                     
                     print(f"[DEBUG] Progress data keys: {list(pdata.keys())}")
                     print(f"[DEBUG] Extracted cfg from progress: {cfg}")
+                    
                     length_bars = int(pdata.get('theme_length') or pdata.get('length') or previous_settings.get('length', DEFAULT_LENGTH))
                     themes = None
+                    
                     # Try by type first
                     ptype = str(pdata.get('type') or '').lower()
                     if 'generation' in ptype:
@@ -12128,7 +12251,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 if isinstance(lprefs.get('target_wpb'), (int, float)):
                                     local_overrides['lyrics_target_words_per_bar'] = float(lprefs.get('target_wpb'))
                                 if isinstance(lprefs.get('melisma_bias'), (int, float)):
-                                    val = max(0.15, min(0.4, float(lprefs.get('melisma_bias'))))
+                                    val = max(0.25, min(0.55, float(lprefs.get('melisma_bias'))))
                                     local_overrides['lyrics_melisma_bias'] = val
                                 if isinstance(lprefs.get('min_word_beats'), (int, float)):
                                     local_overrides['lyrics_min_word_beats'] = float(lprefs.get('min_word_beats'))
