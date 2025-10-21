@@ -368,16 +368,142 @@ def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tup
 
 
 # --- MIDI Analysis ---
-def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict]:
+def _midi_key_to_note_scale(key_sig: int, mode: int) -> Tuple[str, str]:
+    """Convert MIDI key signature to note name and scale type."""
+    # Major keys with sharps/flats
+    major_keys = {
+        0: "C", 1: "G", 2: "D", 3: "A", 4: "E", 5: "B", 6: "F#", 7: "C#",
+        -1: "F", -2: "Bb", -3: "Eb", -4: "Ab", -5: "Db", -6: "Gb", -7: "Cb"
+    }
+    
+    # Minor keys (relative minors)
+    minor_keys = {
+        0: "A", 1: "E", 2: "B", 3: "F#", 4: "C#", 5: "G#", 6: "D#", 7: "A#",
+        -1: "D", -2: "G", -3: "C", -4: "F", -5: "Bb", -6: "Eb", -7: "Ab"
+    }
+    
+    if mode == 0:  # Major
+        root_note = major_keys.get(key_sig, "C")
+        scale_type = "major"
+    else:  # Minor
+        root_note = minor_keys.get(key_sig, "A")
+        scale_type = "minor"
+    
+    return root_note, scale_type
+
+def _analyze_key_from_pitches(notes: List[Dict]) -> Tuple[str, str]:
+    """Analyze key/scale from pitch class histogram of all notes."""
+    if not notes:
+        return "C", "major"
+    
+    # Count pitch classes (0-11)
+    pitch_class_counts = [0] * 12
+    for note in notes:
+        pitch = note.get("pitch", 60)
+        pc = pitch % 12
+        pitch_class_counts[pc] += 1
+    
+    # Find most common pitch classes
+    total_notes = sum(pitch_class_counts)
+    if total_notes == 0:
+        return "C", "major"
+    
+    # Normalize to percentages
+    pc_percentages = [count / total_notes for count in pitch_class_counts]
+    
+    # Scale patterns based on song_generator.py scale_intervals
+    scale_patterns = {
+        # Major scales
+        "C major": [0, 2, 4, 5, 7, 9, 11], "G major": [7, 9, 11, 0, 2, 4, 6], "D major": [2, 4, 6, 7, 9, 11, 1],
+        "A major": [9, 11, 1, 2, 4, 6, 8], "E major": [4, 6, 8, 9, 11, 1, 3], "B major": [11, 1, 3, 4, 6, 8, 10],
+        "F# major": [6, 8, 10, 11, 1, 3, 5], "C# major": [1, 3, 5, 6, 8, 10, 0], "F major": [5, 7, 9, 10, 0, 2, 4],
+        "Bb major": [10, 0, 2, 3, 5, 7, 9], "Eb major": [3, 5, 7, 8, 10, 0, 2], "Ab major": [8, 10, 0, 1, 3, 5, 7],
+        "Db major": [1, 3, 5, 6, 8, 10, 0], "Gb major": [6, 8, 10, 11, 1, 3, 5],
+        
+        # Minor scales (natural minor)
+        "A minor": [0, 2, 3, 5, 7, 8, 10], "E minor": [7, 9, 10, 0, 2, 4, 5], "B minor": [2, 4, 5, 7, 9, 10, 0],
+        "F# minor": [9, 11, 0, 2, 4, 5, 7], "C# minor": [4, 6, 7, 9, 11, 0, 2], "G# minor": [11, 1, 2, 4, 6, 7, 9],
+        "D# minor": [6, 8, 9, 11, 1, 2, 4], "A# minor": [1, 3, 4, 6, 8, 9, 11], "D minor": [5, 7, 8, 10, 0, 1, 3],
+        "G minor": [10, 0, 1, 3, 5, 6, 8], "C minor": [3, 5, 6, 8, 10, 11, 1], "F minor": [8, 10, 11, 1, 3, 4, 6],
+        "Bb minor": [1, 3, 4, 6, 8, 9, 11], "Eb minor": [6, 8, 9, 11, 1, 2, 4],
+        
+        # Harmonic minor
+        "A harmonic minor": [0, 2, 3, 5, 7, 8, 11], "E harmonic minor": [7, 9, 10, 0, 2, 4, 6],
+        "B harmonic minor": [2, 4, 5, 7, 9, 10, 1], "F# harmonic minor": [9, 11, 0, 2, 4, 5, 8],
+        "C# harmonic minor": [4, 6, 7, 9, 11, 0, 3], "G# harmonic minor": [11, 1, 2, 4, 6, 7, 10],
+        "D# harmonic minor": [6, 8, 9, 11, 1, 2, 5], "A# harmonic minor": [1, 3, 4, 6, 8, 9, 0],
+        "D harmonic minor": [5, 7, 8, 10, 0, 1, 4], "G harmonic minor": [10, 0, 1, 3, 5, 6, 9],
+        "C harmonic minor": [3, 5, 6, 8, 10, 11, 2], "F harmonic minor": [8, 10, 11, 1, 3, 4, 7],
+        "Bb harmonic minor": [1, 3, 4, 6, 8, 9, 0], "Eb harmonic minor": [6, 8, 9, 11, 1, 2, 5],
+        
+        # Dorian mode
+        "D dorian": [0, 2, 3, 5, 7, 9, 10], "A dorian": [7, 9, 10, 0, 2, 4, 5], "E dorian": [2, 4, 5, 7, 9, 10, 0],
+        "B dorian": [9, 11, 0, 2, 4, 5, 7], "F# dorian": [4, 6, 7, 9, 11, 0, 2], "C# dorian": [11, 1, 2, 4, 6, 7, 9],
+        "G# dorian": [6, 8, 9, 11, 1, 2, 4], "D# dorian": [1, 3, 4, 6, 8, 9, 11], "A# dorian": [8, 10, 11, 1, 3, 4, 6],
+        "G dorian": [5, 7, 8, 10, 0, 1, 3], "C dorian": [10, 0, 1, 3, 5, 6, 8], "F dorian": [3, 5, 6, 8, 10, 11, 1],
+        "Bb dorian": [8, 10, 11, 1, 3, 4, 6], "Eb dorian": [1, 3, 4, 6, 8, 9, 11],
+        
+        # Blues scales
+        "C blues": [0, 3, 5, 6, 7, 10], "G blues": [7, 10, 0, 1, 2, 5], "D blues": [2, 5, 7, 8, 9, 0],
+        "A blues": [9, 0, 2, 3, 4, 7], "E blues": [4, 7, 9, 10, 11, 2], "B blues": [11, 2, 4, 5, 6, 9],
+        "F# blues": [6, 9, 11, 0, 1, 4], "C# blues": [1, 4, 6, 7, 8, 11], "F blues": [5, 8, 10, 11, 0, 3],
+        "Bb blues": [10, 1, 3, 4, 5, 8], "Eb blues": [3, 6, 8, 9, 10, 1], "Ab blues": [8, 11, 1, 2, 3, 6],
+        "Db blues": [1, 4, 6, 7, 8, 11], "Gb blues": [6, 9, 11, 0, 1, 4]
+    }
+    
+    best_score = 0
+    best_key = "C"
+    best_scale = "major"
+    
+    # Test all scale patterns
+    for scale_name, pattern in scale_patterns.items():
+        score = sum(pc_percentages[pc] for pc in pattern)
+        if score > best_score:
+            best_score = score
+            # Parse scale name to extract root note and scale type
+            parts = scale_name.split()
+            if len(parts) >= 2:
+                best_key = parts[0]
+                best_scale = " ".join(parts[1:])
+            else:
+                best_key = "C"
+                best_scale = "major"
+    
+    return best_key, best_scale
+
+def _analyze_key_with_llm(config: Dict, track_summaries: List[Dict], genre: str) -> Tuple[str, str]:
+    """Use LLM to analyze key/scale from track summaries as fallback."""
+    try:
+        prompt = (
+            "Analyze the musical key and scale from these track summaries.\n"
+            f"Genre context: {genre}\n\n"
+            "Return ONLY a JSON object: {\"root_note\": \"C\", \"scale_type\": \"major\"}\n"
+            "Valid root_notes: C, C#, D, D#, E, F, F#, G, G#, A, A#, B\n"
+            "Valid scale_types: major, ionian, minor, natural minor, aeolian, harmonic minor, melodic minor, dorian, phrygian, lydian, mixolydian, locrian, major pentatonic, minor pentatonic, chromatic, whole tone, diminished, augmented, byzantine, hungarian minor, persian, arabic, jewish, ahava raba, blues, major blues\n\n"
+            "Track summaries:\n" + json.dumps(track_summaries)
+        )
+        text, _ = _call_llm(prompt, config, expects_json=True)
+        if text:
+            cleaned = text.strip().replace("```json", "").replace("```", "")
+            result = json.loads(cleaned)
+            root_note = result.get("root_note", "C")
+            scale_type = result.get("scale_type", "major")
+            return root_note, scale_type
+    except Exception:
+        pass
+    return "C", "major"
+def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict, str, str]:
     """
-    Extracts tracks with absolute-beat note timing, initial BPM and time signature.
-    Returns: (tracks, bpm, total_bars, time_signature)
+    Extracts tracks with absolute-beat note timing, initial BPM, time signature, and key/scale.
+    Returns: (tracks, bpm, total_bars, time_signature, root_note, scale_type)
     """
     midi = mido.MidiFile(file_path)
     ticks_per_beat = midi.ticks_per_beat or 480
 
     bpm = 120.0
     time_signature = {"beats_per_bar": 4, "beat_value": 4}
+    root_note = "C"
+    scale_type = "major"
 
     # Use first track meta as global
     for msg in midi.tracks[0]:
@@ -386,6 +512,12 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict]:
         if msg.is_meta and msg.type == "time_signature":
             time_signature["beats_per_bar"] = msg.numerator
             time_signature["beat_value"] = msg.denominator
+        if msg.is_meta and msg.type == "key_signature":
+            # MIDI key signature: 0=C, 1=G, 2=D, etc. (sharps) or -1=F, -2=Bb, etc. (flats)
+            # mode: 0=major, 1=minor
+            key_sig = msg.key
+            mode = msg.mode
+            root_note, scale_type = _midi_key_to_note_scale(key_sig, mode)
 
     tracks: List[Dict] = []
     total_ticks = 0
@@ -430,11 +562,21 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict]:
         total_ticks = max(total_ticks, current_ticks)
 
     if total_ticks <= 0:
-        return [], bpm, 0, time_signature
+        return [], bpm, 0, time_signature, root_note, scale_type
+
+    # If no key signature found in MIDI, analyze from pitch content
+    if root_note == "C" and scale_type == "major":
+        all_notes = []
+        for track in tracks:
+            all_notes.extend(track.get("notes", []))
+        analyzed_root, analyzed_scale = _analyze_key_from_pitches(all_notes)
+        if analyzed_root != "C" or analyzed_scale != "major":
+            root_note = analyzed_root
+            scale_type = analyzed_scale
 
     total_beats = total_ticks / float(ticks_per_beat)
     total_bars = int(math.ceil(total_beats / float(time_signature["beats_per_bar"])))
-    return tracks, bpm, total_bars, time_signature
+    return tracks, bpm, total_bars, time_signature, root_note, scale_type
 
 
 def split_tracks_into_sections(tracks: List[Dict], bars_per_section: int, beats_per_bar: int) -> List[Dict]:
@@ -845,6 +987,7 @@ def preview_settings_then_confirm(config_update: Dict, theme_definitions: List[D
         print(f"{Fore.CYAN}BPM:{Style.RESET_ALL} {Style.BRIGHT}{config_update.get('bpm','N/A')}{Style.RESET_ALL}")
         ts = config_update.get('time_signature', {}) or {}
         print(f"{Fore.CYAN}Time Signature:{Style.RESET_ALL} {Style.BRIGHT}{ts.get('beats_per_bar','?')}/{ts.get('beat_value','?')}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Key/Scale:{Style.RESET_ALL} {Style.BRIGHT}{config_update.get('key_scale','N/A')}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}Length per Part:{Style.RESET_ALL} {Style.BRIGHT}{config_update.get('part_length', 'N/A')}{Style.RESET_ALL} bars")
 
         insp = (config_update.get('inspiration') or '').strip()
@@ -968,22 +1111,41 @@ def _print_llm_debug(label: str, prompt_text: str, output_text: str, expects_jso
     except Exception:
         pass
 
-def _choose_tracks_subset(tracks: List[Dict]) -> List[int]:
-    """Ask user to select a subset of track indices (1-based) and return zero-based list."""
+def _choose_tracks_subset(tracks: List[Dict]) -> List[str]:
+    """Ask user to select a subset of tracks and return list of track names."""
     try:
         print(Fore.CYAN + "\nTracks:" + Style.RESET_ALL)
         for i, t in enumerate(tracks):
             print(f"  {i+1}. {t.get('instrument_name','Track')} (role: {t.get('role','context')})")
         resp = _get_user_input("Select tracks to process (e.g., '1,3,5') or Enter for all:", "").strip()
         if not resp:
-            return list(range(len(tracks)))
+            return [t.get('instrument_name', f'Track_{i+1}') for i, t in enumerate(tracks)]
         ids = sorted({int(x.strip())-1 for x in resp.split(',') if x.strip().isdigit()})
-        return [i for i in ids if 0 <= i < len(tracks)]
+        selected_tracks = []
+        for i in ids:
+            if 0 <= i < len(tracks):
+                track_name = tracks[i].get('instrument_name', f'Track_{i+1}')
+                selected_tracks.append(track_name)
+        return selected_tracks
     except Exception:
-        return list(range(len(tracks)))
+        return [t.get('instrument_name', f'Track_{i+1}') for i, t in enumerate(tracks)]
+
+def _get_all_unique_tracks_from_themes(themes: List[Dict]) -> List[Dict]:
+    """Extract all unique tracks from all themes, preserving order and metadata."""
+    unique_tracks = []
+    seen_names = set()
+    
+    for theme in themes:
+        for track in theme.get('tracks', []):
+            track_name = track.get('instrument_name', '')
+            if track_name and track_name not in seen_names:
+                seen_names.add(track_name)
+                unique_tracks.append(track)
+    
+    return unique_tracks
 
 
-def _optimize_selected_tracks(config: Dict, themes: List[Dict], bars_per_section: int, selected_track_indices: List[int]) -> List[Dict]:
+def _optimize_selected_tracks(config: Dict, themes: List[Dict], bars_per_section: int, selected_track_names: List[str]) -> List[Dict]:
     """Optimize only selected tracks across all themes using generator's optimization step."""
     if not generate_optimization_data:
         print(Fore.YELLOW + "Optimization helper not available. Skipping." + Style.RESET_ALL)
@@ -993,7 +1155,8 @@ def _optimize_selected_tracks(config: Dict, themes: List[Dict], bars_per_section
         new_tracks = []
         inner_ctx = [t for t in th.get('tracks', [])]
         for i, tr in enumerate(th.get('tracks', [])):
-            if i in selected_track_indices:
+            track_name = tr.get('instrument_name', '')
+            if track_name in selected_track_names:
                 role = tr.get('role', 'complementary')
                 label = th.get('label', f'Part_{theme_idx+1}')
                 desc = th.get('description', '')
@@ -1265,7 +1428,8 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
             print(Fore.YELLOW + "No themes available from analysis; skipping." + Style.RESET_ALL)
             return
         print(Fore.CYAN + "Select which tracks you want to optimize. Others will be left as-is." + Style.RESET_ALL)
-        subset = _choose_tracks_subset(themes[0].get('tracks', []))
+        all_tracks = _get_all_unique_tracks_from_themes(themes)
+        subset = _choose_tracks_subset(all_tracks)
         themes = _optimize_selected_tracks(effective_config, themes, bars_per_section, subset)
         print(Fore.GREEN + "Done: optimized selected tracks across all parts." + Style.RESET_ALL)
         # Save resume progress for song_generator
@@ -1385,7 +1549,8 @@ def offer_integrated_actions(config_update: Dict, themes_from_analysis: List[Dic
         if not themes:
             print(Fore.YELLOW + "No themes available from analysis; skipping." + Style.RESET_ALL)
             return
-        subset_all = list(range(len(themes[0].get('tracks', [])))) if themes and themes[0].get('tracks') else []
+        all_tracks = _get_all_unique_tracks_from_themes(themes)
+        subset_all = [t.get('instrument_name', f'Track_{i+1}') for i, t in enumerate(all_tracks)]
         if not subset_all:
             print(Fore.YELLOW + "No tracks found to optimize." + Style.RESET_ALL)
             return
@@ -1490,11 +1655,11 @@ def main():
     bars_per_section = int(seg_str)
 
     # MIDI analysis
-    tracks, bpm, total_bars, ts = analyze_midi_file(midi_path)
+    tracks, bpm, total_bars, ts, root_note, scale_type = analyze_midi_file(midi_path)
     if not tracks or total_bars == 0:
         print(Fore.RED + "No note data found. Aborting." + Style.RESET_ALL)
         return
-    print(Fore.CYAN + f"Analyzed MIDI: {bpm:.2f} BPM, {ts['beats_per_bar']}/{ts['beat_value']}, ~{total_bars} bars" + Style.RESET_ALL)
+    print(Fore.CYAN + f"Analyzed MIDI: {bpm:.2f} BPM, {ts['beats_per_bar']}/{ts['beat_value']}, ~{total_bars} bars, Key: {root_note} {scale_type}" + Style.RESET_ALL)
 
     # Summaries for LLM
     summaries = summarize_track_features(tracks, ts["beats_per_bar"])
@@ -1511,6 +1676,15 @@ def main():
         # Trim to <=4 words
         words = [w for w in genre.split() if w]
         genre = " ".join(words[:4]) if words else "Electronic"
+
+    # If key analysis from MIDI failed, try LLM-based analysis
+    if root_note == "C" and scale_type == "major":
+        print(Fore.CYAN + "No key signature found in MIDI, trying LLM-based key analysis..." + Style.RESET_ALL)
+        llm_root, llm_scale = _analyze_key_with_llm(config, summaries, genre)
+        if llm_root != "C" or llm_scale != "major":
+            root_note = llm_root
+            scale_type = llm_scale
+            print(Fore.GREEN + f"LLM detected key: {root_note} {scale_type}" + Style.RESET_ALL)
 
     # Role assignment
     assigned = assign_roles_with_llm(config, genre, user_inspiration, summaries, allowed_roles) or []
@@ -1564,6 +1738,9 @@ def main():
         "bars_per_section": bars_per_section,
         "bpm": round(float(bpm), 2),
         "time_signature": ts,
+        "key_scale": f"{root_note} {scale_type}",
+        "root_note": root_note,
+        "scale_type": scale_type,
         "inspiration": inspiration_text,
         "tracks": instruments_cfg,
         "structure": sections,
@@ -1576,7 +1753,10 @@ def main():
         "genre": genre,
         "inspiration": inspiration_text,
         "bpm": round(float(bpm)),
-        # Keep existing key/scale unless user wants AI suggestion later
+        # Use analyzed key/scale from MIDI instead of config
+        "key_scale": f"{root_note} {scale_type}",
+        "root_note": root_note,
+        "scale_type": scale_type,
         "instruments": instruments_cfg,
         "time_signature": ts,
         # retain existing model fields automatically via merge

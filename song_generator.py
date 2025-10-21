@@ -730,25 +730,28 @@ ROLE CATALOG:
 - vocal_fx: Special effects
 
 VOCAL BUDGET:
-- Target: 3-5 vocal parts for a {len(summaries)}-part song
-- Minimum gap: 1-2 parts between vocal sections
-- Prefer sparse, impactful vocal placement
-- Ensure ≥1 silent gap between vocal sections for breathing room
+- Target: 8-12 vocal parts for a {len(summaries)}-part song (more vocal content)
+- Minimum gap: 0-1 parts between vocal sections (allow consecutive vocal parts)
+- Prefer consistent vocal presence with strategic silence
+- Use silence sparingly - only for clear instrumental breaks or dramatic contrast
 
-SILENCE POLICY (soft):
-- Only use role='silence' when explicitly musically intended for space/contrast
-- Do not overuse silence as a fallback; prefer meaningful vocal content
-- Consider whisper/hum roles for atmospheric sections instead of complete silence
+SILENCE POLICY (STRICT):
+- **MINIMIZE SILENCE**: Use role='silence' only for clear instrumental breaks or dramatic contrast
+- **PREFER VOCAL CONTENT**: Choose whisper/hum/breaths/vocal_fx over complete silence
+- **ATMOSPHERIC ROLES**: Use whisper, hum, breaths, or vocal_fx for atmospheric sections
+- **VOCAL DENSITY**: Aim for 70-80% of parts to have some form of vocal content
+- **SILENCE EXCEPTIONS**: Only use silence for intro/outro or clear instrumental drops
 
 TASK:
 For each part, assign ONLY a role. No hints, descriptions, or explanations.
 Return as JSON array: [{{"idx": 1, "role": "silence"}}, {{"idx": 2, "role": "verse"}}, ...]
 
 Focus on:
-1. Logical role distribution
-2. Appropriate vocal density
-3. Genre-typical patterns
+1. **MAXIMIZE VOCAL CONTENT**: Assign vocal roles to 70-80% of parts
+2. Logical role distribution with minimal silence
+3. Appropriate vocal density for the genre
 4. User intent (if provided)
+5. **PREFER ATMOSPHERIC ROLES**: Use whisper/hum/breaths/vocal_fx instead of silence
 
 Return only the JSON array, no other text."""
 
@@ -957,6 +960,8 @@ ASSIGNED ROLES:
 RULES (HARD):
 - Hints MUST be implementable by notes/tokens only. Forbid: sidechain, granular, carrier, vocoder carrier, pan/panning, delay/reverb values, distortion, mix.
 - role='silence' → force_silence=1 only (no prose).
+- **MINIMIZE force_silence=1**: Only use for clear instrumental breaks or dramatic contrast
+- **PREFER VOCAL HINTS**: Generate musical hints for whisper/hum/breaths/vocal_fx roles
 - Do NOT prescribe exact onsets or phrase windows. Provide only soft ranges for onset_count and duration; the Composer will place notes freely.
 - Use key=value pairs; numbers/arrays only; keep each plan_hint ≤ 240 chars.
 
@@ -1002,6 +1007,7 @@ CREATIVE GUIDANCE:
 OUTPUT JSON (strict):
 - Return JSON array: [{{"idx": 1, "role": "chorus", "plan_hint": "entry_beats=[2.0]; onset_count_min=3; ..."}}, ...]
 - Allowed keys: idx, role, plan_hint. No extra fields.
+- **CRITICAL**: Generate musical hints for 70-80% of parts - minimize force_silence=1!
         """
 
         if user_prompt:
@@ -3365,11 +3371,12 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
             bpb=int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
         )
 
-        # Early exit: explicit silence parts (fix resume for planned silence)
+        # Handle silence parts with minimal content
         try:
             desc_lc = str(section_description or '').lower()
             if (section_role == 'silence') or ('role=silence' in desc_lc) or ('no vocal content' in desc_lc):
-                return {"words": [], "syllables": [], "arranger_note": "intentional silence: per plan"}
+                # For silence parts, provide minimal atmospheric content instead of complete silence
+                return {"words": ["ah"], "syllables": [["ah"]], "arranger_note": "minimal atmospheric content for silence role"}
         except Exception:
             pass
 
@@ -3650,17 +3657,27 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
                 except Exception:
                     return 60
             # Use artifact root_note and scale_type if available, otherwise fallback to config
+            print(f"[DEBUG] cfg exists: {cfg is not None}")
+            if cfg:
+                print(f"[DEBUG] cfg.root_note: {cfg.get('root_note')}")
+                print(f"[DEBUG] cfg.scale_type: {cfg.get('scale_type')}")
+                print(f"[DEBUG] cfg.key_scale: {cfg.get('key_scale')}")
             if cfg and isinstance(cfg.get("root_note"), (int, float)):
                 root_note = int(cfg.get("root_note"))
+                print(f"[DEBUG] Using cfg root_note: {root_note}")
             elif isinstance(config.get("root_note"), (int, float)):
                 root_note = int(config.get("root_note"))
+                print(f"[DEBUG] Using config root_note: {root_note}")
             else:
                 root_note = _infer_root_from_key(str(key_scale or ""))
+                print(f"[DEBUG] Using inferred root_note: {root_note}")
             
             scale_type = str(cfg.get("scale_type", "") if cfg else config.get("scale_type", (key_scale or "major").split(' ',1)[-1] if key_scale else "major"))
+            print(f"[DEBUG] Final scale_type: {scale_type}")
         except Exception:
             root_note, scale_type = 60, "major"
         scale_notes = get_scale_notes(root_note, scale_type)
+        print(f"[DEBUG] Composer Scale Info: root_note={root_note}, scale_type={scale_type}, scale_notes={scale_notes}")
         bpb = int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
         # Full context of other tracks (send full notes of this part)
         context_full = []
@@ -3885,14 +3902,16 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "- Align key content to strong beats or context accents; avoid crowding when other tracks are dense.\n\n"
             + "**IMPORTANT RULES:**\n"
             + '1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with "{" and ending with "}".\n'
-            + f'2.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n'
-            + f'3.  **Minimum Duration:** Each note ≥ 0.6 beats for natural, singable phrasing.\n'
-            + f'4.  **Required Fields:** Every note MUST have: start_beat, duration_beats, pitch\n'
-            + f'5.  **Timing is Absolute:** start_beat is the absolute position from the beginning of the section.\n\n'
+            + f'2.  **CRITICAL - PITCH REQUIRED:** Every single note MUST have a "pitch" field with a MIDI note number from {scale_notes}.\n'
+            + f'3.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n'
+            + f'4.  **Minimum Duration:** Each note ≥ 0.6 beats for natural, singable phrasing.\n'
+            + f'5.  **Required Fields:** Every note MUST have: start_beat, duration_beats, pitch\n'
+            + f'6.  **Timing is Absolute:** start_beat is the absolute position from the beginning of the section.\n\n'
             + "**OUTPUT FORMAT:**\n"
             + "- Return JSON with 'notes' array containing objects with: start_beat, duration_beats, pitch\n"
             + f"- Example: {{\"notes\": [{{\"start_beat\": 0.0, \"duration_beats\": 1.5, \"pitch\": {root_note}}}, {{\"start_beat\": 2.0, \"duration_beats\": 1.0, \"pitch\": {root_note + 2}}}, {{\"start_beat\": 3.0, \"duration_beats\": 1.5, \"pitch\": {root_note + 4}}}]}}\n"
-            + f"- **VARIETY EXAMPLE**: Notice how the example uses {root_note}, {root_note + 2}, and {root_note + 4} - different scale notes!\n\n"
+            + f"- **VARIETY EXAMPLE**: Notice how the example uses {root_note}, {root_note + 2}, and {root_note + 4} - different scale notes!\n"
+            + f"- **CRITICAL WARNING**: If you don't include 'pitch' in every note, the system will default to C4 (MIDI 60)!\n\n"
             + "VARIATION POLICY:\n"
             + "- Prefer subtle variation over strict loops, unless the context suggests repetition.\n"
             + "- For spoken/whisper roles, repetition of words is acceptable; prioritize timing/placement over pitch variety.\n"
@@ -3905,19 +3924,20 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + ("PRE-CHORUS FOCUS (role-specific):\n- Build tension and lift into the chorus; rising contour preferred.\n- Reuse a short priming phrase; avoid revealing the hook.\n\n" if is_prechorus else "")
             + ("BRIDGE FOCUS (role-specific):\n- Provide contrast in color/angle; introduce a complementary motif.\n- Keep range moderate; avoid direct chorus wording.\n\n" if is_bridge else "")
             + ("BACKING FOCUS (role-specific):\n- Echo/answer the lead with musical phrases; avoid micro-fragments.\n- Stay out of the way; simple contours and sparse rhythm.\n- **MINIMUM DURATION**: Each note ≥ 0.5 beats for musical coherence.\n\n" if is_backing else "")
-            + ("SPOKEN FOCUS (role-specific):\n- Natural spoken phrases with musical rhythm; use 1-2 pitches for musicality.\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders).\n- **MINIMUM DURATION**: Each note ≥ 0.6 beats for natural speech flow.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_spoken else "")
-            + ("WHISPER FOCUS (role-specific):\n- Very quiet, breathy words/phrases; leave space.\n- Do NOT use pure vowel placeholders ('Ah/Ooh/Mmm'); use lexical tokens.\n- **MINIMUM DURATION**: Each note ≥ 0.6 beats for natural breathy flow.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_whisper else "")
-            + ("CHANT FOCUS (role-specific):\n- Simple repetitive cells sized to bar; minimal vocabulary; percussive alignment.\n- Avoid lyrical progression; keep motif tight.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_chant else "")
+            + ("SPOKEN FOCUS (role-specific):\n- Natural spoken phrases with musical rhythm; use 1-2 pitches for musicality.\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders).\n- **MINIMUM DURATION**: Each note ≥ 0.6 beats for natural speech flow.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for natural speech patterns\n\n" if is_spoken else "")
+            + ("WHISPER FOCUS (role-specific):\n- Very quiet, breathy words/phrases; leave space.\n- Do NOT use pure vowel placeholders ('Ah/Ooh/Mmm'); use lexical tokens.\n- **MINIMUM DURATION**: Each note ≥ 0.6 beats for natural breathy flow.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for intimate expression\n\n" if is_whisper else "")
+            + ("CHANT FOCUS (role-specific):\n- Simple repetitive cells sized to bar; minimal vocabulary; percussive alignment.\n- Avoid lyrical progression; keep motif tight.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for rhythmic patterns\n\n" if is_chant else "")
             + ("ADLIB FOCUS (role-specific):\n- Occasional interjections around lead phrases; extremely sparse.\n- Prefer short ascents/descents; avoid stepping on main content.\n\n" if is_adlib else "")
             + ("HARMONY/DOUBLES FOCUS (role-specific):\n- Support lead on sustained notes or exact doubles; do not introduce new text.\n- Keep lower velocity/volume implied; align tightly.\n\n" if (is_harmony or is_doubles) else "")
             + ("RESPONSE FOCUS (role-specific):\n- Call-and-response one-liners; answer lead with 1–2 words.\n- Ensure rests before/after; avoid overlap.\n\n" if is_response else "")
             + ("RAP FOCUS (role-specific):\n- Rhythm-first syllables; keep internal rhyme optional but minimal.\n- Avoid overfilling; respect micro-onset rules.\n\n" if is_rap else "")
-            + ("CHOIR/HUM FOCUS (role-specific):\n- Sustained vowels (hum/aa/oo) in simple chords/unison; no semantics.\n- Very slow movement; long sustains.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if (is_choir or is_hum) else "")
+            + ("CHOIR/HUM FOCUS (role-specific):\n- Sustained vowels (hum/aa/oo) in simple chords/unison; no semantics.\n- Very slow movement; long sustains.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-4 different scale notes for harmonic richness\n\n" if (is_choir or is_hum) else "")
             + ("BREATHS/TAG FOCUS (role-specific):\n- Breaths/noise as musical cues; or tiny end-tags (1–2 words).\n- Extremely sparse; do not crowd.\n- If role=breaths: create 1–2 short onsets mapped to the explicit token '[br]'; do NOT use words.\n\n" if (is_breaths or is_tag) else "")
+            + ("SILENCE FOCUS (role-specific):\n- Minimal atmospheric content - use single sustained vowel 'ah' or 'oh'\n- Very sparse placement - 1-2 notes maximum\n- Low volume, sustained tones for atmospheric effect\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for subtle atmospheric movement\n\n" if (role_norm == 'silence') else "")
             + ("PHRASE_SPOT FOCUS (role-specific):\n- Single short phrase placed in a free window; everything else rests.\n- Duration ≤ 1 bar; clear entry/exit.\n\n" if is_phrase_spot else "")
-            + ("VOCODER/TALKBOX/FX FOCUS (role-specific):\n- Treat tokens as syllabic carriers; simple pitch shapes; sparse usage.\n- Avoid semantic density; use rests generously.\n- If role=vocal_fx: output at least 1–2 short onsets within the part; if no musical placement is feasible, set intentional_silence=true in Stage-1 (preferred).\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if (is_vocoder or is_talkbox or is_vocal_fx) else "")
+            + ("VOCODER/TALKBOX/FX FOCUS (role-specific):\n- Treat tokens as syllabic carriers; simple pitch shapes; sparse usage.\n- Avoid semantic density; use rests generously.\n- If role=vocal_fx: output at least 1–2 short onsets within the part; if no musical placement is feasible, set intentional_silence=true in Stage-1 (preferred).\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 3-6 different scale notes for experimental textures\n\n" if (is_vocoder or is_talkbox or is_vocal_fx) else "")
             + ("SCAT FOCUS (role-specific):\n- Use percussive, non-lexical syllables (da/ka/tek...).\n- Lock to groove accents; avoid long sustains and semantics.\n\n" if is_scat else "")
-            + ("VOWELS FOCUS (role-specific):\n- Sustained open vowels on long notes; no semantics.\n- Favor legato and simple stepwise contour.\n- **MANDATORY**: Include pitch information for every note (use tessitura_center ±1-2 semitones).\n\n" if is_vowels else "")
+            + ("VOWELS FOCUS (role-specific):\n- Sustained open vowels on long notes; no semantics.\n- Favor legato and simple stepwise contour.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-4 different scale notes for melodic flow\n\n" if is_vowels else "")
             + ("INTRO FOCUS (role-specific):\n- Set the tone with a sparse gesture; minimal new content.\n- Prefer longer sustains and clear downbeat anchoring.\n\n" if is_intro else "")
             + ("IMPORTANT DROP STYLE (recommendation):\n- Prefer monotonic or 2-note pitch sets with small stepwise motion.\n- Use repetitive, hypnotic rhythm; micro-variations only.\n- Favor hook tokens/title words; keep lines succinct and percussive.\n\n" if is_drop else "")
             + ("MOTIF & SIMPLICITY (soft):\n- Build a compact motif and reuse with minimal change per repeat (size it to the part).\n- Limit pitch set; use longer sustains where possible.\n- Align main syllables to clear accents; avoid filler between accent peaks.\n\n")
@@ -3970,6 +3990,8 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + f"- Center melodies around {root_note} (MIDI {root_note})\n"
             + "- Each note ≥ 0.6 beats for singable phrasing\n"
             + "- Return valid JSON with 'notes' array\n"
+            + f"- **MANDATORY**: Every note MUST have a 'pitch' field - NO EXCEPTIONS!\n"
+            + f"- **CONSEQUENCE**: Missing 'pitch' fields will default to C4 (MIDI 60)!\n"
         )
         # Retry wrapper for Stage-2 similar to Stage-1
         def _call_with_rotation_comp(prompt_text: str) -> dict | None:
@@ -4671,6 +4693,121 @@ def _apply_note_adjustments_conservative(notes: List[Dict], tokens: List[str], p
     except Exception:
         return notes, tokens
 # --- OpenUtau UST Export (helper) ---
+def _export_openutau_ust_corrected(themes: List[Dict], track_index: int, syllables_per_theme: List[List[str]], ts: Dict, bpm: float | int, output_path: str, section_length_bars: int | float | None = None) -> bool:
+    """
+    Write a corrected UST file for OpenUtau with proper formatting.
+    """
+    try:
+        ticks_per_beat = int(TICKS_PER_BEAT)
+        lines = []
+        
+        # UST Header
+        lines.append("[#VERSION]")
+        lines.append("UST Version=1.20")
+        lines.append("[#SETTING]")
+        lines.append(f"Tempo={float(bpm):.2f}")
+        lines.append("Tracks=1")
+        lines.append("ProjectName=LyricsExport")
+        lines.append("Mode2=True")
+        lines.append(f"TimeBase={ticks_per_beat}")
+        lines.append("VoiceDir=")
+        lines.append("CacheDir=")
+        lines.append("Flags=")
+        
+        beats_per_bar = float(ts.get('beats_per_bar', 4.0))
+        section_len_beats = float(section_length_bars) * beats_per_bar if section_length_bars else 8.0 * beats_per_bar
+        
+        note_blocks = []
+        current_beat = 0.0
+        
+        # Process each theme
+        for part_idx, theme in enumerate(themes):
+            tracks = theme.get('tracks', [])
+            if 0 <= track_index < len(tracks):
+                track = tracks[track_index]
+                notes = sorted(track.get('notes', []), key=lambda n: float(n.get('start_beat', 0.0)))
+                syllables = syllables_per_theme[part_idx] if part_idx < len(syllables_per_theme) else []
+                
+                part_start = part_idx * section_len_beats
+                
+                for note_idx, note in enumerate(notes):
+                    start_beat = float(note.get('start_beat', 0.0)) + part_start
+                    duration_beats = float(note.get('duration_beats', 1.0))
+                    pitch = int(note.get('pitch', 60))
+                    
+                    # Get syllable
+                    syllable = syllables[note_idx] if note_idx < len(syllables) else "R"
+                    if not syllable or syllable.strip() == "":
+                        syllable = "R"
+                    
+                    # Convert to ticks
+                    length_ticks = int(round(duration_beats * ticks_per_beat))
+                    
+                    # Add rest if needed
+                    if start_beat > current_beat + 0.01:
+                        rest_ticks = int(round((start_beat - current_beat) * ticks_per_beat))
+                        if rest_ticks > 0:
+                            note_blocks.append({
+                                "Lyric": "R",
+                                "NoteNum": 60,
+                                "Length": rest_ticks
+                            })
+                    
+                    note_blocks.append({
+                        "Lyric": syllable,
+                        "NoteNum": pitch,
+                        "Length": length_ticks
+                    })
+                    
+                    current_beat = start_beat + duration_beats
+            else:
+                # Add rest for entire part
+                part_ticks = int(round(section_len_beats * ticks_per_beat))
+                note_blocks.append({
+                    "Lyric": "R",
+                    "NoteNum": 60,
+                    "Length": part_ticks
+                })
+                current_beat += section_len_beats
+        
+        # Write note blocks with complete UST format
+        for idx, nb in enumerate(note_blocks):
+            lines.append(f"[#NOTE{idx:04d}]")
+            lines.append(f"Length={int(nb['Length'])}")
+            lines.append(f"Lyric={nb['Lyric']}")
+            lines.append(f"NoteNum={int(nb['NoteNum'])}")
+            lines.append("Intensity=100")
+            lines.append("Modulation=0")
+            lines.append("PreUtterance=")
+            lines.append("VoiceOverlap=")
+            lines.append("StartPoint=")
+            lines.append("Envelope=")
+            lines.append("PBType=5")
+            lines.append("PitchBend=")
+            lines.append("PBStart=")
+            lines.append("PBS=")
+            lines.append("PBE=")
+            lines.append("PBW=")
+            lines.append("PBY=")
+            lines.append("VBR=")
+            lines.append("Flags=")
+        
+        # Add singer section
+        lines.append("[#SINGER]")
+        lines.append("Name=DefaultSinger")
+        lines.append("VoiceDir=")
+        lines.append("[#TRACKEND]")
+        
+        # Write file
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(lines))
+        
+        print(Fore.GREEN + f"Exported UST: {output_path}" + Style.RESET_ALL)
+        return True
+        
+    except Exception as e:
+        print(Fore.YELLOW + f"UST export failed: {e}" + Style.RESET_ALL)
+        return False
 def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int, syllables_per_theme: List[List[str]], ts: Dict, bpm: float | int, output_path: str, section_length_bars: int | float | None = None) -> bool:
     """
     Write a minimal UST file for OpenUtau for one track across all themes.
@@ -4688,6 +4825,9 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
         lines.append("ProjectName=LyricsExport")
         lines.append("Mode2=True")
         lines.append(f"TimeBase={TICKS_PER_BEAT}")
+        lines.append("VoiceDir=")
+        lines.append("CacheDir=")
+        lines.append("Flags=")
 
         # Internal: sanitize lyric token for UST/SynthV export (aware of previous content)
         def _sanitize_ust_token(token: str, *, prev_was_content: bool) -> str:
@@ -4867,6 +5007,15 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
                         p = int(center_ref) if isinstance(center_ref, (int, float)) else MIDI_NOTE_C4
                     else:
                         p = int(p_raw)
+                    
+                    # Handle silence_role notes with minimal atmospheric content
+                    if n.get('silence_role', False):
+                        # Use tessitura_center for silence role notes, or A3 if not available
+                        p = int(center_ref) if isinstance(center_ref, (int, float)) else 57  # A3
+                        # Reduce velocity for atmospheric effect
+                        velocity = max(20, min(40, int(n.get('velocity', 30))))
+                    else:
+                        velocity = int(n.get('velocity', 80))
                     abs_start = (local_start if is_absolute else (part_start_abs + local_start))
                     if abs_start >= part_end_abs - 1e-6:
                         break
@@ -5047,8 +5196,7 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
         except Exception:
             treat_as_relative = True
 
-        # Compute total song length in beats strictly by parts
-        song_total_beats = float(max(0, len(themes))) * float(section_length_beats)
+        # Timeline is managed by strict part boundaries - no need for total song length calculation
 
         # Process each part and find the vocal track
         for part_idx, th in enumerate(themes):
@@ -5311,17 +5459,7 @@ def _export_openutau_ust_for_track__legacy(themes: List[Dict], track_index: int,
         except Exception:
             pass
 
-        # Ensure full song length coverage – if cursor < total song length, pad with rest until exactly song_total_beats
-        try:
-            if song_total_beats and abs_cursor_beats < song_total_beats - 1e-6:
-                tail_rest_ticks = int(round((song_total_beats - abs_cursor_beats) * ticks_per_beat))
-                if tail_rest_ticks > 0:
-                    if note_blocks and note_blocks[-1].get('Lyric') == 'R':
-                        note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + tail_rest_ticks)
-                    else:
-                        note_blocks.append({"Lyric": "R", "NoteNum": 60, "Length": tail_rest_ticks})
-        except Exception:
-            pass
+        # Timeline is already correctly set by part boundaries - no additional padding needed
         
         # If still empty, add a minimal rest to make the UST loadable
         if not note_blocks:
@@ -10798,7 +10936,26 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
 
                 # Helper: best-effort extraction from progress files for lyrics
                 def _extract_from_progress_for_lyrics(pdata: Dict) -> tuple:
-                    cfg = pdata.get('config') or {}
+                    # Extract original JSON data from the config stored in progress file
+                    stored_config = pdata.get('config') or {}
+                    cfg = {}
+                    
+                    # Extract musical parameters from stored config (these come from the original JSON)
+                    if 'key_scale' in stored_config:
+                        cfg['key_scale'] = stored_config['key_scale']
+                    if 'root_note' in stored_config:
+                        cfg['root_note'] = stored_config['root_note']
+                    if 'scale_type' in stored_config:
+                        cfg['scale_type'] = stored_config['scale_type']
+                    if 'bpm' in stored_config:
+                        cfg['bpm'] = stored_config['bpm']
+                    if 'genre' in stored_config:
+                        cfg['genre'] = stored_config['genre']
+                    if 'inspiration' in stored_config:
+                        cfg['inspiration'] = stored_config['inspiration']
+                    
+                    print(f"[DEBUG] Progress data keys: {list(pdata.keys())}")
+                    print(f"[DEBUG] Extracted cfg from progress: {cfg}")
                     length_bars = int(pdata.get('theme_length') or pdata.get('length') or previous_settings.get('length', DEFAULT_LENGTH))
                     themes = None
                     # Try by type first
@@ -10874,10 +11031,24 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     print(Fore.YELLOW + "Selected item has no themes to process." + Style.RESET_ALL)
                     continue
 
-                # Build global track name list from the first theme (assume consistent ordering)
-                base_tracks = themes[0].get('tracks', []) if themes and isinstance(themes[0], dict) else []
+                # Build global track name list from all themes (collect unique tracks)
+                def get_all_unique_tracks_from_themes(themes: List[Dict]) -> List[Dict]:
+                    """Extract all unique tracks from all themes, preserving order and metadata."""
+                    unique_tracks = []
+                    seen_names = set()
+                    
+                    for theme in themes:
+                        for track in theme.get('tracks', []):
+                            track_name = track.get('instrument_name', '')
+                            if track_name and track_name not in seen_names:
+                                seen_names.add(track_name)
+                                unique_tracks.append(track)
+                    
+                    return unique_tracks
+                
+                base_tracks = get_all_unique_tracks_from_themes(themes)
                 if not base_tracks:
-                    print(Fore.YELLOW + "Artifact has no tracks in first part." + Style.RESET_ALL); continue
+                    print(Fore.YELLOW + "Artifact has no tracks in any part." + Style.RESET_ALL); continue
                 
                 # For resume case, determine track settings from existing data
                 if out_themes is not None:
@@ -10900,7 +11071,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL); continue
                     new_vocal_track_mode = (track_choice == extra_opt)
                     if not new_vocal_track_mode:
-                        track_idx = track_choice - 1
+                        # Find the track index in the first theme by name
+                        selected_track_name = get_instrument_name(base_tracks[track_choice - 1])
+                        track_idx = -1
+                        for i, tr in enumerate(themes[0].get('tracks', [])):
+                            if get_instrument_name(tr) == selected_track_name:
+                                track_idx = i
+                                break
+                        if track_idx == -1:
+                            print(Fore.YELLOW + f"Track '{selected_track_name}' not found in first theme." + Style.RESET_ALL); continue
 
                 # Prepare constants
                 genre = cfg.get('genre', 'Unknown')
@@ -11642,7 +11821,19 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 'instrumental only', 'maintain vocal silence', 'no vocal', 'no vocals', 'no vocal presence', 'purely instrumental'
                             )))
                             if role_lower == 'silence' or is_contradictory or model_silence:
-                                stage2 = {"notes": [], "tokens": []}
+                                # For silence roles, generate minimal atmospheric notes instead of complete silence
+                                print(f"[DEBUG] Silence role detected: {role_lower}, generating minimal atmospheric content")
+                                stage2 = _compose_notes_for_syllables(
+                                    cfg or config, genre, inspiration, 'Synth Vocal', bpm, ts, theme_len_bars,
+                                    [["ah"]], arranger_note, context_tracks_basic, key_scale, label, hook_canonical, 
+                                    chorus_lines, section_description, ["ah"], cfg
+                                )
+                                # Mark as minimal silence content
+                                if isinstance(stage2, dict) and 'notes' in stage2:
+                                    print(f"[DEBUG] Silence role generated {len(stage2.get('notes', []))} notes")
+                                    for note in stage2.get('notes', []):
+                                        note['silence_role'] = True
+                                        print(f"[DEBUG] Silence note: pitch={note.get('pitch')}, duration={note.get('duration_beats')}")
                             else:
                                 stage2 = _compose_notes_for_syllables(
                                     cfg or config, genre, inspiration, 'Synth Vocal', bpm, ts, theme_len_bars,
@@ -11773,15 +11964,16 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         planned_role_now = ''
                     if planned_role_now == 'silence':
                         try:
-                            print(Style.DIM + f"[Lyrics] '{label}': planned silence — skipping entirely." + Style.RESET_ALL)
+                            print(Style.DIM + f"[Lyrics] '{label}': planned silence — generating minimal atmospheric content." + Style.RESET_ALL)
                         except Exception:
                             pass
                         try:
-                            target_tr['lyrics'] = []
+                            # Generate minimal atmospheric lyrics for silence roles
+                            target_tr['lyrics'] = ["ah"]
                         except Exception:
                             pass
                         try:
-                            history_lines.append(f"{label}: [silence]")
+                            history_lines.append(f"{label}: [minimal atmospheric]")
                         except Exception:
                             pass
                         continue
@@ -12061,7 +12253,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             else:
                                 syllables_per_theme.append([])
                         try:
-                            _export_openutau_ust_for_track__legacy(
+                            _export_openutau_ust_corrected(
                                 out_themes,
                                 (len(out_themes[0].get('tracks',[]))-1) if new_vocal_track_mode else export_track_index,
                                 syllables_per_theme,
