@@ -132,6 +132,13 @@ def _set_key_cooldown(idx: int, seconds: float, *, force: bool = False) -> None:
     else:
         KEY_COOLDOWN_UNTIL[idx] = max(KEY_COOLDOWN_UNTIL.get(idx, 0), target_until)
 
+def _reset_all_cooldowns() -> None:
+    """Reset all API key cooldowns - useful for fresh API keys."""
+    global KEY_COOLDOWN_UNTIL, KEY_QUOTA_TYPE
+    KEY_COOLDOWN_UNTIL.clear()
+    KEY_QUOTA_TYPE.clear()
+    print(Fore.GREEN + "All API key cooldowns reset." + Style.RESET_ALL)
+
 def _next_available_key(start_idx: int | None = None) -> int | None:
     if not API_KEYS:
         return None
@@ -411,7 +418,9 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         + "- Favor singable vowels on longer/stressed notes (a/ah/o); keep i/e short near upper range.\n"
         + "- Encourage motif coherence: reuse short lexical cells with subtle variation; avoid semantic noise.\n"
         + "- For spoken/whisper roles: remain tonally centered in wording and pacing; minimal pitch implication is fine but keep phrase arcs musical.\n"
-        + "- Melisma budget: default ≤ 25% of onsets; allow up to 40% only if melisma_bias ≥ 0.6.\n"
+        + "- Melisma budget: default ≤ 20% of onsets; allow up to 35% only if melisma_bias ≥ 0.7.\n"
+        + "- STRICT MELISMA CONTROL: Avoid more than 2 consecutive '-' tokens; prefer meaningful content over empty sustains.\n"
+        + "- QUALITY OVER MELISMA: Better to use shorter, meaningful words than excessive melisma that makes lyrics unclear.\n"
         + "\nStrict output format (JSON only):\n"
         + "{\n  \"syllables\": [string, string, ...]\n}\n\n"
         + f"Constraints:\n- The array length MUST be exactly {num_slots}.\n"
@@ -421,7 +430,9 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         + "- Multi-syllable words: split when ≥2 onsets; avoid over-splitting. Monosyllables across many onsets: prefer a 2-syllable synonym; else at most one '-'.\n"
         + "- CHORUS (only if a hook exists): place the hook on strong downbeats; repeat 2–3× with micro-variation (semantic core intact).\n"
         + "- VERSE (optional): adopt a bulletin structure (headline → two surreal segments → closing sting) if a news/report vibe is intended.\n"
-        + "- Nonsense budget ≤ 15% of tokens only if nonsense is allowed/used; vary syllables; avoid back-to-back nonsense lines.\n"
+        + "- Nonsense budget ≤ 10% of tokens only if nonsense is allowed/used; vary syllables; avoid back-to-back nonsense lines.\n"
+        + "- CONTENT QUALITY PRIORITY: Prefer meaningful words over generic vowels; avoid pure vowel sequences unless role specifically demands it.\n"
+        + "- MEANINGFUL LYRICS: Use poetic fragments, single meaningful words, or short phrases instead of empty syllables.\n"
         + "- Reflect the section description and surrounding instruments.\n"
         + "- Follow universal pop-lyric heuristics: clear images, concrete nouns/verbs, a memorable hook, avoid cliche overload, keep pronoun perspective consistent.\n"
         + "- If inspiration mentions an artist, emulate stylistic fingerprints (rhythm of phrasing, imagery types) without copying lines.\n"
@@ -1604,7 +1615,7 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
                     if isinstance(p, dict):
                         lp = {
                             "target_wpb": (float(p.get('target_wpb')) if isinstance(p.get('target_wpb'), (int, float)) else None),
-                            "melisma_bias": (max(0.0, min(1.0, float(p.get('melisma_bias')))) if isinstance(p.get('melisma_bias'), (int, float)) else None),
+                            "melisma_bias": (max(0.15, min(0.4, float(p.get('melisma_bias')))) if isinstance(p.get('melisma_bias'), (int, float)) else None),
                             "min_word_beats": (float(p.get('min_word_beats')) if isinstance(p.get('min_word_beats'), (int, float)) else None),
                             "allow_nonsense": (int(p.get('allow_nonsense')) if isinstance(p.get('allow_nonsense'), (int, float)) else None)
                         }
@@ -2104,6 +2115,12 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         config = fresh_config
     except Exception as e:
         pass
+    
+    # Reset API key cooldowns for fresh keys
+    try:
+        _reset_all_cooldowns()
+    except Exception:
+        pass
 
     # Build compact note preview with stress as above, and a full ordered note list
     try:
@@ -2203,7 +2220,8 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         # Chorus: stronger sustain for carpets of short notes
         if role == 'chorus' and short_note_ratio >= 0.4:
             mb_adj += 0.2
-        derived_melisma_bias = max(0.20, min(0.50, base_mb + mb_adj - 0.15))
+        # Stricter melisma control - reduce default bias and tighten range
+        derived_melisma_bias = max(0.15, min(0.40, base_mb + mb_adj - 0.20))
 
         if note_durs:
             nd_sorted = sorted(note_durs)
@@ -2225,7 +2243,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
             if isinstance(cfg_target_wpb, (int, float)) else derived_target_wpb
         )
         melisma_bias = (
-            blend*min(0.5, max(0.2, float(cfg_melisma_bias))) + (1.0-blend)*derived_melisma_bias
+            blend*min(0.4, max(0.15, float(cfg_melisma_bias))) + (1.0-blend)*derived_melisma_bias
             if isinstance(cfg_melisma_bias, (int, float)) else derived_melisma_bias
         )
         min_word_beats = (
@@ -2679,7 +2697,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     if section_role in ('breaths',):
         prompt_parts.append("- '[br]' usage: Only on dedicated short rest notes; never inside words; never as the only token in 1-note segments (use a short content impulse instead, if needed).\n")
     prompt_parts.append("- Optional phoneme_hints per note (e.g., [k a t]) for ambiguous words (separate list).\n\n")
-    prompt_parts.append("MELISMA / SYLLABLE MAPPING (policy):\n- High melisma mode (melisma_bias≥0.6): Prefer holding vowels across weak beats using '-' on continuation onsets. Do NOT introduce new content words on every micro-onset.\n- Low melisma mode (melisma_bias<0.6): Prefer 1:1 (one syllable per onset), but allow melisma on long/stressed notes.\n- REDUCE EXCESSIVE MELISMA: Avoid more than 2 consecutive '-' tokens; prefer meaningful content over empty sustains.\n\n")
+    prompt_parts.append("MELISMA / SYLLABLE MAPPING (policy):\n- High melisma mode (melisma_bias≥0.7): Prefer holding vowels across weak beats using '-' on continuation onsets. Do NOT introduce new content words on every micro-onset.\n- Low melisma mode (melisma_bias<0.7): Prefer 1:1 (one syllable per onset), but allow melisma on long/stressed notes.\n- STRICT MELISMA CONTROL: Avoid more than 2 consecutive '-' tokens; prefer meaningful content over empty sustains.\n- QUALITY OVER MELISMA: Better to use shorter, meaningful words than excessive melisma that makes lyrics unclear.\n- MAXIMUM MELISMA: Never exceed 35% of total tokens as melisma, even in high melisma mode.\n\n")
     prompt_parts.append("ILLUSTRATIVE EXAMPLES:\n")
     prompt_parts.append("- monosyllable over 3 onsets → words=['shine'], spans=[3] ⇒ tokens=['shine','-','-'].\n")
     prompt_parts.append("- 2 words over 3 onsets → words=['o-ver','load'], spans=[1,2] ⇒ tokens=['o-ver','load','-'].\n\n")
@@ -3481,6 +3499,8 @@ PHRASING GUIDANCE:
             + "  • Avoid pure vowel sequences ('Ah Oh Ei') unless role specifically demands it\n"
             + "  • Reserve generic vowels only for vocoder/vocal_fx/breath roles\n"
             + "  • Even atmospheric roles should use meaningful content when possible\n"
+            + "  • STRICT QUALITY: Maximum 10% nonsense/vowel-only content; prefer meaningful words\n"
+            + "  • LYRICAL COHERENCE: Create phrases that make sense together, not random word collections\n"
         )
 
         # Retry with key rotation and interruptible backoff on quota/429
@@ -3982,6 +4002,8 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + "  • Two-syllable words: Use melisma only if rhythmically compelling\n"
             + "  • Three+ syllable words: Use melisma judiciously for natural flow\n"
             + "  • Avoid excessive melisma that makes words unclear or hard to sing\n"
+            + "  • MAXIMUM MELISMA: Never exceed 35% of total tokens as melisma\n"
+            + "  • QUALITY OVER MELISMA: Better to use shorter, meaningful words than excessive melisma\n"
             + "- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
             + ("- HARD (breaths): If lyrics contain '[br]', produce at least one short note per '[br]'.\n" if is_breaths else "")
             + ("- HARD (vocal_fx): If lyrics are provided, produce at least one short onset; if impossible, prefer intentional silence (model-driven).\n" if is_vocal_fx else "")
@@ -11825,7 +11847,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 print(f"[DEBUG] Silence role detected: {role_lower}, generating minimal atmospheric content")
                                 stage2 = _compose_notes_for_syllables(
                                     cfg or config, genre, inspiration, 'Synth Vocal', bpm, ts, theme_len_bars,
-                                    [["ah"]], arranger_note, context_tracks_basic, key_scale, label, hook_canonical, 
+                                    [["ah"]], arranger_note, seed_context_basic, key_scale, label, hook_canonical, 
                                     chorus_lines, section_description, ["ah"], cfg
                                 )
                                 # Mark as minimal silence content
@@ -11837,7 +11859,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             else:
                                 stage2 = _compose_notes_for_syllables(
                                     cfg or config, genre, inspiration, 'Synth Vocal', bpm, ts, theme_len_bars,
-                                    (stage1.get('syllables') if isinstance(stage1.get('syllables'), list) else []), arranger_note, context_tracks_basic=seed_context_basic, key_scale=cfg.get('key_scale') if cfg else config.get('key_scale',''), section_label=label,
+                                    (stage1.get('syllables') if isinstance(stage1.get('syllables'), list) else []), arranger_note, seed_context_basic, key_scale=cfg.get('key_scale') if cfg else config.get('key_scale',''), section_label=label,
                                     hook_canonical=(stage1.get('hook_canonical') if isinstance(stage1.get('hook_canonical'), str) else None),
                                     chorus_lines=(stage1.get('chorus_lines') if isinstance(stage1.get('chorus_lines'), list) else None),
                                     section_description=(plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part, lyrics_words=(words or []), cfg=cfg
@@ -12106,7 +12128,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 if isinstance(lprefs.get('target_wpb'), (int, float)):
                                     local_overrides['lyrics_target_words_per_bar'] = float(lprefs.get('target_wpb'))
                                 if isinstance(lprefs.get('melisma_bias'), (int, float)):
-                                    val = max(0.0, min(1.0, float(lprefs.get('melisma_bias'))))
+                                    val = max(0.15, min(0.4, float(lprefs.get('melisma_bias'))))
                                     local_overrides['lyrics_melisma_bias'] = val
                                 if isinstance(lprefs.get('min_word_beats'), (int, float)):
                                     local_overrides['lyrics_min_word_beats'] = float(lprefs.get('min_word_beats'))
