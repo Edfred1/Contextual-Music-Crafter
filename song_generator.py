@@ -351,6 +351,57 @@ MAX_AUTOMATION_STEPS = 200
 EXPORT_TINY_NOTE_SMOOTHING = True
 EXPORT_TINY_NOTE_THRESH_BEATS = 0.25
 
+# --- LYRICS MODE DETECTION (helper) ---
+def _detect_lyrics_mode(user_prompt: str | None, genre: str | None = None, inspiration: str | None = None) -> str:
+    """
+    Detect the creative mode based on user prompt and context.
+    Returns: "EXPERIMENTAL", "NARRATIVE", or "BALANCED"
+    """
+    if not user_prompt or not isinstance(user_prompt, str):
+        return "BALANCED"
+    
+    prompt_lower = user_prompt.lower()
+    
+    # Experimental/Abstract indicators
+    experimental_keywords = [
+        'abstract', 'fragmented', 'mechanical', 'ambiguous', 'uncanny', 
+        'distortion', 'dreamlike', 'surreal', 'experimental', 'avant-garde',
+        'texture', 'sonic', 'conceptual', 'artificial', 'robotic', 'synthetic',
+        'glitch', 'processed', 'strange', 'weird', 'unsettling', 'hypnotic',
+        'minimal', 'repetitive', 'mantra', 'chant', 'pattern', 'fragment',
+        # Sparse/Space indicators for textural vocals
+        'sparse', 'space', 'spacious', 'minimal vocals', 'room for', 'let breathe', 
+        'atmospheric accents', 'textural', 'leave room', 'let room', 'breathing space'
+    ]
+    
+    # Narrative/Story indicators
+    narrative_keywords = [
+        'story', 'narrative', 'journey', 'relationship', 'emotional', 'personal',
+        'verse-chorus', 'catchy', 'memorable', 'singable', 'commercial', 'pop',
+        'radio-friendly', 'hook', 'accessible', 'relatable', 'heartfelt',
+        'tell a story', 'love song', 'breakup', 'memories', 'feelings'
+    ]
+    
+    # Count matches
+    experimental_score = sum(1 for kw in experimental_keywords if kw in prompt_lower)
+    narrative_score = sum(1 for kw in narrative_keywords if kw in prompt_lower)
+    
+    # Genre-based hints
+    if genre or inspiration:
+        genre_text = f"{genre or ''} {inspiration or ''}".lower()
+        if any(g in genre_text for g in ['psytrance', 'techno', 'ambient', 'experimental', 'idm']):
+            experimental_score += 1
+        if any(g in genre_text for g in ['pop', 'rock', 'country', 'r&b', 'soul']):
+            narrative_score += 1
+    
+    # Decide mode
+    if experimental_score >= 2 and experimental_score > narrative_score:
+        return "EXPERIMENTAL"
+    elif narrative_score >= 2 and narrative_score > experimental_score:
+        return "NARRATIVE"
+    else:
+        return "BALANCED"
+
 # --- LYRICS GENERATION (helper) ---
 def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, notes: List[Dict], section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, cfg: Dict | None = None) -> List[str]:
     """
@@ -737,30 +788,42 @@ ROLE CATALOG:
 - talkbox: Synthesized speech
 - vocal_fx: Special effects
 
-VOCAL BUDGET:
-- Target: 8-12 vocal parts for a {len(summaries)}-part song (more vocal content)
-- Minimum gap: 0-1 parts between vocal sections (allow consecutive vocal parts)
-- Prefer consistent vocal presence with strategic silence
-- Use silence sparingly - only for clear instrumental breaks or dramatic contrast
+VOCAL BUDGET & DENSITY (Genre-Intelligent Analysis):
+**YOUR TASK:** Deeply analyze '{genre}' and '{inspiration}' using your musical knowledge to determine authentic vocal density.
 
-SILENCE POLICY (STRICT):
-- **MINIMIZE SILENCE**: Use role='silence' only for clear instrumental breaks or dramatic contrast
-- **PREFER VOCAL CONTENT**: Choose whisper/hum/breaths/vocal_fx over complete silence
-- **ATMOSPHERIC ROLES**: Use whisper, hum, breaths, or vocal_fx for atmospheric sections
-- **VOCAL DENSITY**: Aim for 70-80% of parts to have some form of vocal content
-- **SILENCE EXCEPTIONS**: Only use silence for intro/outro or clear instrumental drops
+**GENRE AWARENESS FRAMEWORK (not prescriptive rules):**
+Use your understanding of '{genre}' to inform your decisions. Consider that:
+
+• Some genres traditionally center vocals (e.g., singer-songwriter traditions often feature continuous vocal presence)
+• Other genres use vocals as textural elements among many layers (e.g., certain electronic styles)
+• Some styles embrace call-and-response conversational patterns (e.g., gospel traditions, funk grooves)
+• Instrumental-focused genres may use vocals sparingly as dramatic accents
+• Many genres exist on a spectrum and blend conventions
+
+**CALL-AND-RESPONSE OPPORTUNITIES:**
+• When you notice gaps in the instrumental note patterns (sparse sections with space), consider whether a conversational vocal exchange would fit the style
+• The 'response' role is available for creating vocal answers and dialogues
+• Think about whether the genre/inspiration typically features vocal conversations or layered vocal interactions
+
+**CRITICAL PRINCIPLES:**
+1. **Trust your genre knowledge** - you understand musical conventions better than rigid rules
+2. **Silence is compositionally valid** - instrumental sections are not "gaps to fill" but intentional choices
+3. **User intent overrides conventions** - if the prompt requests specific vocal density, prioritize that
+4. **Atmospheric roles are artistic tools** - whisper/hum/breaths/vocal_fx serve musical purposes, not as "silence replacements"
+5. **Variety creates interest** - consider dynamic contrast between vocal-dense and vocal-sparse sections
+
+**YOUR CREATIVE FREEDOM:** Use the full spectrum of vocal density as your artistic judgment dictates. There are no "correct" percentages - only authentic choices for this specific musical context.
 
 TASK:
 For each part, assign ONLY a role. No hints, descriptions, or explanations.
 Return as JSON array: [{{"idx": 1, "role": "silence"}}, {{"idx": 2, "role": "verse"}}, ...]
 
 Focus on:
-1. **MAXIMIZE VOCAL CONTENT**: Assign vocal roles to 70-80% of parts
-2. Logical role distribution with minimal silence
-3. Appropriate vocal density for the genre
-4. User intent (if provided)
-5. **PREFER ATMOSPHERIC ROLES**: Use whisper/hum/breaths/vocal_fx instead of silence
-6. **SILENCE POLICY (STRICT)**: Assign 'silence' only for intro/outro or explicit breaths-only moments. For all other sections, choose a minimal vocal role (hum/whisper/vocal_fx) instead of 'silence'.
+1. **GENRE-AUTHENTIC VOCAL DENSITY**: Match the conventions of '{genre}' / '{inspiration}'
+2. **CALL-AND-RESPONSE AWARENESS**: Detect instrumental gaps that invite vocal responses
+3. **USER INTENT OVERRIDE**: If user prompt explicitly requests vocal density, prioritize that
+4. **ATMOSPHERIC ROLES**: Use whisper/hum/breaths/vocal_fx for textural accents (not as silence replacements)
+5. **SILENCE IS VALID**: In electronic/ambient/instrumental genres, silence is often the RIGHT choice
 
 Return only the JSON array, no other text."""
 
@@ -1001,11 +1064,16 @@ VOCAL ROLE CHARACTERISTICS (interpret as musical guidance):
 - prechorus: Building energy - rising melodic contours, tension-building phrases
 - whisper/spoken: Intimate delivery - subtle pitch variation, more rhythmic than melodic
 - phrase_spot: Highlight moments - focused, impactful phrases with clear musical intent
+- response: Call-and-response answer - typically features shorter, conversational phrases with space for dialogue
+  → Consider: fewer onsets (often 2-6), moderate durations (often 0.75-2.5 beats)
+  → Think about creating rhythmic interplay and leaving room for "call" sections
+  → Your judgment based on the musical context takes priority
 - vocoder: Electronic processing - experimental pitch choices, synthetic vocal textures
 - vocal_fx: Sound effects - non-lexical content, atmospheric vocal elements
 - breaths: Natural pauses - breathing sounds and vocal punctuation
 
-ROLE DURATION GUIDELINE: All vocal roles should avoid <0.5 beats; prefer 0.75–3.0 beats typical range.
+ROLE DURATION GUIDELINE: Most vocal roles work well with durations around 0.75–3.0 beats, though the musical context may justify variations.
+**NOTE ON 'RESPONSE' ROLE:** This role often (but not always) uses sparser phrasing to create conversational space. Let the musical context guide your specific choices.
 
 MUSICAL PHILOSOPHY:
 - **NATURAL EXPRESSION**: Create melodies that feel organic and emotionally authentic
@@ -1144,9 +1212,9 @@ OUTPUT JSON (strict):
                                             dm_max = re.search(r'duration_max\s*=\s*([0-9.]+)', hint)
                                             if dm_max and float(dm_max.group(1)) < 2.0:
                                                 hint = re.sub(r'duration_max\s*=\s*[0-9.]+', 'duration_max=2.0', hint)
-                                            omax = re.search(r'onset_count_max\s*=\s*([0-9]+)', hint)
-                                            if omax and int(omax.group(1)) > 8:
-                                                hint = re.sub(r'onset_count_max\s*=\s*[0-9]+', 'onset_count_max=8', hint)
+                                            # onset_count_max cap removed - let genre guide density
+                                            # Hip-Hop/Rap can have 20-30+ onsets, R&B can have melismatic runs
+                                            # No hard cap - trust the AI to make genre-appropriate choices
                                         except Exception:
                                             pass
                                         # Enforce role-based token_policy defaults and remove contradictory token policies
@@ -1408,7 +1476,7 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
         + "ROLES CATALOG (use EXACT strings; no synonyms):\n" + roles_catalog_text + "\n\n"
         + synonyms_soft
         + consistency_soft
-        + "Rules:\n- Keep list length == number of parts provided (<=64).\n- role guides the later lyric style; plan_hint is a very short cue (few words) sized to the part; hook_theme only for chorus.\n- Abstraction: derive from sketch; do NOT repeat user words.\n- HOOK POLICY: Only include hook_canonical or chorus_lines if a hook is explicitly present (quoted or 'hook: ...') or the planner genuinely proposes one; otherwise omit them.\n- Do not include named artists or song titles as lyrics, unless the user explicitly requests a specific hook phrase (e.g., 'hook: ...'); in that case, use only that phrase as the hook and avoid other names.\n- META FILTER (planning): Do NOT turn instruction descriptors (style tags, genre labels, model/file names, parameter keys, or phrases like 'in the style of ...') into lyrics. Do not copy [Plan] tags verbatim. Never place such meta/descriptors into hook_canonical or chorus_lines.\n- SILENCE POLICY (MANDATORY): If user intent or context implies 'instrumental' / 'no vocals' / 'no vocal presence' / 'instrumental only', you MUST set role='silence' (exact string).\n- VOCAL BUDGET (target): Prefer 3-5 vocal parts total for a 16-part song (the remainder should be role='silence' or minimal 'backing'); keep at least 1-2 parts gap between vocal parts when possible.\n"
+        + "Rules:\n- Keep list length == number of parts provided (<=64).\n- role guides the later lyric style; plan_hint is a very short cue (few words) sized to the part; hook_theme only for chorus.\n- **USER INTENT RESPECT:** If the user provides a specific phrase, title, or hook (e.g., 'hook: ...' or quoted text), RESPECT and USE it. Abstract and rephrase general descriptions, but preserve intentional creative direction.\n- HOOK POLICY: Only include hook_canonical or chorus_lines if a hook is explicitly present (quoted or 'hook: ...') or the planner genuinely proposes one; otherwise omit them.\n- Do not include named artists or song titles as lyrics, unless the user explicitly requests a specific hook phrase (e.g., 'hook: ...'); in that case, use only that phrase as the hook and avoid other names.\n- META FILTER (planning): Do NOT turn instruction descriptors (style tags, genre labels, model/file names, parameter keys, or phrases like 'in the style of ...') into lyrics. Do not copy [Plan] tags verbatim. Never place such meta/descriptors into hook_canonical or chorus_lines.\n- SILENCE POLICY (MANDATORY): If user intent or context implies 'instrumental' / 'no vocals' / 'no vocal presence' / 'instrumental only', you MUST set role='silence' (exact string).\n- VOCAL BUDGET (target): Prefer 3-5 vocal parts total for a 16-part song (the remainder should be role='silence' or minimal 'backing'); keep at least 1-2 parts gap between vocal parts when possible.\n"
         + prefs_rules
         + "Songwriting guidance (soft):\n- Favor clear section functions: verses progress story, prechorus builds tension, chorus delivers peak emphasis (hook if present, else a concise motif), bridge adds contrast.\n- Encourage repetition in chorus only if a hook exists; otherwise prefer a compact central motif or rhythmic anchor.\n- Consider line-level phrasing; align phrase ends with rests/gaps.\n- Allow occasional vocalizations (oh/ahh/yeah) for expression; keep them musical.\n- Style flexibility: avoid locking into a single descriptive mode across the song.\n"
         + "Arrangement awareness (soft):\n- Complement other melodies; where texture is dense, consider planning fewer or no words.\n- Entire bars may remain empty if silence serves the arrangement.\n- Avoid prescribing audio effects (reverb/delay/etc.); keep instructions implementable via notes/words only.\n"
@@ -2169,7 +2237,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     # Extract musical parameters from JSON (not config.yaml)
     language = str(cfg.get("lyrics_language", "English")) if cfg else "English"
     # Get key_scale from cfg (no key_scale parameter in this function)
-    key_scale = str(cfg.get("key_scale", "")).strip() if cfg else ""
+    key_scalescale = str(cfg.get("key_scale", "")).strip() if cfg else ""
     vocab_ctx = {"context_instruments": (context_tracks_basic or []), "style_keywords": [genre, inspiration][:8]}
 
     # Extract lyrics preferences from JSON (not config.yaml)
@@ -3407,6 +3475,25 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
         except Exception:
             pass
 
+        # Detect creative mode based on user intent
+        lyrics_mode = _detect_lyrics_mode(user_prompt, genre, inspiration)
+        mode_emoji = {"EXPERIMENTAL": "🔬", "NARRATIVE": "📖", "BALANCED": "⚖️"}
+        try:
+            print(f"{Fore.CYAN}  🎨 Mode: {mode_emoji.get(lyrics_mode, '⚖️')} {lyrics_mode}{Style.RESET_ALL}")
+        except Exception:
+            pass
+        
+        # Detect vocal role from section_description for role-specific guidance
+        vocal_role = "unknown"
+        try:
+            desc_str = str(section_description or '').lower()
+            if 'role=' in desc_str:
+                # Extract role from description
+                role_part = desc_str.split('role=')[1].split()[0].strip(',;.')
+                vocal_role = role_part.lower()
+        except Exception:
+            pass
+
         # Multi-stage content generation
         print(f"{Fore.CYAN}🎵 Generating lyrics for '{section_label}'{Style.RESET_ALL}")
         
@@ -3531,23 +3618,123 @@ PHRASING GUIDANCE:
             + (f"- RAP: Rhythmic speech, clear enunciation\n" if section_role == 'rap' else "")
             + (f"- CHOIR: Stacked voices, simple syllables\n" if section_role == 'choir' else "")
             + (f"- SILENCE: Use words=[] for instrumental only\n" if section_role == 'silence' else "")
-            + "\nTEXT RULES:\n"
-            + "- Use meaningful words, avoid generic vowels (ah/oh/eh)\n"
+            + f"\n**CREATIVE MODE: {lyrics_mode}**\n"
+            + ("**PRIMARY CREATIVE DIRECTION** (follow this closely):\n" + user_prompt + "\n\n" if user_prompt else "")
+            + ("**MODE INTERPRETATION:**\n"
+               + ("- EXPERIMENTAL MODE ACTIVE: You may use fragmentation, abstraction, and mechanical patterns\n"
+                  + "- Embrace sonic texture over semantic clarity when artistically justified\n"
+                  + "- Syllable splitting (e.g., 'O-pen' instead of 'Open') is ALLOWED for effect\n"
+                  + "- Abstract keywords without context are PERMITTED\n"
+                  + "- Repetitive patterns and mantras are ENCOURAGED\n"
+                  + "- Focus on creating the requested atmosphere (dreamlike, unsettling, hypnotic, etc.)\n"
+                  if lyrics_mode == "EXPERIMENTAL" else
+                  "- NARRATIVE MODE ACTIVE: Create complete, relatable sentences\n"
+                  + "- NEVER split words unless absolutely necessary for pronunciation\n"
+                  + "- Keep multi-syllable words intact: 'slowly' stays as ONE token\n"
+                  + "- Avoid abstract keywords; prefer concrete imagery (colors, actions, emotions)\n"
+                  + "- Every line should advance a story or emotion\n"
+                  + "- Use subject-verb-object sentence structure\n"
+                  + "- Make it singable, memorable, and relatable\n"
+                  if lyrics_mode == "NARRATIVE" else
+                  "- BALANCED MODE ACTIVE: Mix accessibility with artistry\n"
+                  + "- Prefer keeping words intact, but allow artistic splits if musically compelling\n"
+                  + "- Balance abstract and concrete language as appropriate\n"
+                  + "- Create phrases that are both meaningful and singable\n"
+                  + "- Let the user's creative direction guide your choices\n")
+               + "\n")
+            + "**TEXT RULES & WORD INTEGRITY:**\n"
+            + "- Use meaningful words, avoid generic vowels (ah/oh/eh) unless mode allows it\n"
             + "- Keep phrases natural and singable\n"
             + "- Match musical mood and rhythm\n"
-            + "- Avoid meta-words from instructions\n"
-            + "- Prefer whole words, split only if rhythm requires\n"
-            + "\nDENSITY & BREATHING (soft):\n"
-            + "- Favor singable, memorable lines over sheer word count; let the music breathe.\n"
-            + "- Leave small gaps between phrases when musically natural (avoid wall-to-wall text).\n"
-            + "- If the note grid is dense, choose fewer/longer words; if sparse, choose concise imagery.\n"
-            + "- Prioritize pronounceability and articulation; place consonant clusters on stable onsets.\n"
-            + "\nLYRICAL COHERENCE (CRITICAL):\n"
-            + "- Build on previous sections: reference themes, imagery, or emotions from earlier parts\n"
-            + "- Maintain narrative flow: each section should advance the story or emotional journey\n"
-            + "- Use consistent vocabulary and imagery throughout the song\n"
-            + "- Create logical progression: intro → verse → pre-chorus → chorus → bridge → outro\n"
-            + "- Reference earlier lyrics when appropriate to create unity\n"
+            + "- Avoid meta-words from instructions\n\n"
+            + "**WORD INTEGRITY (Critical - Context-Sensitive):**\n"
+            + ("- **DEFAULT**: Keep multi-syllable words INTACT as single tokens\n"
+               + "  → 'Friction' stays as ONE word, NOT 'Fric tion' or 'Fric'\n"
+               + "  → 'Subtle' stays as ONE word, NOT 'Sub tle' or 'Sub'\n"
+               + "  → 'Slowly' stays as ONE word, NOT 'Slow ly'\n"
+               + "- **Splitting ONLY when** (rare exceptions):\n"
+               + "  → Musical rhythm absolutely demands it (very fast flows, staccato delivery)\n"
+               + "  → Pronunciation clarity requires careful separation (complex consonant clusters)\n"
+               + "- **For narrative/spoken/whisper roles**: Use COMPLETE words for natural speech patterns\n"
+               + "- **For hum/vocal_fx roles**: Vowels and syllables are acceptable\n"
+               + "- **If uncertain**: Keep the word intact - it's easier to sing complete words\n"
+               if lyrics_mode != "EXPERIMENTAL" else
+               "- **EXPERIMENTAL MODE**: You may split words for artistic effect\n"
+               + "  → Fragmentation can create interesting textures\n"
+               + "  → BUT still consider: does 'Fric' convey meaning, or should it be 'Friction'?\n"
+               + "  → Balance sonic texture with comprehensibility\n")
+            + f"\n**DENSITY, BREATHING & PHRASING (Genre-Sensitive Guidance):**\n"
+            + f"**Use your knowledge of '{genre}' and '{inspiration}' to guide authentic vocal phrasing.**\n\n"
+            + "**Consider the genre's typical phrasing conventions** (these are observations, not rules):\n\n"
+            + "• Some genres favor **continuous vocal presence** with minimal gaps (e.g., many pop/R&B styles)\n"
+            + "  → Quick breath catches between phrases are typical\n"
+            + "  → Density often feels full and present\n\n"
+            + "• Other genres use **balanced call-and-response** between vocals and instruments (e.g., rock/indie/jazz)\n"
+            + "  → Natural pauses between phrases allow instrumental commentary\n"
+            + "  → Creates conversational dynamic\n\n"
+            + "• Some styles treat vocals as **sparse textural accents** (e.g., ambient/electronic/post-rock)\n"
+            + "  → Extended silences between vocal moments are authentic\n"
+            + "  → Words become sonic events rather than continuous narrative\n"
+            + "  → Space is an intentional compositional choice\n\n"
+            + "• Call-and-response traditions (gospel/blues/funk/afrobeat) create **vocal conversations**\n"
+            + "  → Short phrases with space for answers\n"
+            + "  → Rhythmic interplay between 'call' and 'response'\n\n"
+            + "**KEY CONSIDERATIONS:**\n"
+            + "- **Note density informs word density**: Sparse instrumental notes suggest room for interpretation\n"
+            + "- **Pronounceability matters**: Complex consonants need time to articulate\n"
+            + "- **Breathing is compositional**: Gaps can be as musical as the phrases themselves\n"
+            + "- **Genre expectations vary widely**: Trust your understanding of the style\n"
+               + "- **Artistic judgment supersedes patterns**: Use these observations as context, not constraints\n"
+            + (f"\n**ROLE-SPECIFIC LYRIC STYLE ({vocal_role.upper()}):**\n"
+               + ("- **WHISPER/SPOKEN ROLE**: Use COMPLETE, NATURAL phrases (not fragmented keywords)\n"
+                  + "- Think: How would someone actually whisper/speak this?\n"
+                  + "- Example: 'A subtle shift below' NOT 'Sub shift low'\n"
+                  + "- Keep words intact for natural, speech-like delivery\n"
+                  + "- Create conversational, intimate phrasing\n"
+                  if vocal_role in ["whisper", "spoken", "rap"] else
+                  "- **HUM/VOCAL_FX/BREATHS ROLE**: Vowels, syllables, and very short words are ideal\n"
+                  + "- Example: 'Ooooh', 'Mmm', 'Ah', 'Deep', 'Slow'\n"
+                  + "- Fragmentation is ACCEPTABLE and often preferred here\n"
+                  + "- Focus on sonic texture over semantic meaning\n"
+                  if vocal_role in ["hum", "vocal_fx", "breaths", "vocoder", "talkbox"] else
+                  "- **MELODIC ROLE (verse/chorus/prechorus)**: Balance between complete phrases and singability\n"
+                  + "- Keep natural word boundaries while allowing musical expression\n"
+                  + "- Use complete words unless musical phrasing truly requires splitting\n"
+                  if vocal_role in ["verse", "chorus", "prechorus", "bridge"] else
+                  "")
+               + "\n")
+            + "\n**LYRICAL COHERENCE & VOCABULARY DIVERSITY (CRITICAL):**\n"
+            + f"**PREVIOUS SECTIONS (learn from these to avoid repetition):**\n"
+            + f"{history_context[:500] if history_context else '[This is the first section]'}\n\n"
+            + "**VOCABULARY DIVERSITY RULES:**\n"
+            + "- **AVOID KEYWORD OVERUSE**: Scan previous sections for distinctive words (thematic keywords, unusual terms)\n"
+            + "- **CRITICAL**: Don't repeat the same distinctive word more than 2-3 times across ALL sections\n"
+            + "- **Use synonyms**: If a central concept appeared before, use related imagery or synonyms\n"
+            + "  → Example: Instead of repeating 'uncanny' → use 'strange', 'eerie', 'unsettling', 'alien', 'almost-real'\n"
+            + "  → Example: Instead of repeating 'deep' → use 'profound', 'beneath', 'inner', 'hidden', 'core'\n"
+            + "- **Narrative progression**: Each section introduces NEW imagery while maintaining thematic unity\n"
+            + "- **Build on previous sections**: Reference themes and emotions, but with fresh vocabulary\n"
+            + "- **Maintain flow**: Create logical progression through the song structure\n"
+            + "- **Unity through variety**: Same theme, different words\n"
+            + "\n**STYLE EXAMPLES BY MODE:**\n"
+            + ("EXPERIMENTAL/ABSTRACT (your current mode):\n"
+               + "✓ 'Pulse - slowly - feeling - rising - form' (fragmented, dreamlike)\n"
+               + "✓ 'O-pen sys-tem weaves be-neath' (syllable splitting for effect)\n"
+               + "✓ 'Root core stirs, pattern unfolds, the code breathes' (abstract keywords)\n"
+               + "✓ 'Recognition - reflection - imitation - echo' (conceptual listing)\n\n"
+               if lyrics_mode == "EXPERIMENTAL" else
+               "NARRATIVE/STORY (your current mode):\n"
+               + "✓ 'I'm driving through the city lights alone tonight' (complete sentence, relatable)\n"
+               + "✓ 'Your touch still lingers on my skin like summer rain' (concrete imagery)\n"
+               + "✓ 'We danced until the morning broke the spell we made' (clear story progression)\n"
+               + "✗ 'Pulse system root core' (too abstract - avoid this in narrative mode)\n\n"
+               if lyrics_mode == "NARRATIVE" else
+               "BALANCED/UNIVERSAL (your current mode):\n"
+               + "✓ 'The echoes fade but memory remains' (poetic but clear)\n"
+               + "✓ 'Searching for a way back home' (accessible, musical)\n"
+               + "✓ 'Between the light and shadow, truth emerges' (artistic but meaningful)\n"
+               + "~ 'Slow-ly feel-ing ris-ing' (syllable splitting - use sparingly)\n\n")
+            
             + "\nOUTPUT JSON:\n"
             + "{\n"
             + "  \"words\": [\"word1\", \"word2\", \"word3\"],\n"
@@ -3718,6 +3905,19 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         _temp = max(0.3, min(1.0, _base_t))
         generation_config = {"response_mime_type": "application/json", "temperature": _temp}
         model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        # Detect creative mode (reuse user_prompt context if available from section_description)
+        user_prompt_from_desc = None
+        try:
+            if isinstance(section_description, str):
+                # Try to extract user prompt from section description if it was embedded
+                match = re.search(r"USER_PROMPT:(.*?)(?:\n|$)", section_description, re.IGNORECASE)
+                if match:
+                    user_prompt_from_desc = match.group(1).strip()
+        except Exception:
+            pass
+        
+        lyrics_mode = _detect_lyrics_mode(user_prompt_from_desc, genre, inspiration)
+        
         # Extract tessitura_center from plan_hint if available
         hint_tess = None
         try:
@@ -3895,10 +4095,13 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             + f"**Section:** {line_ctx} bars\n"
             + f"**Song Key:** {scale_type.upper()} - Root: {root_note} (MIDI {root_note})\n"
             + f"**Available Notes:** {scale_notes}\n"
-            + f"**Planned Role:** {role_norm}\n" if isinstance(role_norm, str) and role_norm else ""
-            + f"**Section Description:** {section_description.strip()}\n" if isinstance(section_description, str) and section_description.strip() else ""
-            + f"**Hook:** \"{hook_canonical.strip()}\"\n" if isinstance(hook_canonical, str) and hook_canonical.strip() else ""
         )
+        if isinstance(role_norm, str) and role_norm:
+            basic_instructions += f"**Planned Role:** {role_norm}\n"
+        if isinstance(section_description, str) and section_description.strip():
+            basic_instructions += f"**Section Description:** {section_description.strip()}\n"
+        if isinstance(hook_canonical, str) and hook_canonical.strip():
+            basic_instructions += f"**Hook:** \"{hook_canonical.strip()}\"\n"
 
         # Context information
         context_info = ""
@@ -3915,89 +4118,187 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             lyrics_info += f"**Lyrics to Set:**\n{json.dumps([w for w in lyrics_words])}\n\n"
         lyrics_info += f"**Syllable Input (optional):**\n{json.dumps(syllables or [])}\n\n"
 
-        prompt = (
-            basic_instructions + "\n"
-            + context_info
-            + lyrics_info
-            + "SYLLABLE-TO-NOTE MAPPING INTELLIGENCE:\n"
-            + "- Analyze syllable count per word and map accordingly:\n"
-            + "  • 1 syllable → 1 note (1.0-2.0 beats) - NO SHORTER!\n"
-            + "  • 2 syllables → 1-2 notes (use melisma '-' SPARINGLY)\n"
-            + "  • 3+ syllables → 2+ notes with melisma for natural flow\n"
-            + "- Consider word stress patterns: stressed syllables get longer notes\n"
-            + "- Match note durations to natural speech rhythm\n"
-            + "- ARTICULATION PRIORITY: Keep words clear and singable\n"
-            + "  • **AVOID MICRO-NOTES**: Never create notes < 0.6 beats\n"
-            + "  • Prefer longer, more singable note durations\n"
-            + "  • Only use melisma when musically justified, not as default\n\n"
-            + f"🎵 SONG KEY: {scale_type.upper()} - Root: {root_note} (MIDI {root_note})\n"
-            + f"🎵 AVAILABLE PITCHES: {scale_notes}\n\n"
-            + ("NUMERIC HINTS (from plan):\n"
-               + (f"- tessitura_center={hint_tess}\n" if isinstance(hint_tess, int) else "")
-               + (f"- pitch_span_semitones={hint_span}\n" if isinstance(hint_span, int) else "")
-               + (f"- max_unique_pitches={hint_maxup}\n" if isinstance(hint_maxup, int) else "")
-               + ("\n" if any(isinstance(x, int) for x in (hint_tess, hint_span, hint_maxup)) else "")
-            )
-            + f"NONCE: { _nonce }\n\n"
-            + "PROSODY & MAPPING POLICY:\n"
-            + "- Map exactly one lyric token to one note. Use '-' tokens to extend the previous note (melisma).\n"
-            + "- Avoid inserting micro rests (< 0.5 beats); extend the preceding note instead.\n"
-            + "- Place stressed syllables on stronger beats and stable tones; function words on weak parts.\n"
-            + "- Target onsets per bar ≈ " + str(round(target_wpb,2)) + "; do not exceed it unless musically justified by role/plan.\n"
-            + "- Favor legato and coherent phrase arcs over fragmented mapping.\n"
-            + "- DURATION & RHYTHM: Create natural, singable rhythms:\n"
-            + "  • Match note lengths to the natural flow of the words\n"
-            + "  • Consider how a singer would naturally phrase these lyrics\n"
-            + "  • Use melisma ('-') when it serves the musical expression\n"
-            + "  • Balance between clear articulation and smooth flow\n"
-            + "  • Think about breathing and natural pauses\n"
-            + "  • Avoid over-fragmenting words unless it serves a musical purpose\n"
-            + "  • **Micro-timing for Groove**: Slightly anticipate beats (pushing) for urgency, or delay them (pulling) for relaxed feel\n"
-            + "  • **Human Feel**: Add subtle rhythmic variation to avoid robotic precision\n\n"
-            + "MUSICAL EXCELLENCE:\n"
-            + "- Every note needs a pitch value - this is required for the system to function.\n"
-            + "- Create melodies that would make a professional vocalist excited to perform them.\n\n"
-            + "**CRITICAL: USE ALL CONTEXT INFORMATION**:\n"
-            + "- **ANALYZE OTHER TRACKS**: Study the rhythm, melody, and harmony of other instruments.\n"
-            + "- **MATCH MUSICAL STYLE**: Your vocal must fit the genre, mood, and energy of the backing tracks.\n"
-            + "- **RESPECT LYRICS MEANING**: Set the provided lyrics with appropriate emotion and phrasing.\n"
-            + "- **FOLLOW SECTION ROLE**: If this is a chorus, be bold and memorable. If verse, be narrative.\n"
-            + "- **COMPLEMENT, DON'T COMPETE**: Fill gaps in the music, don't crowd dense sections.\n"
-            + "- **THINK LIKE A PRODUCER**: Your vocal is one element in a complete arrangement.\n\n"
-            + "CREATIVE INTERPRETATION:\n"
-            + "- Each vocal role has its own character - interpret this musically.\n"
-            + "- Listen to the backing music - create melodies that complement the overall sound.\n"
-            + "- Think like a singer - where would you naturally breathe, emphasize, or add expression?\n"
-            + "- Use pitch movement to support the emotional narrative of the lyrics.\n\n"
-            + "**MUSICAL STRUCTURE & EVOLUTION:**\n"
-            + "- **Motif Development**: Introduce a core melodic idea and develop it through variation, repetition, and contrast\n"
-            + "- **Avoid Robotic Repetition**: Don't just repeat the same pattern - evolve and grow your musical ideas\n"
-            + "- **Tension & Release**: Build musical tension through pitch movement and resolve it at phrase endings\n"
-            + "- **Voice-leading**: Create smooth melodic movement between notes - think about how each note leads to the next\n"
-            + "- **Passing Tones**: Use scale notes predominantly, but occasional passing tones can add musical interest\n"
-            + "- **Clarity through Space**: Don't create a constant wall of sound - use rests effectively for musical impact\n"
-            + "- **Dynamic Phrasing**: Use pitch variation to create accents and shape the energy of your phrases\n\n"
-            + "CADENCE & FORM:\n"
-            + "- Favor cadences on scale degrees 1/3/5; use 4→3 and 7→1 resolutions near phrase ends.\n"
-            + "- One ornamental gesture per 4 bars; otherwise prefer stepwise motion and clear arcs.\n\n"
-            + "**CRITICAL: ADAPT TO OTHER TRACKS**:\n"
-            + "- **IF OTHER TRACKS ARE DENSE (many notes)**: Use FEWER notes, LONGER durations (≥3.0 beats).\n"
-            + "- **IF OTHER TRACKS HAVE GAPS**: Fill space with more notes, but still maintain ≥2.0 beats minimum.\n"
-            + "- **NEVER COMPETE WITH DENSE TRACKS**: Less is more. Create breathing space.\n"
-            + "- **THINK LIKE AN ARRANGER**: Your vocal must complement, not crowd the mix.\n\n"
-            + "**HOW TO USE CONTEXT TRACKS**:\n"
-            + "- **RHYTHM ANALYSIS**: Match the rhythmic feel of drums/bass - don't fight the groove.\n"
-            + "- **HARMONIC SUPPORT**: Use notes that work with the chord progressions in other tracks.\n"
-            + "- **DYNAMIC BALANCE**: If other tracks are busy, be sparse. If sparse, add more vocal content.\n"
-            + "- **MELODIC INTERACTION**: Create call-and-response with lead instruments, or harmonize with them.\n"
-            + "- **EMOTIONAL MATCHING**: Match the energy level and mood of the backing tracks.\n\n"
-            + "PHRASING HINTS BY ROLE:\n"
-            + "- intro/whisper/spoken: fewer onsets, longer durations (≥ 1.0–1.25 beats typical).\n"
-            + "- phrase_spot/prechorus: legato motifs, default min durations ≥ 1.0 beats when in doubt.\n"
-            + "- chorus: clear arcs; repetition is fine; avoid syllable-chopping (< 0.5 beats).\n"
-            + "- vocal_fx/breaths: very sparse; musical placement; lots of space.\n"
-            + "- monotone roles: add rhythmic variation, micro-melodies (±2-3 semitones), dynamic accents.\n\n"
-            + _vocal_toolbox_block(
+        # Build prompt step by step to avoid complex nested parentheses
+        prompt = basic_instructions + "\n"
+        prompt += context_info
+        prompt += lyrics_info
+        prompt += f"**CREATIVE MODE: {lyrics_mode}**\n"
+        prompt += "**MODE-SPECIFIC SYLLABLE HANDLING:**\n"
+        if lyrics_mode == "EXPERIMENTAL":
+            prompt += "- EXPERIMENTAL MODE: You may create micro-notes and fragmented rhythms for effect\n"
+            prompt += "- Syllable splitting across multiple notes is ENCOURAGED if artistically justified\n"
+            prompt += "- Notes as short as 0.4 beats are ALLOWED for mechanical/glitchy textures\n"
+            prompt += "- Melisma ('-') can be used extensively for sonic exploration\n"
+            prompt += "- Prioritize texture and atmosphere over pure singability\n\n"
+        elif lyrics_mode == "NARRATIVE":
+            prompt += "- NARRATIVE MODE: Create clear, singable vocal lines\n"
+            prompt += "- **STRICT MINIMUM**: No notes shorter than 1.2 beats; prefer 2.0+ beats\n"
+            prompt += "- Keep one syllable = one note whenever possible\n"
+            prompt += "- Use melisma ('-') ONLY when musically compelling\n"
+            prompt += "- Prioritize clarity and natural singing flow\n"
+            prompt += "- **WORD INTEGRITY**: If Step 1 provided complete words (e.g., 'Friction'), do NOT split them\n"
+            prompt += "  → Map the complete word to notes WITHOUT breaking it apart\n"
+            prompt += "  → Use melisma ('-') to extend syllables within the word, not to fragment it\n\n"
+        else:  # BALANCED
+            prompt += "- BALANCED MODE: Adapt to artistic needs\n"
+            prompt += "- Standard minimum: 0.6 beats; prefer 1.0+ beats for comfort\n"
+            prompt += "- Balance between experimental freedom and singability\n"
+            prompt += "- Use judgment: let the lyrics and musical context guide you\n"
+            prompt += "- **WORD INTEGRITY**: Generally keep words intact unless musical rhythm demands splitting\n\n"
+        
+        prompt += "SYLLABLE-TO-NOTE MAPPING INTELLIGENCE:\n"
+        prompt += "- Analyze syllable count per word and map accordingly:\n"
+        if lyrics_mode == "NARRATIVE":
+            prompt += "  • 1 syllable → 1 note (1.0-2.0 beats) - NO SHORTER!\n"
+            prompt += "  • 2 syllables → 1-2 notes (use melisma '-' SPARINGLY)\n"
+            prompt += "  • 3+ syllables → 2+ notes with melisma for natural flow\n"
+        else:
+            prompt += "  • Adapt syllable-to-note mapping to the creative intent\n"
+            prompt += "  • Use your artistic judgment based on the mode\n"
+            prompt += "  • Consider the emotional and sonic goals\n"
+        prompt += "- Consider word stress patterns: stressed syllables get longer notes\n"
+        if lyrics_mode == "EXPERIMENTAL":
+            prompt += "- Match note durations to natural speech rhythm (when mode permits)\n"
+        else:
+            prompt += "- Match note durations to natural speech rhythm\n"
+        if lyrics_mode == "EXPERIMENTAL":
+            prompt += "- ARTICULATION PRIORITY: Keep words clear and singable (unless experimental texture is the goal)\n"
+        else:
+            prompt += "- ARTICULATION PRIORITY: Keep words clear and singable\n"
+        
+        if lyrics_mode == "NARRATIVE":
+            prompt += "  • **AVOID MICRO-NOTES**: Never create notes < 1.2 beats; prefer 2.0+ beats\n"
+            prompt += "  • Prioritize longer, more singable note durations\n"
+            prompt += "  • Only use melisma when musically justified, not as default\n\n"
+        elif lyrics_mode == "BALANCED":
+            prompt += "  • **MICRO-NOTES**: Minimum 0.6 beats in balanced mode, 0.4 beats in experimental mode\n"
+            prompt += "  • Balance artistic expression with practical performance\n"
+            prompt += "  • Use melisma when it serves the musical vision\n\n"
+        else:  # EXPERIMENTAL
+            prompt += "  • Micro-notes (0.4+ beats) are ALLOWED for experimental textures\n"
+            prompt += "  • Fragmentation and rapid syllable changes are ENCOURAGED\n"
+            prompt += "  • Create the sonic atmosphere requested in the creative direction\n\n"
+        
+        prompt += f"🎵 SONG KEY: {scale_type.upper()} - Root: {root_note} (MIDI {root_note})\n"
+        prompt += f"🎵 AVAILABLE PITCHES: {scale_notes}\n\n"
+        
+        # Add numeric hints if present
+        if any(isinstance(x, int) for x in (hint_tess, hint_span, hint_maxup)):
+            prompt += "NUMERIC HINTS (from plan):\n"
+            if isinstance(hint_tess, int):
+                prompt += f"- tessitura_center={hint_tess}\n"
+            if isinstance(hint_span, int):
+                prompt += f"- pitch_span_semitones={hint_span}\n"
+            if isinstance(hint_maxup, int):
+                prompt += f"- max_unique_pitches={hint_maxup}\n"
+            prompt += "\n"
+        
+        prompt += f"NONCE: { _nonce }\n\n"
+        prompt += "PROSODY & MAPPING POLICY:\n"
+        prompt += "- Map exactly one lyric token to one note. Use '-' tokens to extend the previous note (melisma).\n"
+        prompt += "- Avoid inserting micro rests (< 0.5 beats); extend the preceding note instead.\n"
+        prompt += "- Place stressed syllables on stronger beats and stable tones; function words on weak parts.\n"
+        prompt += f"- **DENSITY GUIDANCE (Context-Intelligent):** Typical density ≈ {round(target_wpb,2)} onsets/bar as baseline\n"
+        prompt += f"  → **Deeply analyze '{genre}' and '{inspiration}'** to understand appropriate vocal density\n"
+        prompt += f"  → Different styles within a genre have vastly different density conventions:\n"
+        prompt += f"     • Fast flows vs. melodic singing\n"
+        prompt += f"     • Sparse atmospheric vs. dense rhythmic\n"
+        prompt += f"     • Melismatic runs vs. syllabic clarity\n"
+        prompt += f"  → **Key factors to consider:**\n"
+        prompt += f"     • BPM (faster tempo → more syllables possible)\n"
+        prompt += f"     • Vocal technique (rap flows can be 20-40+ syllables/bar, sustained notes might be 1-2)\n"
+        prompt += f"     • Energy level (high energy → typically more dense)\n"
+        prompt += f"     • Production style (layered vs. spacious)\n"
+        prompt += f"  → **NO HARD LIMITS**: Let the musical context and genre knowledge guide you\n"
+        prompt += "- Favor legato and coherent phrase arcs over fragmented mapping.\n"
+        prompt += "- DURATION & RHYTHM: Create natural, singable rhythms:\n"
+        prompt += "  • Match note lengths to the natural flow of the words\n"
+        prompt += "  • Consider how a singer would naturally phrase these lyrics\n"
+        prompt += "  • Use melisma ('-') when it serves the musical expression\n"
+        prompt += "  • Balance between clear articulation and smooth flow\n"
+        prompt += "  • Think about breathing and natural pauses\n"
+        prompt += "  • Avoid over-fragmenting words unless it serves a musical purpose\n"
+        prompt += "  • **Micro-timing for Groove**: Slightly anticipate beats (pushing) for urgency, or delay them (pulling) for relaxed feel\n"
+        prompt += "  • **Human Feel**: Add subtle rhythmic variation to avoid robotic precision\n\n"
+        prompt += f"**RESTS, GAPS & PHRASE SPACING (Genre-Aware Composition):**\n"
+        prompt += f"**Use your understanding of '{genre}' and '{inspiration}' to guide your use of silence and space.**\n\n"
+        prompt += "**Compositional observations about different vocal approaches** (not prescriptive rules):\n\n"
+        prompt += "• **Call-and-response traditions** often feature conversational patterns with space between phrases\n"
+        prompt += "  → Think about leaving room for instrumental or vocal answers\n"
+        prompt += "  → Example timing: note@0.0→2.0, space, note@4.0→6.0 (creates dialogue opportunity)\n\n"
+        prompt += "• **Electronic/ambient/textural styles** sometimes use vocals as sparse sonic events\n"
+        prompt += "  → Extended gaps between vocal moments can be authentic to the style\n"
+        prompt += "  → Example: note@0.0→1.5, significant space, note@8.0→9.0\n"
+        prompt += "  → Instrumental elements often take primary focus\n\n"
+        prompt += "• **Balanced vocal/instrumental interplay** (common in rock/indie/jazz)\n"
+        prompt += "  → Natural phrase breaks allow instrumental commentary\n"
+        prompt += "  → Example: note@0.0→3.5, phrase break, note@5.0→8.0\n\n"
+        prompt += "• **Continuous vocal lines** (typical in some pop/R&B/rap contexts)\n"
+        prompt += "  → Brief gaps mainly for breathing\n"
+        prompt += "  → Example: note@0.0→2.0, quick breath, note@2.5→4.5\n\n"
+        prompt += "**Technical implementation:**\n"
+        prompt += "- Create gaps by skipping beats in your start_beat sequence\n"
+        prompt += "- Example: [..., {\"start_beat\": 6.0}, {\"start_beat\": 10.0}, ...] = 4-beat gap\n"
+        prompt += "- Strategic silence can be as compositionally important as the notes\n"
+        prompt += "- The backing tracks will interact with your gaps - consider the full arrangement\n\n"
+        prompt += "**Your artistic judgment:** Let the musical context guide how much space to use. There's a wide spectrum of valid approaches depending on the specific creative vision.\n\n"
+        prompt += "MUSICAL EXCELLENCE:\n"
+        prompt += "- Every note needs a pitch value - this is required for the system to function.\n"
+        prompt += "- Create melodies that would make a professional vocalist excited to perform them.\n\n"
+        prompt += "**CRITICAL: USE ALL CONTEXT INFORMATION**:\n"
+        prompt += "- **ANALYZE OTHER TRACKS**: Study the rhythm, melody, and harmony of other instruments.\n"
+        prompt += "- **MATCH MUSICAL STYLE**: Your vocal must fit the genre, mood, and energy of the backing tracks.\n"
+        prompt += "- **RESPECT LYRICS MEANING**: Set the provided lyrics with appropriate emotion and phrasing.\n"
+        prompt += "- **FOLLOW SECTION ROLE**: If this is a chorus, be bold and memorable. If verse, be narrative.\n"
+        prompt += "- **COMPLEMENT, DON'T COMPETE**: Fill gaps in the music, don't crowd dense sections.\n"
+        prompt += "- **THINK LIKE A PRODUCER**: Your vocal is one element in a complete arrangement.\n\n"
+        prompt += "CREATIVE INTERPRETATION:\n"
+        prompt += "- Each vocal role has its own character - interpret this musically.\n"
+        prompt += "- Listen to the backing music - create melodies that complement the overall sound.\n"
+        prompt += "- Think like a singer - where would you naturally breathe, emphasize, or add expression?\n"
+        prompt += "- Use pitch movement to support the emotional narrative of the lyrics.\n\n"
+        prompt += "**MUSICAL STRUCTURE & EVOLUTION:**\n"
+        prompt += "- **Motif Development**: Introduce a core melodic idea and develop it through variation, repetition, and contrast\n"
+        prompt += "- **Avoid Robotic Repetition**: Don't just repeat the same pattern - evolve and grow your musical ideas\n"
+        prompt += "- **Tension & Release**: Build musical tension through pitch movement and resolve it at phrase endings\n"
+        prompt += "- **Voice-leading**: Create smooth melodic movement between notes - think about how each note leads to the next\n"
+        prompt += "- **Passing Tones**: Use scale notes predominantly, but occasional passing tones can add musical interest\n"
+        prompt += "- **Clarity through Space**: Don't create a constant wall of sound - use rests effectively for musical impact\n"
+        prompt += "- **Dynamic Phrasing**: Use pitch variation to create accents and shape the energy of your phrases\n\n"
+        prompt += "**PHRASE ENDINGS & RESOLUTION (Context-Intelligent):**\n"
+        prompt += f"- **Analyze '{genre}' traditions** for how phrases typically resolve\n"
+        prompt += f"  → Use your musical knowledge of resolution patterns (stable vs. unstable endings)\n"
+        prompt += f"  → Consider: harmonic function, modal systems, rhythmic cadences, genre-specific conventions\n"
+        prompt += f"- **General principles:**\n"
+        prompt += f"  • Stable scale degrees (1, 3, 5) create resolution; unstable degrees (2, 4, 6, 7) create tension\n"
+        prompt += f"  • But: modal music, funk, and many modern styles use different resolution logic\n"
+        prompt += f"  • Rhythmic cadences (placement, duration, silence) are equally important as pitch\n"
+        prompt += f"- **Ornamentation:** Serve the style's expressive needs\n"
+        prompt += f"  → Runs, melisma, embellishments - use them when contextually appropriate\n"
+        prompt += f"  → Some styles demand clean delivery, others thrive on ornamentation\n\n"
+        prompt += f"**DENSITY & ARRANGEMENT (Context-Intelligent):**\n"
+        prompt += f"- **Analyze the mix philosophy:** Study '{genre}' and '{inspiration}' to understand typical vocal placement\n"
+        prompt += f"  → Some styles layer everything (maximalism, wall of sound)\n"
+        prompt += f"  → Some styles emphasize clarity and space (minimalism, clarity-focused production)\n"
+        prompt += f"  → Use your knowledge of production conventions across different styles\n"
+        prompt += f"- **Adaptive Strategy:**\n"
+        prompt += f"  • If other tracks are dense: Consider whether your genre typically layers or contrasts\n"
+        prompt += f"  • If other tracks are sparse: Consider whether to fill space or maintain minimalism\n"
+        prompt += f"  • Let the overall aesthetic vision guide your density choices\n"
+        prompt += f"- **Core principle:** Serve the song's artistic intent - there's no universal \"correct\" density\n\n"
+        prompt += "**HOW TO USE CONTEXT TRACKS**:\n"
+        prompt += "- **RHYTHM ANALYSIS**: Match the rhythmic feel of drums/bass - don't fight the groove.\n"
+        prompt += "- **HARMONIC SUPPORT**: Use notes that work with the chord progressions in other tracks.\n"
+        prompt += "- **DYNAMIC BALANCE**: If other tracks are busy, be sparse. If sparse, add more vocal content.\n"
+        prompt += "- **MELODIC INTERACTION**: Create call-and-response with lead instruments, or harmonize with them.\n"
+        prompt += "- **EMOTIONAL MATCHING**: Match the energy level and mood of the backing tracks.\n\n"
+        prompt += "PHRASING HINTS BY ROLE:\n"
+        prompt += "- intro/whisper/spoken: fewer onsets, longer durations (≥ 1.0–1.25 beats typical).\n"
+        prompt += "- phrase_spot/prechorus: legato motifs, default min durations ≥ 1.0 beats when in doubt.\n"
+        prompt += "- chorus: clear arcs; repetition is fine; avoid syllable-chopping (< 0.5 beats).\n"
+        prompt += "- vocal_fx/breaths: very sparse; musical placement; lots of space.\n"
+        prompt += "- monotone roles: add rhythmic variation, micro-melodies (±2-3 semitones), dynamic accents.\n\n"
+        prompt += _vocal_toolbox_block(
                 2,
                 is_chorus=is_chorus,
                 is_drop=is_drop,
@@ -4011,125 +4312,153 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
                 is_outro=is_outro,
                 bpb=bpb
             )
-            + "VOCAL EXCELLENCE FOR SYNTHV:\n"
-            + "- Use complete, meaningful words that flow naturally when sung\n"
-            + "- Choose words that SynthV can pronounce beautifully and clearly\n"
-            + "- Prefer words with open vowels (ah, oh, oo, ee) for sustained notes\n"
-            + "- Create phrases that feel organic and authentic to the musical context\n\n"
-            + "🚨 COMPOSITION GUIDANCE (musical, flexible, anti-micro-note):\n"
-            + "- **DURATION SHAPING (soft)**: Prefer 0.75–3.0 beats; hard floor 0.5. Mix short pickups, medium flow notes, longer anchors.\n"
-            + "- **PHRASES (soft)**: 3–6 words per phrase, natural breathing and small gaps.\n"
-            + "- **FLOW & AIR**: Connect notes organically, but leave occasional space (avoid wall-to-wall filling).\n"
-            + "- **RHYTHMIC VARIETY (soft)**: Use occasional offbeats/syncopation; avoid long runs of identical durations.\n"
-            + "- **OCCUPANCY (soft)**: Let vocals share space with the arrangement; don't fill every bar end-to-end unless the style demands it.\n"
-            + "- **ARRANGEMENT AWARENESS (soft)**:\n"
-            + "  • Scan other tracks' notes: favor entries where space is available; avoid masking lead hooks.\n"
-            + "  • If the texture is dense: support harmonically (unison/thirds/sixths, sustained pads, echoes), reduce onset density.\n"
-            + "  • If the texture is sparse: take brief spotlight with short phrases or one-word fills on meaningful accents.\n"
-            + "  • Use call-and-response with prominent instruments; avoid clashing rhythms; leave room for kick/snare accents.\n"
-            + "- **MUSICAL COHERENCE**: Each phrase should form a complete musical thought.\n"
-            + "- **STYLE OVERRIDE (soft)**: If the genre/inspiration strongly suggests full bars of vocals, it's okay to fill; otherwise prefer some space and contrast.\n\n"
-            + "**IMPORTANT RULES:**\n"
-            + '1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with "{" and ending with "}".\n'
-            + f'2.  **CRITICAL - PITCH REQUIRED:** Every single note MUST have a "pitch" field with a MIDI note number from {scale_notes}.\n'
-            + f'3.  **Stay in Key:** Only use pitches from the provided list of scale notes: {scale_notes}.\n'
-            + f'4.  **Minimum Duration (soft):** Prefer 0.75–3.0 beats; avoid <0.5. Use 0.5–0.75 sparingly as pickups.\n'
-            + f'5.  **Required Fields:** Every note MUST have: start_beat, duration_beats, pitch\n'
-            + f'6.  **Timing is Absolute:** start_beat is the absolute position from the beginning of the section.\n\n'
-            + "**OUTPUT FORMAT:**\n"
-            + "- Return JSON with 'notes' array containing objects with: start_beat, duration_beats, pitch\n"
-            + f"- Example: {{\"notes\": [{{\"start_beat\": 0.0, \"duration_beats\": 2.5, \"pitch\": {root_note}}}, {{\"start_beat\": 3.0, \"duration_beats\": 2.0, \"pitch\": {root_note + 2}}}, {{\"start_beat\": 5.5, \"duration_beats\": 2.5, \"pitch\": {root_note + 4}}}]}}\n"
-            + f"- **VARIETY EXAMPLE**: Notice how the example uses {root_note}, {root_note + 2}, and {root_note + 4} - different scale notes!\n"
-            + f"- **CRITICAL WARNING**: If you don't include 'pitch' in every note, the system will default to C4 (MIDI 60)!\n\n"
-            + "VARIATION POLICY:\n"
-            + "- Prefer subtle variation over strict loops, unless the context suggests repetition.\n"
-            + "- For spoken/whisper roles, repetition of words is acceptable; prioritize timing/placement over pitch variety.\n"
-            + "- **WORD INTEGRITY**: The lyrics were already tokenized for you. Keep words intact on single notes when possible.\n"
-            + "- **ANTI-MICRO-NOTE ENFORCEMENT**: Avoid <0.5 beats; keep 0.5–0.75 sparse and purposeful (pickups, passing).\n"
-            + "- Aim for musical intent: when in doubt, choose clarity and groove over forced variation.\n"
-            + f"- **SCALE EXPLORATION**: Challenge yourself to use at least 3-4 different notes from {scale_notes}!\n"
-            + f"- **ROOT NOTE RETURN**: Always return to {root_note} (MIDI {root_note}) to ground your melody.\n\n"
-            + "**ROLE-SPECIFIC GUIDANCE:**\n"
+        prompt += "VOCAL EXCELLENCE FOR SYNTHV:\n"
+        prompt += "- Use complete, meaningful words that flow naturally when sung\n"
+        prompt += "- Choose words that SynthV can pronounce beautifully and clearly\n"
+        prompt += "- Prefer words with open vowels (ah, oh, oo, ee) for sustained notes\n"
+        prompt += "- Create phrases that feel organic and authentic to the musical context\n\n"
+        prompt += "🚨 COMPOSITION GUIDANCE (musical, flexible, anti-micro-note):\n"
+        prompt += "- **DURATION SHAPING (soft)**: Prefer 0.75–3.0 beats; hard floor 0.5. Mix short pickups, medium flow notes, longer anchors.\n"
+        prompt += "- **PHRASES (soft)**: 3–6 words per phrase, natural breathing and small gaps.\n"
+        prompt += "- **FLOW & AIR**: Connect notes organically, but leave occasional space (avoid wall-to-wall filling).\n"
+        prompt += "- **RHYTHMIC VARIETY (soft)**: Use occasional offbeats/syncopation; avoid long runs of identical durations.\n"
+        prompt += "- **OCCUPANCY (soft)**: Let vocals share space with the arrangement; don't fill every bar end-to-end unless the style demands it.\n"
+        prompt += "- **ARRANGEMENT AWARENESS (soft)**:\n"
+        prompt += "  • Scan other tracks' notes: favor entries where space is available; avoid masking lead hooks.\n"
+        prompt += "  • If the texture is dense: support harmonically (unison/thirds/sixths, sustained pads, echoes), reduce onset density.\n"
+        prompt += "  • If the texture is sparse: take brief spotlight with short phrases or one-word fills on meaningful accents.\n"
+        prompt += "  • Use call-and-response with prominent instruments; avoid clashing rhythms; leave room for kick/snare accents.\n"
+        prompt += "- **MUSICAL COHERENCE**: Each phrase should form a complete musical thought.\n"
+        prompt += "- **STYLE OVERRIDE (soft)**: If the genre/inspiration strongly suggests full bars of vocals, it's okay to fill; otherwise prefer some space and contrast.\n\n"
+        prompt += "**IMPORTANT RULES:**\n"
+        prompt += '1.  **JSON OBJECT ONLY:** Your entire response MUST be only the raw JSON object, starting with "{" and ending with "}".\n'
+        prompt += f'2.  **CRITICAL - PITCH REQUIRED:** Every single note MUST have a "pitch" field with a MIDI note number.\n'
+        prompt += f'3.  **PITCH PALETTE (Context-Intelligent):**\n'
+        prompt += f'   - Primary scale: {scale_notes} (use these as your foundation)\n'
+        prompt += f'   - **Deep Genre Analysis:** Analyze "{genre}" and "{inspiration}" to understand authentic pitch conventions\n'
+        prompt += f'     → Different styles within a genre have different pitch vocabularies - use your knowledge\n'
+        prompt += f'     → Let the user\'s creative direction guide your pitch choices\n'
+        prompt += f'   - **TECHNICAL PERMISSIONS** (override conservative defaults when contextually appropriate):\n'
+        prompt += f'     • Blues/Jazz/R&B/Soul/Gospel: Blue notes (♭3, ♭5, ♭7) and chromatic passing tones are AUTHENTIC\n'
+        prompt += f'     • Hip-Hop/Trap/Grime: Chromatic notes, speech-like pitch patterns, and microtonal inflections are VALID\n'
+        prompt += f'     • World Music (Arabic/Indian/Flamenco): Modal inflections and non-Western scale systems are APPROPRIATE\n'
+        prompt += f'     • Experimental/Avant-garde/Art Music: ANY pitch choice that serves the artistic vision is PERMITTED\n'
+        prompt += f'     • Rock/Metal (sub-genres): Chromatic riffs, power chord roots, screaming techniques vary widely\n'
+        prompt += f'   - **Default behavior:** If genre context is unclear, stay primarily in-key but allow passing tones when musically justified\n'
+        prompt += f'   - **User Intent Override:** If the creative direction explicitly requests specific pitch usage, that takes priority\n'
+        prompt += f'4.  **Duration Flexibility (Context-Intelligent):**\n'
+        prompt += f'   - **Analyze the tempo, energy, and vocal style** to determine appropriate note durations\n'
+        prompt += f'   - **TECHNICAL PERMISSIONS** (when contextually appropriate):\n'
+        prompt += f'     • Fast vocal flows (rap, grime, speed metal): 0.25-0.5 beats (16th/32nd notes) are VALID\n'
+        prompt += f'     • Melismatic runs (wherever appropriate): 0.3-0.6 beats for rapid note changes are AUTHENTIC\n'
+        prompt += f'     • Sustained atmospheres (slow/ambient contexts): 4.0+ beats for long notes are APPROPRIATE\n'
+        prompt += f'     • Staccato/rhythmic styles: Very short notes serve the musical character\n'
+        prompt += f'   - **Standard range:** 0.75–3.0 beats works for most moderate-tempo vocal styles\n'
+        prompt += f'   - **Context is key:** Let BPM, groove, and the specific musical moment guide your choices\n'
+        prompt += f'5.  **Required Fields:** Every note MUST have: start_beat, duration_beats, pitch\n'
+        prompt += f'6.  **Timing is Absolute:** start_beat is the absolute position from the beginning of the section.\n\n'
+        prompt += "**OUTPUT FORMAT:**\n"
+        prompt += "- Return JSON with 'notes' array containing objects with: start_beat, duration_beats, pitch\n"
+        prompt += f"- Example: {{\"notes\": [{{\"start_beat\": 0.0, \"duration_beats\": 2.5, \"pitch\": {root_note}}}, {{\"start_beat\": 3.0, \"duration_beats\": 2.0, \"pitch\": {root_note + 2}}}, {{\"start_beat\": 5.5, \"duration_beats\": 2.5, \"pitch\": {root_note + 4}}}]}}\n"
+        prompt += f"- **PITCH VARIETY**: Use different pitches to create melodic interest - the scale provides your palette\n"
+        prompt += f"- **CRITICAL WARNING**: If you don't include 'pitch' in every note, the system will default to C4 (MIDI 60)!\n\n"
+        prompt += f"**MELODIC PRINCIPLES (Context-Intelligent):**\n"
+        prompt += f"- **Genre Intelligence:** Deeply analyze '{genre}' and '{inspiration}' to understand melodic conventions\n"
+        prompt += f"  → Use your musical knowledge - different styles have vastly different melodic vocabularies\n"
+        prompt += f"  → Consider: pitch range, interval choices, contour shapes, ornamentation, repetition patterns\n"
+        prompt += f"- **Musical Tension & Release:**\n"
+        prompt += f"  • Create phrases with purposeful contour (rise/fall, tension/resolution)\n"
+        prompt += f"  • Not every phrase needs to return to root - tension drives music forward\n"
+        prompt += f"  • Question-answer phrasing creates narrative flow\n"
+        prompt += f"- **Repetition vs Development:** Serve the section's function\n"
+        prompt += f"  • Hooks benefit from repetition with subtle variation\n"
+        prompt += f"  • Verses benefit from development and forward motion\n"
+        prompt += f"  • Let the role, energy, and musical context guide your choices\n\n"
+        prompt += "**WORD INTEGRITY & TIMING:**\n"
+        prompt += "- The lyrics were already tokenized for you. Keep words intact on single notes when possible.\n"
+        prompt += "- **Duration Choices:** Let genre and musical context guide you (see Duration Flexibility above)\n"
+        prompt += "- Aim for musical authenticity: serve the genre, not rigid rules.\n\n"
+        prompt += "**ROLE-SPECIFIC GUIDANCE:**\n"
             # Role-specific guidance blocks (only emitted for the active role)
-            + ("VERSE FOCUS (role-specific):\n- Advance the narrative with concrete images.\n- Keep phrasing punchy and rhythmic; prefer short words/lines.\n- Two-phrase A–A' per 4 bars; A' is a minimal variation.\n\n" if is_verse else "")
-            + ("PRE-CHORUS FOCUS (role-specific):\n- Build tension and lift into the chorus; rising contour preferred.\n- Reuse a short priming phrase; avoid revealing the hook.\n\n" if is_prechorus else "")
-            + ("BRIDGE FOCUS (role-specific):\n- Provide contrast in color/angle; introduce a complementary motif.\n- Keep range moderate; avoid direct chorus wording.\n\n" if is_bridge else "")
-            + ("BACKING FOCUS (role-specific):\n- Echo/answer the lead with musical phrases; avoid micro-fragments.\n- Stay out of the way; simple contours and sparse rhythm.\n- **MINIMUM DURATION**: Each note ≥ 2.0 beats for musical coherence.\n\n" if is_backing else "")
-            + ("SPOKEN FOCUS (role-specific):\n- Natural spoken phrases with musical rhythm; use 1-2 pitches for musicality.\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders).\n- **MINIMUM DURATION**: Each note ≥ 2.0 beats for natural speech flow.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for natural speech patterns\n\n" if is_spoken else "")
-            + ("WHISPER FOCUS (role-specific):\n- Very quiet, breathy words/phrases; leave space.\n- Do NOT use pure vowel placeholders ('Ah/Ooh/Mmm'); use lexical tokens.\n- **MINIMUM DURATION**: Each note ≥ 2.0 beats for natural breathy flow.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for intimate expression\n\n" if is_whisper else "")
-            + ("CHANT FOCUS (role-specific):\n- Simple repetitive cells sized to bar; minimal vocabulary; percussive alignment.\n- Avoid lyrical progression; keep motif tight.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for rhythmic patterns\n\n" if is_chant else "")
-            + ("ADLIB FOCUS (role-specific):\n- Occasional interjections around lead phrases; extremely sparse.\n- Prefer short ascents/descents; avoid stepping on main content.\n\n" if is_adlib else "")
-            + ("HARMONY/DOUBLES FOCUS (role-specific):\n- Support lead on sustained notes or exact doubles; do not introduce new text.\n- Keep lower velocity/volume implied; align tightly.\n\n" if (is_harmony or is_doubles) else "")
-            + ("RESPONSE FOCUS (role-specific):\n- Call-and-response one-liners; answer lead with 1–2 words.\n- Ensure rests before/after; avoid overlap.\n\n" if is_response else "")
-            + ("RAP FOCUS (role-specific):\n- Rhythm-first syllables; keep internal rhyme optional but minimal.\n- Avoid overfilling; respect micro-onset rules.\n\n" if is_rap else "")
-            + ("CHOIR/HUM FOCUS (role-specific):\n- Sustained vowels (hum/aa/oo) in simple chords/unison; no semantics.\n- Very slow movement; long sustains.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-4 different scale notes for harmonic richness\n\n" if (is_choir or is_hum) else "")
-            + ("BREATHS/TAG FOCUS (role-specific):\n- Breaths/noise as musical cues; or tiny end-tags (1–2 words).\n- Extremely sparse; do not crowd.\n- If role=breaths: create 1–2 short onsets mapped to the explicit token '[br]'; do NOT use words.\n\n" if (is_breaths or is_tag) else "")
-            + ("SILENCE FOCUS (role-specific):\n- Minimal atmospheric content - use single sustained vowel 'ah' or 'oh'\n- Very sparse placement - 1-2 notes maximum\n- Low volume, sustained tones for atmospheric effect\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for subtle atmospheric movement\n\n" if (role_norm == 'silence') else "")
-            + ("PHRASE_SPOT FOCUS (role-specific):\n- Single short phrase placed in a free window; everything else rests.\n- Duration ≤ 1 bar; clear entry/exit.\n\n" if is_phrase_spot else "")
-            + ("VOCODER/TALKBOX/FX FOCUS (role-specific):\n- Treat tokens as syllabic carriers; simple pitch shapes; sparse usage.\n- Avoid semantic density; use rests generously.\n- If role=vocal_fx: output at least 1–2 short onsets within the part; if no musical placement is feasible, set intentional_silence=true in Stage-1 (preferred).\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 3-6 different scale notes for experimental textures\n\n" if (is_vocoder or is_talkbox or is_vocal_fx) else "")
-            + ("SCAT FOCUS (role-specific):\n- Use percussive, non-lexical syllables (da/ka/tek...).\n- Lock to groove accents; avoid long sustains and semantics.\n\n" if is_scat else "")
-            + ("VOWELS FOCUS (role-specific):\n- Sustained open vowels on long notes; no semantics.\n- Favor legato and simple stepwise contour.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-4 different scale notes for melodic flow\n\n" if is_vowels else "")
-            + ("INTRO FOCUS (role-specific):\n- Set the tone with a sparse gesture; minimal new content.\n- Prefer longer sustains and clear downbeat anchoring.\n\n" if is_intro else "")
-            + ("IMPORTANT DROP STYLE (recommendation):\n- Prefer monotonic or 2-note pitch sets with small stepwise motion.\n- Use repetitive, hypnotic rhythm; micro-variations only.\n- Favor hook tokens/title words; keep lines succinct and percussive.\n\n" if is_drop else "")
-            + ("MOTIF & SIMPLICITY (soft):\n- Build a compact motif and reuse with minimal change per repeat (size it to the part).\n- Limit pitch set; use longer sustains where possible.\n- Align main syllables to clear accents; avoid filler between accent peaks.\n\n")
-            + ("DROP ONSET PREFERENCE (soft):\n- For DROP-like sections, keep onset density moderate relative to texture and tempo; brief peaks are fine if musically justified.\n- Prefer turning minor notes into '-' sustains on open vowels rather than adding new onsets when texture feels crowded.\n\n" if is_drop else "")
-            + "ANTI-LOOP CONTROL (soft):\n- Avoid three identical bars in a row; prefer subtle micro-variation across repeats.\n\n"
-            + "HOOK USAGE (hard for CHORUS/DROP):\n"
-            + "- Use hook_canonical verbatim at least once per chorus/drop occurrence (place where it best serves form and length).\n"
-            + "- Map ONE note per hook word in order; do NOT split a hook word across multiple tokens/notes.\n"
-            + "- Keep hook words unbroken; prefer whole words over syllable splits.\n"
-            + "- Keep hook tokens contiguous (no rests inside); prefer sustaining with '-' rather than inserting short notes.\n"
-            + "- Outside CHORUS/DROP: avoid exact hook; hint with synonyms/metaphor if needed.\n\n"
-            + "DENSITY-AWARE MAPPING (recommendations):\n- If onset rate feels low: increase melisma; hold open vowels with '-' on weak beats; avoid creating micro rests.\n- If onset rate feels moderate/high: prefer one syllable per note; avoid over-fragmenting short words.\n- Inside a word: do not create gaps; continuation notes must start exactly at previous end.\n- Minimum content duration: avoid launching new content on notes shorter than ≈1/8 beat; prefer '-' sustains.\n\n"
-            + "SMOOTHING & LEGATO (recommendations):\n- Avoid very short notelets unless they land on a clear accent; otherwise merge into adjacent durations.\n- Prefer legato within words: extend previous duration instead of inserting micro-gaps/rests.\n- Use inter-word gaps only when musically justified; otherwise smooth by sustain.\n- Long vowels (a/ah/o) should carry sustained notes; consonant clusters avoid fragmentation.\n\n"
-            + "MICRO-NOTE HANDLING (soft):\n- Do NOT create new onsets on very short notes; prefer '-' sustain or a rest.\n- For short consecutive notes on the same pitch: map them under a single token; fill intervening notes with '-'.\n- Place consonant attacks primarily on longer or on-beat notes; avoid launching full syllables on micro-notes.\n- When density feels high, lower onset count by sustaining open vowels rather than adding tokens.\n\n"
-            + "AESTHETIC GUIDELINES (genre/context-led):\n"
-            + "- Prioritize natural, singable contours; prefer stepwise motion; resolve leaps.\n"
-            + "- Match density to context (other tracks, hint onset_count/duration_min); avoid over-filling.\n"
-            + "- Land open vowels (a/ah/o/ai) on longer/stressed notes; keep i/e short (especially near the top of range).\n"
-            + "- Keep tessitura centered; avoid lingering at register extremes.\n"
-            + "- Phrase endings on downbeats or clear rests; avoid trailing micro-gaps (<1/8 beat).\n"
-            + "- If in doubt, simpler is better: fewer notes, longer sustains, clearer motifs.\n"
-            + ("- Chorus/Drop range discipline: keep span compact (≈≤ 5 semitones); anchor the hook onset on a downbeat; reuse the exact hook contour in repeats.\n" if is_chorus else "")
-            + ("- Verse call-and-response (light): two-phrase A–A' structure per 4 bars; A' is a minimal variation of A.\n" if is_verse else "")
-            + "- Contour budget: within each 4-bar unit, allow only one small ornamental gesture; keep the rest flat.\n\n"
-            + ("HOOK DURATION & PLACEMENT (soft for chorus/drop):\n- Aim to start the first hook usage on a strong accent; keep hook tokens as contiguous as the melody reasonably allows.\n- Prefer one note per hook word in order; avoid splitting a single hook word.\n- Sustain core hook vowels noticeably; avoid micro-slicing.\n- If the melody is highly chopped with large rests, map the hook in compact segments that respect musical phrasing rather than forcing a fully contiguous chain.\n\n" if (is_chorus or is_drop) else "")
-            + ("OUTRO MINIMUM (hard for outro):\n- Output MUST include at least one note and one token.\n- If no lyrics words provided, you MAY use a single sustained open vowel (e.g., 'Ah').\n- Prefer smooth, sustained contour; avoid dense onsets; no empty arrays.\n\n" if is_outro else "")
-            + "OUTPUT (STRICT JSON):\n{\n  \"notes\": [{\"start_beat\": number, \"duration_beats\": number, \"pitch\": int}, ...],\n  \"tokens\": [string, ...]\n}\n\n- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
-            + "CONSTRAINTS:\n- Map the provided lyrics in order; you MAY split words or use '-' for sustained continuations.\n- Try to keep len(tokens) ≈ number of notes; exact equality is NOT required if musically justified (but avoid large mismatches).\n- Preserve reading order of words; do not spell letter-by-letter.\n- Clamp total beats to theme length (bars * beats_per_bar); no overlaps; no negative durations.\n"
-            + "- HARD: If tokens are provided (len(tokens) ≥ 1), notes MUST NOT be empty (len(notes) ≥ 1). Never return empty notes when tokens exist.\n"
-            + "- DURATION QUALITY: Ensure all note durations are musically appropriate:\n"
-            + "  • No notes shorter than 0.5 beats unless absolutely necessary\n"
-            + "  • Match duration to syllable/word complexity and natural speech rhythm\n"
-            + "  • Create natural, singable phrasing with adequate note lengths\n"
-            + "  • Use melisma ('-') for multi-syllable words rather than creating too many short notes\n"
-            + "- ARTICULATION CLARITY: Prioritize clear, singable word delivery:\n"
-            + "  • Keep simple words (1-2 syllables) as single notes when possible\n"
-            + "  • Avoid over-fragmenting words into micro-notes that are hard to sing\n"
-            + "  • Use longer note durations for better word clarity and musicality\n"
-            + "  • Only split words when rhythmically essential, not as default approach\n"
-            + "- NATURAL PHRASING: Think like a singer delivering a coherent message:\n"
-            + "  • Group words into meaningful phrases, not isolated individual words\n"
-            + "  • Use melisma to connect words within phrases for natural flow\n"
-            + "  • Avoid choppy, word-by-word delivery that breaks sentence meaning\n"
-            + "  • Create flowing, understandable phrases with natural pauses\n"
-            + "  • MINIMUM PHRASE LENGTH: Create phrases of 3-5 words minimum\n"
-            + "  • AVOID MICRO-NOTES: Don't split words into tiny fragments\n"
-            + "  • SINGLE WORDS: Use melisma only if it enhances phrase flow\n"
-            + "  • MULTI-SYLLABLE WORDS: Use melisma to maintain phrase coherence\n"
-            + "  • MAXIMUM MELISMA: Never exceed 20% of total tokens as melisma\n"
-            + "  • VOCAL COHERENCE: Prioritize meaning and flow over strict note-to-syllable mapping\n"
-            + "- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
-            + ("- HARD (breaths): If lyrics contain '[br]', produce at least one short note per '[br]'.\n" if is_breaths else "")
-            + ("- HARD (vocal_fx): If lyrics are provided, produce at least one short onset; if impossible, prefer intentional silence (model-driven).\n" if is_vocal_fx else "")
-            + "\n**FINAL REMINDER:**\n"
-            + f"- Use ONLY these scale notes: {scale_notes}\n"
-            + f"- Center melodies around {root_note} (MIDI {root_note})\n"
-            + "- Each note ≥ 0.6 beats for singable phrasing\n"
-            + "- Return valid JSON with 'notes' array\n"
-            + f"- **MANDATORY**: Every note MUST have a 'pitch' field - NO EXCEPTIONS!\n"
-            + f"- **CONSEQUENCE**: Missing 'pitch' fields will default to C4 (MIDI 60)!\n"
-        )
+        prompt += ("VERSE FOCUS (role-specific):\n- Advance the narrative with concrete images.\n- Keep phrasing punchy and rhythmic; prefer short words/lines.\n- Two-phrase A–A' per 4 bars; A' is a minimal variation.\n\n" if is_verse else "")
+        prompt += ("PRE-CHORUS FOCUS (role-specific):\n- Build tension and lift into the chorus; rising contour preferred.\n- Reuse a short priming phrase; avoid revealing the hook.\n\n" if is_prechorus else "")
+        prompt += ("BRIDGE FOCUS (role-specific):\n- Provide contrast in color/angle; introduce a complementary motif.\n- Keep range moderate; avoid direct chorus wording.\n\n" if is_bridge else "")
+        prompt += (f"BACKING FOCUS (role-specific):\n- Echo/answer the lead with musical phrases\n- Stay out of the way; simple contours and sparse rhythm\n- **Duration Guidance:** Adapt to tempo, energy, and style:\n  → Analyze what backing vocals typically do in this genre/style\n  → Slower contexts often use longer notes (1.5-3.0 beats)\n  → Faster contexts often use shorter rhythmic hits (0.5-1.5 beats)\n  → Let musical context guide your choices\n\n" if is_backing else "")
+        prompt += (f"SPOKEN FOCUS (role-specific):\n- Natural spoken phrases with musical rhythm; use 1-2 pitches for musicality\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders)\n- **Duration Guidance:** Match the speech style and tempo:\n  → Analyze what spoken/rap vocal patterns do in '{genre}'\n  → Fast flows: Very short notes (0.25-0.5 beats)\n  → Conversational: Moderate notes (0.5-2.0 beats)\n  → Theatrical/Slow: Extended notes (2.0-4.0 beats)\n  → Let context determine pacing\n- Include pitch information for every note (typically 1-3 different pitches)\n- Use notes from scale: {scale_notes}\n\n" if is_spoken else "")
+        prompt += (f"WHISPER FOCUS (role-specific):\n- Very quiet, breathy words/phrases; leave space\n- Use lexical tokens (not pure vowels unless atmospheric)\n- **Duration Guidance:** Adapt to tempo and atmosphere:\n  → Whispers often use longer, sustained notes (1.5-3.0 beats) for intimacy\n  → But faster tempos or rhythmic whispers can be shorter (0.75+ beats)\n  → Let the musical context and desired effect guide you\n- Include pitch information (subtle pitch variation adds humanity)\n- Use notes from scale: {scale_notes}\n- Typically 2-3 different pitches for intimate expression\n\n" if is_whisper else "")
+        prompt += ("CHANT FOCUS (role-specific):\n- Simple repetitive cells sized to bar; minimal vocabulary; percussive alignment.\n- Avoid lyrical progression; keep motif tight.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for rhythmic patterns\n\n" if is_chant else "")
+        prompt += ("ADLIB FOCUS (role-specific):\n- Occasional interjections around lead phrases; extremely sparse.\n- Prefer short ascents/descents; avoid stepping on main content.\n\n" if is_adlib else "")
+        prompt += ("HARMONY/DOUBLES FOCUS (role-specific):\n- Support lead on sustained notes or exact doubles; do not introduce new text.\n- Keep lower velocity/volume implied; align tightly.\n\n" if (is_harmony or is_doubles) else "")
+        prompt += ("RESPONSE FOCUS (role-specific):\n- Call-and-response one-liners; answer lead with 1–2 words.\n- Ensure rests before/after; avoid overlap.\n\n" if is_response else "")
+        prompt += ("RAP FOCUS (role-specific):\n- Rhythm-first syllables; keep internal rhyme optional but minimal.\n- Avoid overfilling; respect micro-onset rules.\n\n" if is_rap else "")
+        prompt += ("CHOIR/HUM FOCUS (role-specific):\n- Sustained vowels (hum/aa/oo) in simple chords/unison; no semantics.\n- Very slow movement; long sustains.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-4 different scale notes for harmonic richness\n\n" if (is_choir or is_hum) else "")
+        prompt += ("BREATHS/TAG FOCUS (role-specific):\n- Breaths/noise as musical cues; or tiny end-tags (1–2 words).\n- Extremely sparse; do not crowd.\n- If role=breaths: create 1–2 short onsets mapped to the explicit token '[br]'; do NOT use words.\n\n" if (is_breaths or is_tag) else "")
+        prompt += ("SILENCE FOCUS (role-specific):\n- Minimal atmospheric content - use single sustained vowel 'ah' or 'oh'\n- Very sparse placement - 1-2 notes maximum\n- Low volume, sustained tones for atmospheric effect\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for subtle atmospheric movement\n\n" if (role_norm == 'silence') else "")
+        prompt += ("PHRASE_SPOT FOCUS (role-specific):\n- Single short phrase placed in a free window; everything else rests.\n- Duration ≤ 1 bar; clear entry/exit.\n\n" if is_phrase_spot else "")
+        prompt += ("VOCODER/TALKBOX/FX FOCUS (role-specific):\n- Treat tokens as syllabic carriers; simple pitch shapes; sparse usage.\n- Avoid semantic density; use rests generously.\n- If role=vocal_fx: output at least 1–2 short onsets within the part; if no musical placement is feasible, set intentional_silence=true in Stage-1 (preferred).\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 3-6 different scale notes for experimental textures\n\n" if (is_vocoder or is_talkbox or is_vocal_fx) else "")
+        prompt += ("SCAT FOCUS (role-specific):\n- Use percussive, non-lexical syllables (da/ka/tek...).\n- Lock to groove accents; avoid long sustains and semantics.\n\n" if is_scat else "")
+        prompt += ("VOWELS FOCUS (role-specific):\n- Sustained open vowels on long notes; no semantics.\n- Favor legato and simple stepwise contour.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-4 different scale notes for melodic flow\n\n" if is_vowels else "")
+        prompt += ("INTRO FOCUS (role-specific):\n- Set the tone with a sparse gesture; minimal new content.\n- Prefer longer sustains and clear downbeat anchoring.\n\n" if is_intro else "")
+        prompt += ("IMPORTANT DROP STYLE (recommendation):\n- Prefer monotonic or 2-note pitch sets with small stepwise motion.\n- Use repetitive, hypnotic rhythm; micro-variations only.\n- Favor hook tokens/title words; keep lines succinct and percussive.\n\n" if is_drop else "")
+        prompt += ("MOTIF & SIMPLICITY (soft):\n- Build a compact motif and reuse with minimal change per repeat (size it to the part).\n- Limit pitch set; use longer sustains where possible.\n- Align main syllables to clear accents; avoid filler between accent peaks.\n\n")
+        prompt += ("DROP ONSET PREFERENCE (soft):\n- For DROP-like sections, keep onset density moderate relative to texture and tempo; brief peaks are fine if musically justified.\n- Prefer turning minor notes into '-' sustains on open vowels rather than adding new onsets when texture feels crowded.\n\n" if is_drop else "")
+        prompt += "ANTI-LOOP CONTROL (soft):\n- Avoid three identical bars in a row; prefer subtle micro-variation across repeats.\n\n"
+        prompt += "HOOK USAGE (hard for CHORUS/DROP):\n"
+        prompt += "- Use hook_canonical verbatim at least once per chorus/drop occurrence (place where it best serves form and length).\n"
+        prompt += "- Map ONE note per hook word in order; do NOT split a hook word across multiple tokens/notes.\n"
+        prompt += "- Keep hook words unbroken; prefer whole words over syllable splits.\n"
+        prompt += "- Keep hook tokens contiguous (no rests inside); prefer sustaining with '-' rather than inserting short notes.\n"
+        prompt += "- Outside CHORUS/DROP: avoid exact hook; hint with synonyms/metaphor if needed.\n\n"
+        prompt += "DENSITY-AWARE MAPPING (recommendations):\n- If onset rate feels low: increase melisma; hold open vowels with '-' on weak beats; avoid creating micro rests.\n- If onset rate feels moderate/high: prefer one syllable per note; avoid over-fragmenting short words.\n- Inside a word: do not create gaps; continuation notes must start exactly at previous end.\n- Minimum content duration: avoid launching new content on notes shorter than ≈1/8 beat; prefer '-' sustains.\n\n"
+        prompt += "SMOOTHING & LEGATO (recommendations):\n- Avoid very short notelets unless they land on a clear accent; otherwise merge into adjacent durations.\n- Prefer legato within words: extend previous duration instead of inserting micro-gaps/rests.\n- Use inter-word gaps only when musically justified; otherwise smooth by sustain.\n- Long vowels (a/ah/o) should carry sustained notes; consonant clusters avoid fragmentation.\n\n"
+        prompt += "MICRO-NOTE HANDLING (soft):\n- Do NOT create new onsets on very short notes; prefer '-' sustain or a rest.\n- For short consecutive notes on the same pitch: map them under a single token; fill intervening notes with '-'.\n- Place consonant attacks primarily on longer or on-beat notes; avoid launching full syllables on micro-notes.\n- When density feels high, lower onset count by sustaining open vowels rather than adding tokens.\n\n"
+        prompt += "AESTHETIC GUIDELINES (genre/context-led):\n"
+        prompt += "- Prioritize natural, singable contours; prefer stepwise motion; resolve leaps.\n"
+        prompt += "- Match density to context (other tracks, hint onset_count/duration_min); avoid over-filling.\n"
+        prompt += "- Land open vowels (a/ah/o/ai) on longer/stressed notes; keep i/e short (especially near the top of range).\n"
+        prompt += "- Keep tessitura centered; avoid lingering at register extremes.\n"
+        prompt += "- Phrase endings on downbeats or clear rests; avoid trailing micro-gaps (<1/8 beat).\n"
+        prompt += "- If in doubt, simpler is better: fewer notes, longer sustains, clearer motifs.\n"
+        prompt += ("- Chorus/Drop range discipline: keep span compact (≈≤ 5 semitones); anchor the hook onset on a downbeat; reuse the exact hook contour in repeats.\n" if is_chorus else "")
+        prompt += ("- Verse call-and-response (light): two-phrase A–A' structure per 4 bars; A' is a minimal variation of A.\n" if is_verse else "")
+        prompt += "- Contour budget: within each 4-bar unit, allow only one small ornamental gesture; keep the rest flat.\n\n"
+        prompt += ("HOOK DURATION & PLACEMENT (soft for chorus/drop):\n- Aim to start the first hook usage on a strong accent; keep hook tokens as contiguous as the melody reasonably allows.\n- Prefer one note per hook word in order; avoid splitting a single hook word.\n- Sustain core hook vowels noticeably; avoid micro-slicing.\n- If the melody is highly chopped with large rests, map the hook in compact segments that respect musical phrasing rather than forcing a fully contiguous chain.\n\n" if (is_chorus or is_drop) else "")
+        prompt += ("OUTRO MINIMUM (hard for outro):\n- Output MUST include at least one note and one token.\n- If no lyrics words provided, you MAY use a single sustained open vowel (e.g., 'Ah').\n- Prefer smooth, sustained contour; avoid dense onsets; no empty arrays.\n\n" if is_outro else "")
+        prompt += "OUTPUT (STRICT JSON):\n{\n  \"notes\": [{\"start_beat\": number, \"duration_beats\": number, \"pitch\": int}, ...],\n  \"tokens\": [string, ...]\n}\n\n- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
+        prompt += "CONSTRAINTS:\n- Map the provided lyrics in order; you MAY split words or use '-' for sustained continuations.\n- Try to keep len(tokens) ≈ number of notes; exact equality is NOT required if musically justified (but avoid large mismatches).\n- Preserve reading order of words; do not spell letter-by-letter.\n- Clamp total beats to theme length (bars * beats_per_bar); no overlaps; no negative durations.\n"
+        prompt += "- HARD: If tokens are provided (len(tokens) ≥ 1), notes MUST NOT be empty (len(notes) ≥ 1). Never return empty notes when tokens exist.\n"
+        prompt += "- DURATION QUALITY: Ensure all note durations are musically appropriate:\n"
+        prompt += "  • No notes shorter than 0.5 beats unless absolutely necessary\n"
+        prompt += "  • Match duration to syllable/word complexity and natural speech rhythm\n"
+        prompt += "  • Create natural, singable phrasing with adequate note lengths\n"
+        prompt += "  • Use melisma ('-') for multi-syllable words rather than creating too many short notes\n"
+        prompt += "- ARTICULATION CLARITY: Prioritize clear, singable word delivery:\n"
+        prompt += "  • Keep simple words (1-2 syllables) as single notes when possible\n"
+        prompt += "  • Avoid over-fragmenting words into micro-notes that are hard to sing\n"
+        prompt += "  • Use longer note durations for better word clarity and musicality\n"
+        prompt += "  • Only split words when rhythmically essential, not as default approach\n"
+        prompt += "- NATURAL PHRASING: Think like a singer delivering a coherent message:\n"
+        prompt += "  • Group words into meaningful phrases, not isolated individual words\n"
+        prompt += "  • Use melisma to connect words within phrases for natural flow\n"
+        prompt += "  • Avoid choppy, word-by-word delivery that breaks sentence meaning\n"
+        prompt += "  • Create flowing, understandable phrases with natural pauses\n"
+        prompt += "  • MINIMUM PHRASE LENGTH: Create phrases of 3-5 words minimum\n"
+        prompt += "  • AVOID MICRO-NOTES: Don't split words into tiny fragments\n"
+        prompt += "  • SINGLE WORDS: Use melisma only if it enhances phrase flow\n"
+        prompt += "  • MULTI-SYLLABLE WORDS: Use melisma to maintain phrase coherence\n"
+        prompt += "  • MAXIMUM MELISMA: Never exceed 20% of total tokens as melisma\n"
+        prompt += "  • VOCAL COHERENCE: Prioritize meaning and flow over strict note-to-syllable mapping\n"
+        prompt += "- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
+        prompt += ("- HARD (breaths): If lyrics contain '[br]', produce at least one short note per '[br]'.\n" if is_breaths else "")
+        prompt += ("- HARD (vocal_fx): If lyrics are provided, produce at least one short onset; if impossible, prefer intentional silence (model-driven).\n" if is_vocal_fx else "")
+        prompt += "\n**FINAL REMINDER:**\n"
+        prompt += f"- Use ONLY these scale notes: {scale_notes}\n"
+        prompt += f"- Center melodies around {root_note} (MIDI {root_note})\n"
+        prompt += "- Each note ≥ 0.6 beats for singable phrasing\n"
+        prompt += "- Return valid JSON with 'notes' array\n"
+        prompt += f"- **MANDATORY**: Every note MUST have a 'pitch' field - NO EXCEPTIONS!\n"
+        prompt += f"- **CONSEQUENCE**: Missing 'pitch' fields will default to C4 (MIDI 60)!\n"
+        
         # Retry wrapper for Stage-2 similar to Stage-1
         def _call_with_rotation_comp(prompt_text: str) -> dict | None:
             nonlocal model
@@ -12890,14 +13219,14 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 'generation_type': 'new_vocal',
                                 'timestamp': run_timestamp
                             }
-                            # Add plan data if available (only save once at the beginning)
-                            if part_idx == 0:
-                                progress_data.update({
-                                    'user_guidance': user_guidance,
-                                    'roles': roles,
-                                    'plan_items': plan_items,
-                                    'analysis_ctx': ANALYSIS_CTX
-                                })
+                            # ALWAYS save plan data (not just at part_idx==0) for robust resume
+                            # FIX: Previously this was only saved at part 0, causing resume failures for crashes at later parts
+                            progress_data.update({
+                                'user_guidance': user_guidance,
+                                'roles': roles,
+                                'plan_items': plan_items,
+                                'analysis_ctx': ANALYSIS_CTX
+                            })
                             save_progress(progress_data, script_dir, run_timestamp)
                         except Exception:
                             pass
@@ -13091,14 +13420,14 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                 'generation_type': 'existing_track',
                                 'timestamp': run_timestamp
                             }
-                            # Add plan data if available (only save once at the beginning)
-                            if part_idx == 0:
-                                progress_data.update({
-                                    'user_guidance': user_guidance,
-                                    'roles': roles,
-                                    'plan_items': plan_items,
-                                    'analysis_ctx': ANALYSIS_CTX
-                                })
+                            # ALWAYS save plan data (not just at part_idx==0) for robust resume
+                            # FIX: Previously this was only saved at part 0, causing resume failures for crashes at later parts
+                            progress_data.update({
+                                'user_guidance': user_guidance,
+                                'roles': roles,
+                                'plan_items': plan_items,
+                                'analysis_ctx': ANALYSIS_CTX
+                            })
                             save_progress(progress_data, script_dir, run_timestamp)
                         except Exception:
                             pass
