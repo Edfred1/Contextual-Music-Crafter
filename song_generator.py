@@ -356,12 +356,35 @@ def _detect_lyrics_mode(user_prompt: str | None, genre: str | None = None, inspi
     """
     Detect the creative mode based on user prompt and context.
     Returns: "EXPERIMENTAL", "NARRATIVE", or "BALANCED"
+    
+    PRIORITY: User-intent keywords override genre-based detection!
     """
     if not user_prompt or not isinstance(user_prompt, str):
         return "BALANCED"
     
     prompt_lower = user_prompt.lower()
     
+    # CRITICAL: User-intent keywords that FORCE specific modes (highest priority)
+    # These override all other scoring!
+    force_balanced_keywords = [
+        'complete', 'natural', 'conversational', 'intact', 'whole words',
+        'full phrases', 'natural phrases', 'complete phrases', 'keep words intact',
+        'don\'t split', 'no fragmentation', 'natural speech', 'speak naturally'
+    ]
+    
+    force_experimental_keywords = [
+        'split freely', 'fragment words', 'break apart', 'phonetic',
+        'syllable by syllable', 'deconstructed', 'fractured'
+    ]
+    
+    # Check for FORCE keywords first (user intent overrides everything!)
+    if any(kw in prompt_lower for kw in force_balanced_keywords):
+        return "BALANCED"  # User explicitly wants complete/natural words
+    
+    if any(kw in prompt_lower for kw in force_experimental_keywords):
+        return "EXPERIMENTAL"  # User explicitly wants fragmentation
+    
+    # If no force keywords, proceed with normal detection
     # Experimental/Abstract indicators
     experimental_keywords = [
         'abstract', 'fragmented', 'mechanical', 'ambiguous', 'uncanny', 
@@ -386,21 +409,22 @@ def _detect_lyrics_mode(user_prompt: str | None, genre: str | None = None, inspi
     experimental_score = sum(1 for kw in experimental_keywords if kw in prompt_lower)
     narrative_score = sum(1 for kw in narrative_keywords if kw in prompt_lower)
     
-    # Genre-based hints
+    # Genre-based hints (REDUCED WEIGHT - only +0.5 instead of +1)
+    # This prevents genre from overpowering actual user intent
     if genre or inspiration:
         genre_text = f"{genre or ''} {inspiration or ''}".lower()
         if any(g in genre_text for g in ['psytrance', 'techno', 'ambient', 'experimental', 'idm']):
-            experimental_score += 1
+            experimental_score += 0.5  # Reduced from 1 to 0.5
         if any(g in genre_text for g in ['pop', 'rock', 'country', 'r&b', 'soul']):
-            narrative_score += 1
+            narrative_score += 0.5  # Reduced from 1 to 0.5
     
-    # Decide mode
-    if experimental_score >= 2 and experimental_score > narrative_score:
+    # Decide mode (requires stronger signal now)
+    if experimental_score >= 3 and experimental_score > narrative_score:
         return "EXPERIMENTAL"
-    elif narrative_score >= 2 and narrative_score > experimental_score:
+    elif narrative_score >= 3 and narrative_score > experimental_score:
         return "NARRATIVE"
     else:
-        return "BALANCED"
+        return "BALANCED"  # Default to BALANCED when unclear
 
 # --- LYRICS GENERATION (helper) ---
 def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, notes: List[Dict], section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, cfg: Dict | None = None) -> List[str]:
@@ -3060,20 +3084,47 @@ def _plan_lyrical_concept(config: Dict, genre: str, inspiration: str, section_ro
         except Exception:
             tonic_midi = 60
             
+        # Build concept prompt with USER PROMPT as highest priority
         concept_prompt = f"""You are a lyrical concept specialist. Plan the conceptual foundation for a {genre} track section.
 
 GLOBAL CONTEXT:
 - Genre: {genre} | Key/Scale: {key_scale} | Tonic: {tonic_midi}
 - Section: {section_label} | Role: {section_role}
 - User Inspiration: {inspiration}
+"""
+        
+        # 🚨 CRITICAL: User prompt takes HIGHEST PRIORITY for theme/mood
+        if user_prompt and str(user_prompt).strip():
+            concept_prompt += f"""
+🚨 **PRIMARY CREATIVE DIRECTION (User's Vision - HIGHEST PRIORITY):**
+{user_prompt}
 
+**YOUR TASK:** Interpret the user's vision above and translate it into a concrete concept for this {section_role} section.
+- Identify the emotional theme the user is requesting
+- Extract any explicit story elements, hooks, or key phrases they mentioned
+- Honor the requested style, tone, and atmosphere
+- If the user specifies a narrative or story arc, reflect it accurately
+- Don't invent new themes that contradict the user's vision
+"""
+        
+        concept_prompt += f"""
 CONCEPTUAL PLANNING:
-- Define the core emotional theme for this section
-- Establish the narrative perspective (1st/2nd/3rd person)
-- Identify key imagery and metaphors to use
-- Plan the overall mood and atmosphere
+- Define the core emotional theme for this section (based on user direction if provided)
+- Establish the narrative perspective (1st/2nd/3rd person) - honor user's intent if specified
+- Identify key imagery and metaphors to use - align with user's requested theme
+- Plan the overall mood and atmosphere - match user's creative direction
 - Consider how this section fits into the larger song narrative
-
+"""
+        
+        if history_context and str(history_context).strip():
+            concept_prompt += f"""
+PREVIOUS SECTIONS CONTEXT:
+{history_context[:500]}
+- Maintain thematic continuity with previous sections
+- Develop the narrative naturally from what came before
+"""
+        
+        concept_prompt += f"""
 ROLE-SPECIFIC CONCEPT:
 - {section_role}: Plan appropriate conceptual approach
 - Consider the section's function in the song structure
@@ -3081,10 +3132,10 @@ ROLE-SPECIFIC CONCEPT:
 
 OUTPUT (JSON):
 {{
-  "core_theme": "string - main emotional/narrative theme",
+  "core_theme": "string - main emotional/narrative theme (aligned with user's vision)",
   "perspective": "string - narrative voice (I/you/we/they)",
   "key_imagery": ["string", ...] - 3-5 key visual/metaphorical elements",
-  "mood": "string - overall emotional atmosphere",
+  "mood": "string - overall emotional atmosphere (honor user's requested tone)",
   "narrative_function": "string - how this section advances the story",
   "tone": "string - vocal delivery approach (intimate/ethereal/aggressive/etc)"
 }}"""
@@ -3642,27 +3693,58 @@ PHRASING GUIDANCE:
                   + "- Create phrases that are both meaningful and singable\n"
                   + "- Let the user's creative direction guide your choices\n")
                + "\n")
-            + "**TEXT RULES & WORD INTEGRITY:**\n"
+            + (f"\n**🚨 ROLE-SPECIFIC LYRIC STYLE ({vocal_role.upper()}) - PRIORITY RULES:**\n"
+               + ("**WHISPER/SPOKEN/RAP ROLE - CRITICAL REQUIREMENTS:**\n"
+                  + "- ✅ REQUIRED: Use COMPLETE, NATURAL words and phrases\n"
+                  + "- 🚫 FORBIDDEN: Fragmenting multi-syllable words into separate tokens\n"
+                  + "- Think: How would someone actually whisper/speak this naturally?\n"
+                  + "- **EXAMPLES OF CORRECT OUTPUT:**\n"
+                  + "  ✅ GOOD: 'A subtle shift below the surface'\n"
+                  + "  ✅ GOOD: 'These fragments of thought'\n"
+                  + "  ✅ GOOD: 'Familiar, yet subtly wrong'\n"
+                  + "- **EXAMPLES OF FORBIDDEN OUTPUT:**\n"
+                  + "  ❌ BAD: 'A sub tle shift be low the sur face'\n"
+                  + "  ❌ BAD: 'These frag ments of thought'\n"
+                  + "  ❌ BAD: 'Fa mil iar, yet sub tly wrong'\n"
+                  + "- Create conversational, intimate, natural speech patterns\n"
+                  if vocal_role in ["whisper", "spoken", "rap"] else
+                  "**HUM/VOCAL_FX/BREATHS ROLE:**\n"
+                  + "- Vowels, syllables, and very short words are ideal\n"
+                  + "- Example: 'Ooooh', 'Mmm', 'Ah', 'Deep', 'Slow'\n"
+                  + "- Fragmentation is ACCEPTABLE and often preferred here\n"
+                  + "- Focus on sonic texture over semantic meaning\n"
+                  if vocal_role in ["hum", "vocal_fx", "breaths", "vocoder", "talkbox"] else
+                  "**MELODIC ROLE (verse/chorus/prechorus/bridge):**\n"
+                  + "- Balance between complete phrases and singability\n"
+                  + "- Keep natural word boundaries while allowing musical expression\n"
+                  + "- Use complete words unless musical phrasing truly requires splitting\n"
+                  if vocal_role in ["verse", "chorus", "prechorus", "bridge"] else
+                  "")
+               + "\n")
+            + "**🚨 WORD INTEGRITY - CRITICAL RULES (Read Carefully!):**\n"
+            + ("**FORBIDDEN OUTPUT PATTERNS** (you will be penalized for these):\n"
+               + "- ❌ NEVER output: 'sub tle', 'be low', 'un fold', 'frag ments'\n"
+               + "- ❌ NEVER output: 'fa mil iar', 're veal ing', 'in tri cate'\n"
+               + "- ❌ NEVER split common words like: 'slowly', 'deeply', 'softly', 'gently'\n\n"
+               + "**REQUIRED OUTPUT PATTERNS** (this is correct):\n"
+               + "- ✅ ALWAYS output: 'subtle', 'below', 'unfold', 'fragments'\n"
+               + "- ✅ ALWAYS output: 'familiar', 'revealing', 'intricate'\n"
+               + "- ✅ Keep adverbs intact: 'slowly', 'deeply', 'softly', 'gently'\n\n"
+               + "**WHEN SPLITTING IS ACCEPTABLE** (rare exceptions only):\n"
+               + "- Very fast rap flows with staccato rhythm (e.g., 'un-be-liev-a-ble' for emphasis)\n"
+               + "- Complex consonant clusters that are genuinely unsingable\n"
+               + "- **DEFAULT ASSUMPTION**: If you're unsure, keep the word INTACT\n\n"
+               if lyrics_mode != "EXPERIMENTAL" else
+               "**EXPERIMENTAL MODE SPLITTING GUIDANCE:**\n"
+               + "- You may split words for artistic/textural effect\n"
+               + "- Consider: Does fragmentation serve the atmosphere?\n"
+               + "- Balance sonic texture with comprehensibility\n"
+               + "- Even in experimental mode, complete words often work better\n\n")
+            + "**GENERAL TEXT RULES:**\n"
             + "- Use meaningful words, avoid generic vowels (ah/oh/eh) unless mode allows it\n"
             + "- Keep phrases natural and singable\n"
             + "- Match musical mood and rhythm\n"
-            + "- Avoid meta-words from instructions\n\n"
-            + "**WORD INTEGRITY (Critical - Context-Sensitive):**\n"
-            + ("- **DEFAULT**: Keep multi-syllable words INTACT as single tokens\n"
-               + "  → 'Friction' stays as ONE word, NOT 'Fric tion' or 'Fric'\n"
-               + "  → 'Subtle' stays as ONE word, NOT 'Sub tle' or 'Sub'\n"
-               + "  → 'Slowly' stays as ONE word, NOT 'Slow ly'\n"
-               + "- **Splitting ONLY when** (rare exceptions):\n"
-               + "  → Musical rhythm absolutely demands it (very fast flows, staccato delivery)\n"
-               + "  → Pronunciation clarity requires careful separation (complex consonant clusters)\n"
-               + "- **For narrative/spoken/whisper roles**: Use COMPLETE words for natural speech patterns\n"
-               + "- **For hum/vocal_fx roles**: Vowels and syllables are acceptable\n"
-               + "- **If uncertain**: Keep the word intact - it's easier to sing complete words\n"
-               if lyrics_mode != "EXPERIMENTAL" else
-               "- **EXPERIMENTAL MODE**: You may split words for artistic effect\n"
-               + "  → Fragmentation can create interesting textures\n"
-               + "  → BUT still consider: does 'Fric' convey meaning, or should it be 'Friction'?\n"
-               + "  → Balance sonic texture with comprehensibility\n")
+            + "- Avoid meta-words from instructions\n"
             + f"\n**DENSITY, BREATHING & PHRASING (Genre-Sensitive Guidance):**\n"
             + f"**Use your knowledge of '{genre}' and '{inspiration}' to guide authentic vocal phrasing.**\n\n"
             + "**Consider the genre's typical phrasing conventions** (these are observations, not rules):\n\n"
@@ -3684,25 +3766,7 @@ PHRASING GUIDANCE:
             + "- **Pronounceability matters**: Complex consonants need time to articulate\n"
             + "- **Breathing is compositional**: Gaps can be as musical as the phrases themselves\n"
             + "- **Genre expectations vary widely**: Trust your understanding of the style\n"
-               + "- **Artistic judgment supersedes patterns**: Use these observations as context, not constraints\n"
-            + (f"\n**ROLE-SPECIFIC LYRIC STYLE ({vocal_role.upper()}):**\n"
-               + ("- **WHISPER/SPOKEN ROLE**: Use COMPLETE, NATURAL phrases (not fragmented keywords)\n"
-                  + "- Think: How would someone actually whisper/speak this?\n"
-                  + "- Example: 'A subtle shift below' NOT 'Sub shift low'\n"
-                  + "- Keep words intact for natural, speech-like delivery\n"
-                  + "- Create conversational, intimate phrasing\n"
-                  if vocal_role in ["whisper", "spoken", "rap"] else
-                  "- **HUM/VOCAL_FX/BREATHS ROLE**: Vowels, syllables, and very short words are ideal\n"
-                  + "- Example: 'Ooooh', 'Mmm', 'Ah', 'Deep', 'Slow'\n"
-                  + "- Fragmentation is ACCEPTABLE and often preferred here\n"
-                  + "- Focus on sonic texture over semantic meaning\n"
-                  if vocal_role in ["hum", "vocal_fx", "breaths", "vocoder", "talkbox"] else
-                  "- **MELODIC ROLE (verse/chorus/prechorus)**: Balance between complete phrases and singability\n"
-                  + "- Keep natural word boundaries while allowing musical expression\n"
-                  + "- Use complete words unless musical phrasing truly requires splitting\n"
-                  if vocal_role in ["verse", "chorus", "prechorus", "bridge"] else
-                  "")
-               + "\n")
+            + "- **Artistic judgment supersedes patterns**: Use these observations as context, not constraints\n"
             + "\n**LYRICAL COHERENCE & VOCABULARY DIVERSITY (CRITICAL):**\n"
             + f"**PREVIOUS SECTIONS (learn from these to avoid repetition):**\n"
             + f"{history_context[:500] if history_context else '[This is the first section]'}\n\n"
@@ -4135,16 +4199,75 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             prompt += "- **STRICT MINIMUM**: No notes shorter than 1.2 beats; prefer 2.0+ beats\n"
             prompt += "- Keep one syllable = one note whenever possible\n"
             prompt += "- Use melisma ('-') ONLY when musically compelling\n"
-            prompt += "- Prioritize clarity and natural singing flow\n"
-            prompt += "- **WORD INTEGRITY**: If Step 1 provided complete words (e.g., 'Friction'), do NOT split them\n"
-            prompt += "  → Map the complete word to notes WITHOUT breaking it apart\n"
-            prompt += "  → Use melisma ('-') to extend syllables within the word, not to fragment it\n\n"
+            prompt += "- Prioritize clarity and natural singing flow\n\n"
         else:  # BALANCED
             prompt += "- BALANCED MODE: Adapt to artistic needs\n"
             prompt += "- Standard minimum: 0.6 beats; prefer 1.0+ beats for comfort\n"
             prompt += "- Balance between experimental freedom and singability\n"
-            prompt += "- Use judgment: let the lyrics and musical context guide you\n"
-            prompt += "- **WORD INTEGRITY**: Generally keep words intact unless musical rhythm demands splitting\n\n"
+            prompt += "- Use judgment: let the lyrics and musical context guide you\n\n"
+        
+        # 🚨 HIGHEST PRIORITY: Show Step 1 input tokens explicitly
+        prompt += "\n" + "="*80 + "\n"
+        prompt += "🚨 **CRITICAL INPUT FROM STEP 1 (Lyrics Generator):**\n"
+        if isinstance(lyrics_words, list) and lyrics_words:
+            # Show the actual words from Step 1
+            words_preview = " ".join(str(w) for w in lyrics_words[:30])
+            if len(lyrics_words) > 30:
+                words_preview += f" ... ({len(lyrics_words)} words total)"
+            prompt += f"**EXACT WORDS YOU MUST USE:**\n{words_preview}\n\n"
+            
+            # Identify multi-syllable words to protect
+            multi_syl_examples = []
+            try:
+                for w in lyrics_words[:20]:  # Check first 20 words for examples
+                    w_str = str(w).strip()
+                    if len(w_str) >= 4 and any(c.isalpha() for c in w_str):
+                        # Likely multi-syllable words (4+ letters)
+                        multi_syl_examples.append(w_str)
+                if len(multi_syl_examples) > 5:
+                    multi_syl_examples = multi_syl_examples[:5]  # Limit to 5 examples
+            except Exception:
+                multi_syl_examples = []
+            
+            prompt += "**🚨 WORD INTEGRITY RULES - YOUR PRIMARY TASK:**\n"
+            if lyrics_mode != "EXPERIMENTAL":
+                prompt += "**ABSOLUTE REQUIREMENT:** Output these words EXACTLY as they appear above. DO NOT SPLIT THEM.\n\n"
+                if multi_syl_examples:
+                    prompt += "**CONCRETE EXAMPLES FROM YOUR INPUT (protect these):**\n"
+                    for ex_word in multi_syl_examples:
+                        prompt += f"  ✅ CORRECT: '{ex_word}' (as ONE token)\n"
+                        prompt += f"  ❌ FORBIDDEN: Split variations of '{ex_word}'\n"
+                    prompt += "\n"
+                prompt += "**HOW TO HANDLE MULTI-SYLLABLE WORDS:**\n"
+                prompt += "1. Keep the ENTIRE word as ONE token in your output\n"
+                prompt += "2. If the word needs multiple notes for singing, use melisma ('-') to extend it\n"
+                prompt += "3. Example: ['remember', '-', '-'] means 'remember' sung over 3 notes\n"
+                prompt += "4. NEVER output: ['re', 'mem', 'ber'] or ['re', 'member']\n\n"
+                prompt += "**YOUR OUTPUT TOKENS MUST MATCH STEP 1 INPUT:**\n"
+                prompt += "- Read the 'EXACT WORDS YOU MUST USE' list above\n"
+                prompt += "- Your 'tokens' array must contain these EXACT words (or melisma '-')\n"
+                prompt += "- Any word from Step 1 that you split will be marked as an error\n"
+                prompt += "- If a word looks wrong, output it anyway - your job is composition, not editing\n\n"
+            else:
+                prompt += "**EXPERIMENTAL MODE - CREATIVE FREEDOM:**\n"
+                prompt += "- You may fragment or split words for artistic/textural effect\n"
+                prompt += "- Consider whether fragmentation serves the sonic atmosphere\n"
+                prompt += "- Balance experimental texture with comprehensibility as you see fit\n"
+                if multi_syl_examples:
+                    prompt += f"- Example words you COULD split: {', '.join(multi_syl_examples[:3])}\n"
+                prompt += "\n"
+        else:
+            # No lyrics_words provided - use general guidance
+            prompt += "**NO STEP 1 INPUT PROVIDED** - Generate tokens based on syllable input.\n\n"
+            prompt += "**WORD INTEGRITY GUIDANCE (Mode-Dependent):**\n"
+            if lyrics_mode != "EXPERIMENTAL":
+                prompt += "- Prefer keeping multi-syllable words intact when possible\n"
+                prompt += "- Use melisma ('-') to extend words across multiple notes\n"
+                prompt += "- Example: 'beautiful' as ONE token, extended with ['beautiful', '-', '-']\n\n"
+            else:
+                prompt += "- Fragmentation and splitting allowed for artistic effect\n\n"
+        
+        prompt += "="*80 + "\n\n"
         
         prompt += "SYLLABLE-TO-NOTE MAPPING INTELLIGENCE:\n"
         prompt += "- Analyze syllable count per word and map accordingly:\n"
