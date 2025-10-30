@@ -512,7 +512,19 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict, str
         if msg.is_meta and msg.type == "time_signature":
             time_signature["beats_per_bar"] = msg.numerator
             # MIDI denominator is a power of 2: 0=1, 1=2, 2=4, 3=8, 4=16
-            time_signature["beat_value"] = 2 ** msg.denominator
+            # BUT: Some buggy MIDI files store the direct value (4, 8, 16) instead of the exponent (2, 3, 4)
+            # Detect and handle both cases
+            if msg.denominator <= 4:
+                # Likely a correct exponent (0-4 → 1, 2, 4, 8, 16)
+                time_signature["beat_value"] = 2 ** msg.denominator
+            else:
+                # Likely already the direct value (buggy MIDI)
+                # Accept common values: 1, 2, 4, 8, 16
+                if msg.denominator in [1, 2, 4, 8, 16]:
+                    time_signature["beat_value"] = msg.denominator
+                else:
+                    # Unknown/invalid - default to 4
+                    time_signature["beat_value"] = 4
         if msg.is_meta and msg.type == "key_signature":
             # MIDI key signature: 0=C, 1=G, 2=D, etc. (sharps) or -1=F, -2=Bb, etc. (flats)
             # mode: 0=major, 1=minor
