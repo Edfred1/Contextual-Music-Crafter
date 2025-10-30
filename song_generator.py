@@ -756,10 +756,53 @@ def _summarize_parts_aggregate(themes: List[Dict], ts: Dict, exclude_track_index
             "avg_dur": round(avg_dur,3), "max_dur": round(max_dur,3), "sustain_ratio": round(sustain_ratio,3), "silent": False
         })
     return summaries
-def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | int, ts: Dict, summaries: List[Dict], analysis_ctx: Dict, user_prompt: str | None = None, cfg: Dict | None = None) -> List[Dict]:
+
+def _extract_backing_notes_per_part(themes: List[Dict], exclude_track_index: int | None = None) -> List[List[Dict]]:
+    """
+    Extract all backing notes (non-vocal tracks) for each part from themes.
+    Returns a list where each element is a list of notes for that part.
+    
+    Args:
+        themes: List of theme dictionaries with 'tracks' containing note data
+        exclude_track_index: Optional track index to exclude (e.g., the vocal track being generated)
+    
+    Returns:
+        List of note lists, one per part. Each note list contains all notes from all tracks (except excluded).
+    """
+    backing_notes_per_part = []
+    
+    for part_idx, theme in enumerate(themes or []):
+        part_notes = []
+        tracks = theme.get('tracks', []) if isinstance(theme, dict) else []
+        
+        for track_idx, track in enumerate(tracks):
+            # Skip excluded track (e.g., vocal track)
+            if exclude_track_index is not None and track_idx == exclude_track_index:
+                continue
+            
+            # Collect all notes from this track
+            notes = track.get('notes', []) if isinstance(track, dict) else []
+            for note in notes:
+                if isinstance(note, dict):
+                    # Add track metadata for context
+                    note_with_context = note.copy()
+                    note_with_context['_track_name'] = track.get('instrument_name', f'Track_{track_idx}')
+                    note_with_context['_track_role'] = track.get('role', 'unknown')
+                    part_notes.append(note_with_context)
+        
+        # Sort by start_beat for easier analysis
+        part_notes.sort(key=lambda n: float(n.get('start_beat', 0.0)))
+        backing_notes_per_part.append(part_notes)
+    
+    return backing_notes_per_part
+
+def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | int, ts: Dict, summaries: List[Dict], analysis_ctx: Dict, user_prompt: str | None = None, cfg: Dict | None = None, backing_notes_per_part: List[List[Dict]] | None = None) -> List[Dict]:
     """
     Step 0b: Plan vocal roles for each part based on song structure and analysis.
     Focus only on logical role distribution, no hints yet.
+    
+    Args:
+        backing_notes_per_part: Optional list of backing notes per part for detailed analysis
     """
     try:
         # Extract analysis context
@@ -770,6 +813,48 @@ def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | i
         # Extract key_scale from artifact if available, otherwise use config
         # Note: cfg parameter should contain the artifact/progress data with key_scale
         key_scale_to_use = cfg.get('key_scale', '') if cfg else config.get('key_scale', 'Unknown')
+        
+        # Analyze backing notes if provided (NEW: full note context!)
+        notes_analysis_text = ""
+        if backing_notes_per_part:
+            notes_analysis_text = "\n🎵 **ACTUAL BACKING NOTES ANALYSIS** (use this to make informed decisions!):\n"
+            for part_idx, notes in enumerate(backing_notes_per_part[:16]):  # Limit to first 16 parts for prompt size
+                if not notes:
+                    notes_analysis_text += f"\nPart {part_idx}: [SILENT - no instrumental notes]\n"
+                    notes_analysis_text += "  → This is pure instrumental silence - consider if vocals should fill this space or respect the silence\n"
+                    continue
+                
+                # Analyze note patterns
+                starts = [float(n.get('start_beat', 0.0)) for n in notes]
+                durs = [float(n.get('duration_beats', 0.0)) for n in notes]
+                pitches = [int(n.get('pitch', 60)) for n in notes]
+                
+                # Calculate gaps between notes
+                gaps = []
+                for i in range(len(starts) - 1):
+                    gap = starts[i+1] - (starts[i] + durs[i])
+                    if gap > 0.5:  # Only count gaps > 0.5 beats
+                        gaps.append(gap)
+                
+                avg_gap = sum(gaps) / len(gaps) if gaps else 0.0
+                max_gap = max(gaps) if gaps else 0.0
+                density = len(notes) / (max(starts) - min(starts) + durs[-1]) if starts else 0
+                
+                # Energy estimation (high pitches + short notes = energetic)
+                avg_pitch = sum(pitches) / len(pitches) if pitches else 60
+                avg_duration = sum(durs) / len(durs) if durs else 0
+                
+                notes_analysis_text += f"\nPart {part_idx} - {len(notes)} notes:\n"
+                notes_analysis_text += f"  • Density: {density:.2f} notes/beat ({'dense/busy' if density > 2 else 'sparse/spacious' if density < 0.5 else 'moderate'})\n"
+                notes_analysis_text += f"  • Avg duration: {avg_duration:.2f} beats ({'short/staccato' if avg_duration < 1 else 'sustained' if avg_duration > 3 else 'moderate'})\n"
+                notes_analysis_text += f"  • Avg pitch: {avg_pitch:.0f} ({'high energy' if avg_pitch > 72 else 'low/heavy' if avg_pitch < 55 else 'mid-range'})\n"
+                notes_analysis_text += f"  • Gaps: {len(gaps)} gaps found, max {max_gap:.1f} beats ({'great for call-and-response!' if max_gap > 4 else 'some breathing room' if max_gap > 2 else 'continuous'})\n"
+                if max_gap > 4:
+                    notes_analysis_text += f"  → **RECOMMENDATION:** Large gaps suggest space for conversational vocals (call-and-response, phrase_spot, or intentional silence)\n"
+                elif density < 0.5:
+                    notes_analysis_text += f"  → **RECOMMENDATION:** Sparse backing - vocals could be textural (whisper/hum) or respect the minimalism (silence)\n"
+                elif density > 3:
+                    notes_analysis_text += f"  → **RECOMMENDATION:** Very dense backing - vocals may need to be sparse or high-energy (rap/shout) to cut through\n"
         
         # Build role planning prompt
         role_prompt = f"""You are a vocal arrangement specialist. Plan vocal roles for a {genre} track inspired by "{inspiration}".
@@ -786,6 +871,7 @@ ANALYSIS CONTEXT:
 - Hook: {hook_canonical if hook_canonical else 'None (instrumental focus)'}
 - Style: {', '.join(style_tags) if style_tags else 'Standard'}
 - Repetition: {repetition_policy}
+{notes_analysis_text}
 
 ROLE CATALOG:
 - silence: No vocals, instrumental only
@@ -2261,7 +2347,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     # Extract musical parameters from JSON (not config.yaml)
     language = str(cfg.get("lyrics_language", "English")) if cfg else "English"
     # Get key_scale from cfg (no key_scale parameter in this function)
-    key_scalescale = str(cfg.get("key_scale", "")).strip() if cfg else ""
+    key_scale = str(cfg.get("key_scale", "")).strip() if cfg else ""
     vocab_ctx = {"context_instruments": (context_tracks_basic or []), "style_keywords": [genre, inspiration][:8]}
 
     # Extract lyrics preferences from JSON (not config.yaml)
@@ -2792,7 +2878,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     if section_role in ('breaths',):
         prompt_parts.append("- '[br]' usage: Only on dedicated short rest notes; never inside words; never as the only token in 1-note segments (use a short content impulse instead, if needed).\n")
     prompt_parts.append("- Optional phoneme_hints per note (e.g., [k a t]) for ambiguous words (separate list).\n\n")
-    prompt_parts.append("LYRICS RULES:\n- **TARGET DURATION**: Aim 0.75–3.0 beats; allow few 0.5–0.75 pickups (<15%).\n- **PHRASE-BASED COMPOSITION**: Group words into complete phrases of 3–6 words.\n- **NO MICRO-NOTES**: Avoid notes shorter than 0.5 beats entirely; keep 0.5–0.75 rare.\n- **CONTINUOUS FLOW**: Connect notes end-to-start. Minimize gaps between notes.\n- **MUSICAL COHERENCE**: Each phrase must be a complete musical thought.\n- **MAXIMUM MELISMA**: Never exceed 20% of total tokens as melisma.\n\n")
+    prompt_parts.append("LYRICS RULES:\n- **TARGET DURATION**: Aim 0.75–3.0 beats; allow few 0.5–0.75 pickups (<15%).\n- **PHRASE-BASED COMPOSITION**: Group words into complete phrases of 3–6 words.\n- **DURATION INTELLIGENCE**: Consider singability and pronounceability:\n  → Single words/syllables: Typically need 0.5+ beats to articulate clearly\n  → Fast flows/rap: Can use 0.3-0.5 beats for rapid delivery\n  → Melisma runs (coloratura, R&B): May use very short notes (0.05-0.15 beats) for multiple pitches on one syllable\n  → Complex consonants: Need more time than simple vowels\n  → Use your musical judgment - there's no hard minimum, but consider what's physically singable\n- **CONTINUOUS FLOW**: Connect notes end-to-start. Minimize gaps between notes.\n- **MUSICAL COHERENCE**: Each phrase must be a complete musical thought.\n- **MAXIMUM MELISMA**: Never exceed 20% of total tokens as melisma.\n\n")
     prompt_parts.append("EXAMPLES:\n")
     prompt_parts.append("- monosyllable over 3 onsets → words=['shine'], spans=[3] ⇒ tokens=['shine','-','-'].\n")
     prompt_parts.append("- 2 words over 3 onsets → words=['o-ver','load'], spans=[1,2] ⇒ tokens=['o-ver','load','-'].\n\n")
@@ -3026,8 +3112,13 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         pass
     return tokens if ok else tokens
 # --- Lyrics-first STAGE 1: Free text with syllables (no grid constraint) ---
-def _plan_lyrical_concept(config: Dict, genre: str, inspiration: str, section_role: str, section_label: str | None = None, user_prompt: str | None = None, history_context: str | None = None, cfg: Dict | None = None) -> Dict:
-    """Stage 1a: Plan lyrical concept, theme, and emotional direction for a section."""
+def _plan_lyrical_concept(config: Dict, genre: str, inspiration: str, section_role: str, section_label: str | None = None, user_prompt: str | None = None, history_context: str | None = None, cfg: Dict | None = None, backing_notes: List[Dict] | None = None) -> Dict:
+    """
+    Stage 1a: Plan lyrical concept, theme, and emotional direction for a section.
+    
+    Args:
+        backing_notes: Optional list of backing notes for this part to analyze actual musical content
+    """
     # Input validation
     if not isinstance(config, dict):
         print("[Concept Planning Error] Invalid config: must be dict")
@@ -3093,6 +3184,48 @@ GLOBAL CONTEXT:
 - User Inspiration: {inspiration}
 """
         
+        # Analyze backing notes if provided (NEW: full note context for theme/mood planning!)
+        if backing_notes:
+            notes_analysis = ""
+            starts = [float(n.get('start_beat', 0.0)) for n in backing_notes]
+            durs = [float(n.get('duration_beats', 0.0)) for n in backing_notes]
+            pitches = [int(n.get('pitch', 60)) for n in backing_notes]
+            
+            if starts and durs and pitches:
+                # Calculate musical characteristics
+                density = len(backing_notes) / (max(starts) - min(starts) + durs[-1]) if starts else 0
+                avg_pitch = sum(pitches) / len(pitches) if pitches else 60
+                pitch_range = max(pitches) - min(pitches) if len(pitches) > 1 else 0
+                avg_duration = sum(durs) / len(durs) if durs else 0
+                
+                # Detect gaps
+                gaps = []
+                for i in range(len(starts) - 1):
+                    gap = starts[i+1] - (starts[i] + durs[i])
+                    if gap > 0.5:
+                        gaps.append(gap)
+                max_gap = max(gaps) if gaps else 0.0
+                
+                # Energy/mood inference
+                energy_level = "high" if (density > 2 and avg_duration < 1.5) else "low" if density < 0.5 else "moderate"
+                pitch_character = "bright/high" if avg_pitch > 72 else "dark/low" if avg_pitch < 55 else "balanced"
+                texture = "dense/busy" if density > 2 else "sparse/minimal" if density < 0.5 else "moderate"
+                
+                notes_analysis = f"""
+🎵 **ACTUAL MUSICAL CONTEXT (analyze this to plan appropriate theme/mood!):**
+- **Energy:** {energy_level} ({density:.2f} notes/beat, avg duration {avg_duration:.2f} beats)
+- **Pitch Character:** {pitch_character} (avg {avg_pitch:.0f} MIDI, range {pitch_range} semitones)
+- **Texture:** {texture} with {len(backing_notes)} notes
+- **Space:** {len(gaps)} gaps detected, largest {max_gap:.1f} beats
+- **Musical Feel:** {'Energetic and driving' if density > 2 and avg_duration < 1.5 else 'Sparse and contemplative' if density < 0.5 else 'Flowing and melodic' if avg_duration > 2.5 else 'Balanced and moderate'}
+
+**THEME/MOOD GUIDANCE based on actual music:**
+→ The {'dense, fast-paced' if density > 2 else 'sparse, spacious' if density < 0.5 else 'moderate'} backing suggests themes that are {'urgent/intense/active' if density > 2 else 'introspective/minimal/meditative' if density < 0.5 else 'flowing/narrative/dynamic'}
+→ The {'high/bright' if avg_pitch > 72 else 'low/heavy' if avg_pitch < 55 else 'mid-range'} pitch character supports {'uplifting/hopeful/ethereal' if avg_pitch > 72 else 'brooding/grounded/serious' if avg_pitch < 55 else 'balanced/versatile'} emotional tones
+→ The {'large gaps (call-and-response potential)' if max_gap > 4 else 'moderate gaps (natural phrasing)' if max_gap > 2 else 'continuous flow'} suggest {'conversational/dramatic pauses' if max_gap > 4 else 'natural breathing room' if max_gap > 2 else 'sustained narrative'} approach
+"""
+                concept_prompt += notes_analysis
+        
         # 🚨 CRITICAL: User prompt takes HIGHEST PRIORITY for theme/mood
         if user_prompt and str(user_prompt).strip():
             concept_prompt += f"""
@@ -3105,6 +3238,7 @@ GLOBAL CONTEXT:
 - Honor the requested style, tone, and atmosphere
 - If the user specifies a narrative or story arc, reflect it accurately
 - Don't invent new themes that contradict the user's vision
+- **BALANCE user vision with the actual musical context above** - the music's energy/mood should inform HOW you express the user's theme
 """
         
         concept_prompt += f"""
@@ -3366,7 +3500,7 @@ OUTPUT (JSON):
         print(f"[Phrase Planning Error] Unexpected error: {e}")
         return {}
 
-def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, user_prompt: str | None = None, history_context: str | None = None, theme_len_bars: int | float | None = None, cfg: Dict | None = None, key_scale: str | None = None, part_idx: int = 0) -> Dict:
+def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, user_prompt: str | None = None, history_context: str | None = None, theme_len_bars: int | float | None = None, cfg: Dict | None = None, key_scale: str | None = None, part_idx: int = 0, backing_notes: List[Dict] | None = None) -> Dict:
     try:
         import google.generativeai as genai_local
     except Exception:
@@ -3529,10 +3663,6 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
         # Detect creative mode based on user intent
         lyrics_mode = _detect_lyrics_mode(user_prompt, genre, inspiration)
         mode_emoji = {"EXPERIMENTAL": "🔬", "NARRATIVE": "📖", "BALANCED": "⚖️"}
-        try:
-            print(f"{Fore.CYAN}  🎨 Mode: {mode_emoji.get(lyrics_mode, '⚖️')} {lyrics_mode}{Style.RESET_ALL}")
-        except Exception:
-            pass
         
         # Detect vocal role from section_description for role-specific guidance
         vocal_role = "unknown"
@@ -3546,12 +3676,26 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
             pass
 
         # Multi-stage content generation
-        print(f"{Fore.CYAN}🎵 Generating lyrics for '{section_label}'{Style.RESET_ALL}")
+        # Display clear part header with grouped information
+        part_num_str = f" (Part {part_idx + 1})" if part_idx >= 0 else ""
+        try:
+            print()  # Empty line for spacing
+            print(f"{Style.BRIGHT}{Fore.CYAN}{'═' * 80}{Style.RESET_ALL}")
+            print(f"{Style.BRIGHT}{Fore.CYAN}║ PART{part_num_str}: {section_label or 'Unknown'}{Style.RESET_ALL}")
+            print(f"{Style.BRIGHT}{Fore.CYAN}{'═' * 80}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}  🎨 Mode: {mode_emoji.get(lyrics_mode, '⚖️')} {lyrics_mode}{Style.RESET_ALL}")
+        except Exception:
+            pass
         
-        # Stage 1a: Conceptual Planning
-        concept = _plan_lyrical_concept(config, genre, inspiration, section_role, section_label, user_prompt, history_context, cfg)
-        print(f"{Fore.GREEN}  📝 Theme: {concept.get('core_theme', 'Unknown')}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}  🎭 Mood: {concept.get('mood', 'Unknown')}{Style.RESET_ALL}")
+        # Stage 1a: Conceptual Planning WITH BACKING NOTES
+        concept = _plan_lyrical_concept(config, genre, inspiration, section_role, section_label, user_prompt, history_context, cfg, backing_notes=backing_notes)
+        try:
+            theme_text = concept.get('core_theme', 'Unknown')
+            mood_text = concept.get('mood', 'Unknown')
+            print(f"{Fore.GREEN}  📝 Theme: {theme_text[:120]}{('...' if len(theme_text) > 120 else '')}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}  🎭 Mood:  {mood_text[:120]}{('...' if len(mood_text) > 120 else '')}{Style.RESET_ALL}")
+        except Exception:
+            pass
         
         # Stage 1b: Phrase Planning (if we have notes)
         phrases = {}
@@ -3564,7 +3708,7 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
                     all_notes.extend(track['notes'])
             
             if all_notes:
-                print(f"{Fore.CYAN}  🎵 Using {len(all_notes)} notes from context for phrase planning{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}  🎵 Context: {len(all_notes)} backing notes available{Style.RESET_ALL}")
                 # Create preview from context notes
                 preview = []
                 for note in all_notes[:20]:  # Limit to first 20 notes for preview
@@ -3721,25 +3865,32 @@ PHRASING GUIDANCE:
                   if vocal_role in ["verse", "chorus", "prechorus", "bridge"] else
                   "")
                + "\n")
-            + "**🚨 WORD INTEGRITY - CRITICAL RULES (Read Carefully!):**\n"
-            + ("**FORBIDDEN OUTPUT PATTERNS** (you will be penalized for these):\n"
-               + "- ❌ NEVER output: 'sub tle', 'be low', 'un fold', 'frag ments'\n"
-               + "- ❌ NEVER output: 'fa mil iar', 're veal ing', 'in tri cate'\n"
-               + "- ❌ NEVER split common words like: 'slowly', 'deeply', 'softly', 'gently'\n\n"
-               + "**REQUIRED OUTPUT PATTERNS** (this is correct):\n"
-               + "- ✅ ALWAYS output: 'subtle', 'below', 'unfold', 'fragments'\n"
-               + "- ✅ ALWAYS output: 'familiar', 'revealing', 'intricate'\n"
-               + "- ✅ Keep adverbs intact: 'slowly', 'deeply', 'softly', 'gently'\n\n"
-               + "**WHEN SPLITTING IS ACCEPTABLE** (rare exceptions only):\n"
-               + "- Very fast rap flows with staccato rhythm (e.g., 'un-be-liev-a-ble' for emphasis)\n"
-               + "- Complex consonant clusters that are genuinely unsingable\n"
-               + "- **DEFAULT ASSUMPTION**: If you're unsure, keep the word INTACT\n\n"
+            + "**🚨 WORD INTEGRITY - MUSICAL SYLLABLE SPLITTING (Read Carefully!):**\n"
+            + ("**PRINCIPLE:** Avoid arbitrary word splitting, BUT allow linguistically-correct syllable splitting for musical expression.\n\n"
+               + "**❌ FORBIDDEN - Nonsensical Mid-Syllable Splits:**\n"
+               + "- ❌ NEVER: 'sub tle' (breaks 'subtle' mid-syllable)\n"
+               + "- ❌ NEVER: 'be low' (breaks 'below' mid-syllable)\n"
+               + "- ❌ NEVER: 'frag ments' (breaks 'fragments' mid-syllable)\n"
+               + "- ❌ NEVER: 'slow ly' (breaks between morphemes without musical reason)\n\n"
+               + "**✅ ALLOWED - Natural Syllable Boundaries for Musical Expression:**\n"
+               + "- ✅ YES: 'a wa ken' (natural syllables, allows pitch runs on 'wa')\n"
+               + "- ✅ YES: 'un fold ing' (natural syllables, rhythmic emphasis possible)\n"
+               + "- ✅ YES: 'beau ti ful' (natural syllables for melismatic decoration)\n"
+               + "- ✅ YES: 'slow ly' IF you have musical reason (e.g., pitch bend between syllables)\n\n"
+               + "**✅ ALSO GOOD - Complete Words:**\n"
+               + "- ✅ 'awaken' as ONE token (use melisma '-' for pitch runs: 'awaken - - -')\n"
+               + "- ✅ 'slowly' as ONE token (simpler, often sufficient)\n\n"
+               + "**DECISION GUIDE:**\n"
+               + "- **Need pitch run/bend on ONE syllable?** → Split into syllables ('a WA ken' with run on 'wa')\n"
+               + "- **Need rhythmic emphasis on syllables?** → Split into syllables ('UN-fold-ING')\n"
+               + "- **Simple melody, no special articulation?** → Keep whole word ('awaken')\n"
+               + "- **When unsure?** → Either approach is fine; choose what fits the music\n\n"
                if lyrics_mode != "EXPERIMENTAL" else
                "**EXPERIMENTAL MODE SPLITTING GUIDANCE:**\n"
                + "- You may split words for artistic/textural effect\n"
+               + "- Syllable-level splitting is ENCOURAGED for sonic exploration\n"
                + "- Consider: Does fragmentation serve the atmosphere?\n"
-               + "- Balance sonic texture with comprehensibility\n"
-               + "- Even in experimental mode, complete words often work better\n\n")
+               + "- Balance sonic texture with comprehensibility\n\n")
             + "**GENERAL TEXT RULES:**\n"
             + "- Use meaningful words, avoid generic vowels (ah/oh/eh) unless mode allows it\n"
             + "- Keep phrases natural and singable\n"
@@ -4028,12 +4179,12 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             
             scale_type = str(cfg.get("scale_type", "") if cfg else config.get("scale_type", (key_scale_to_use or "major").split(' ',1)[-1] if key_scale_to_use else "major"))
             
-            # SCALE VALIDATION: Check if the scale makes sense for the actual music
-            print(f"[DEBUG] Scale Validation:")
-            print(f"  - Key/Scale from JSON: {key_scale_to_use}")
-            print(f"  - Root note (MIDI): {root_note}")
-            print(f"  - Scale type: {scale_type}")
-            print(f"  - Generated scale notes: {get_scale_notes(root_note, scale_type)[:12]}...")  # Show first 12 notes
+            # SCALE VALIDATION: Check if the scale makes sense for the actual music (DEBUG disabled)
+            # print(f"[DEBUG] Scale Validation:")
+            # print(f"  - Key/Scale from JSON: {key_scale_to_use}")
+            # print(f"  - Root note (MIDI): {root_note}")
+            # print(f"  - Scale type: {scale_type}")
+            # print(f"  - Generated scale notes: {get_scale_notes(root_note, scale_type)[:12]}...")  # Show first 12 notes
             
             # Check for potential scale mismatches
             if key_scale_to_use and "major" in key_scale_to_use.lower() and "minor" in scale_type.lower():
@@ -4046,7 +4197,7 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         except Exception:
             root_note, scale_type = 60, "major"
         scale_notes = get_scale_notes(root_note, scale_type)
-        print(f"[DEBUG] Composer Scale Info: root_note={root_note}, scale_type={scale_type}, scale_notes={scale_notes}")
+        # print(f"[DEBUG] Composer Scale Info: root_note={root_note}, scale_type={scale_type}, scale_notes={scale_notes}")
         bpb = int(ts.get('beats_per_bar', 4)) if isinstance(ts, dict) else 4
         # Full context of other tracks (send full notes of this part)
         context_full = []
@@ -4182,33 +4333,23 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             lyrics_info += f"**Lyrics to Set:**\n{json.dumps([w for w in lyrics_words])}\n\n"
         lyrics_info += f"**Syllable Input (optional):**\n{json.dumps(syllables or [])}\n\n"
 
-        # Build prompt step by step to avoid complex nested parentheses
-        prompt = basic_instructions + "\n"
-        prompt += context_info
-        prompt += lyrics_info
-        prompt += f"**CREATIVE MODE: {lyrics_mode}**\n"
-        prompt += "**MODE-SPECIFIC SYLLABLE HANDLING:**\n"
-        if lyrics_mode == "EXPERIMENTAL":
-            prompt += "- EXPERIMENTAL MODE: You may create micro-notes and fragmented rhythms for effect\n"
-            prompt += "- Syllable splitting across multiple notes is ENCOURAGED if artistically justified\n"
-            prompt += "- Notes as short as 0.4 beats are ALLOWED for mechanical/glitchy textures\n"
-            prompt += "- Melisma ('-') can be used extensively for sonic exploration\n"
-            prompt += "- Prioritize texture and atmosphere over pure singability\n\n"
-        elif lyrics_mode == "NARRATIVE":
-            prompt += "- NARRATIVE MODE: Create clear, singable vocal lines\n"
-            prompt += "- **STRICT MINIMUM**: No notes shorter than 1.2 beats; prefer 2.0+ beats\n"
-            prompt += "- Keep one syllable = one note whenever possible\n"
-            prompt += "- Use melisma ('-') ONLY when musically compelling\n"
-            prompt += "- Prioritize clarity and natural singing flow\n\n"
-        else:  # BALANCED
-            prompt += "- BALANCED MODE: Adapt to artistic needs\n"
-            prompt += "- Standard minimum: 0.6 beats; prefer 1.0+ beats for comfort\n"
-            prompt += "- Balance between experimental freedom and singability\n"
-            prompt += "- Use judgment: let the lyrics and musical context guide you\n\n"
+        # 🚨 DEBUG: Log lyrics_words input (disabled)
+        # try:
+        #     if isinstance(lyrics_words, list) and lyrics_words:
+        #         words_count = len(lyrics_words)
+        #         words_sample = " ".join(str(w) for w in lyrics_words[:10])
+        #         print(f"[DEBUG Step-2] lyrics_words count: {words_count}, sample: {words_sample}...")
+        #     else:
+        #         print(f"[DEBUG Step-2] lyrics_words: {type(lyrics_words)} = {lyrics_words}")
+        # except Exception as e:
+        #     print(f"[DEBUG Step-2] lyrics_words error: {e}")
         
-        # 🚨 HIGHEST PRIORITY: Show Step 1 input tokens explicitly
+        # Build prompt: Word Integrity FIRST (highest priority)
+        prompt = basic_instructions + "\n"
+        
+        # 🚨 HIGHEST PRIORITY: Show Step 1 input tokens IMMEDIATELY after basic instructions
         prompt += "\n" + "="*80 + "\n"
-        prompt += "🚨 **CRITICAL INPUT FROM STEP 1 (Lyrics Generator):**\n"
+        prompt += "🚨 **YOUR PRIMARY TASK - WORD INTEGRITY (HIGHEST PRIORITY):**\n"
         if isinstance(lyrics_words, list) and lyrics_words:
             # Show the actual words from Step 1
             words_preview = " ".join(str(w) for w in lyrics_words[:30])
@@ -4229,28 +4370,37 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             except Exception:
                 multi_syl_examples = []
             
-            prompt += "**🚨 WORD INTEGRITY RULES - YOUR PRIMARY TASK:**\n"
+            prompt += "**🚨 WORD INTEGRITY - MUSICAL SYLLABLE SPLITTING:**\n"
             if lyrics_mode != "EXPERIMENTAL":
-                prompt += "**ABSOLUTE REQUIREMENT:** Output these words EXACTLY as they appear above. DO NOT SPLIT THEM.\n\n"
+                prompt += "**YOUR TASK:** Use Step 1 words as guidance, but adapt for musical expression.\n\n"
                 if multi_syl_examples:
-                    prompt += "**CONCRETE EXAMPLES FROM YOUR INPUT (protect these):**\n"
+                    prompt += "**STEP 1 PROVIDED THESE WORDS:**\n"
                     for ex_word in multi_syl_examples:
-                        prompt += f"  ✅ CORRECT: '{ex_word}' (as ONE token)\n"
-                        prompt += f"  ❌ FORBIDDEN: Split variations of '{ex_word}'\n"
+                        prompt += f"  → '{ex_word}'\n"
                     prompt += "\n"
-                prompt += "**HOW TO HANDLE MULTI-SYLLABLE WORDS:**\n"
-                prompt += "1. Keep the ENTIRE word as ONE token in your output\n"
-                prompt += "2. If the word needs multiple notes for singing, use melisma ('-') to extend it\n"
-                prompt += "3. Example: ['remember', '-', '-'] means 'remember' sung over 3 notes\n"
-                prompt += "4. NEVER output: ['re', 'mem', 'ber'] or ['re', 'member']\n\n"
-                prompt += "**YOUR OUTPUT TOKENS MUST MATCH STEP 1 INPUT:**\n"
-                prompt += "- Read the 'EXACT WORDS YOU MUST USE' list above\n"
-                prompt += "- Your 'tokens' array must contain these EXACT words (or melisma '-')\n"
-                prompt += "- Any word from Step 1 that you split will be marked as an error\n"
-                prompt += "- If a word looks wrong, output it anyway - your job is composition, not editing\n\n"
+                prompt += "**TWO VALID APPROACHES FOR MULTI-SYLLABLE WORDS:**\n\n"
+                prompt += "**Option 1 - Keep Whole Word (simpler):**\n"
+                prompt += "- ✅ Output: ['awaken', '-', '-'] for simple melody\n"
+                prompt += "- Use melisma ('-') to extend the word across multiple notes\n"
+                prompt += "- Good when: No special articulation needed\n\n"
+                prompt += "**Option 2 - Split into Syllables (expressive):**\n"
+                prompt += "- ✅ Output: ['a', 'wa', 'ken'] for pitch runs or rhythmic emphasis\n"
+                prompt += "- Split at natural syllable boundaries: 'a-wa-ken', 'un-fold-ing', 'beau-ti-ful'\n"
+                prompt += "- Good when: You need pitch bends/runs on specific syllables\n"
+                prompt += "- Example: 'a' (C4), 'wa' (D4→E4→F4 run), 'ken' (C4)\n\n"
+                prompt += "**❌ FORBIDDEN - Mid-Syllable Nonsense:**\n"
+                prompt += "- ❌ NEVER: ['awa', 'ken'] (breaks between 'a' and 'wa' syllables)\n"
+                prompt += "- ❌ NEVER: ['be', 'low'] (breaks 'below' at wrong boundary)\n"
+                prompt += "- Only split at NATURAL SYLLABLE boundaries\n\n"
+                prompt += "**DECISION GUIDE:**\n"
+                prompt += "- Need pitch run on ONE syllable? → Split ('a WA ken' with run on 'wa')\n"
+                prompt += "- Need rhythmic emphasis per syllable? → Split ('UN-fold-ING')\n"
+                prompt += "- Simple, flowing melody? → Keep whole word ('awaken - -')\n"
+                prompt += "- Either approach is valid - choose what serves the music!\n\n"
             else:
                 prompt += "**EXPERIMENTAL MODE - CREATIVE FREEDOM:**\n"
                 prompt += "- You may fragment or split words for artistic/textural effect\n"
+                prompt += "- Syllable-level splitting is ENCOURAGED for sonic exploration\n"
                 prompt += "- Consider whether fragmentation serves the sonic atmosphere\n"
                 prompt += "- Balance experimental texture with comprehensibility as you see fit\n"
                 if multi_syl_examples:
@@ -4261,13 +4411,48 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             prompt += "**NO STEP 1 INPUT PROVIDED** - Generate tokens based on syllable input.\n\n"
             prompt += "**WORD INTEGRITY GUIDANCE (Mode-Dependent):**\n"
             if lyrics_mode != "EXPERIMENTAL":
-                prompt += "- Prefer keeping multi-syllable words intact when possible\n"
-                prompt += "- Use melisma ('-') to extend words across multiple notes\n"
-                prompt += "- Example: 'beautiful' as ONE token, extended with ['beautiful', '-', '-']\n\n"
+                prompt += "- Two valid approaches: (1) Keep whole words with melisma, or (2) Split at natural syllable boundaries\n"
+                prompt += "- Option 1: ['beautiful', '-', '-'] - whole word extended with melisma\n"
+                prompt += "- Option 2: ['beau', 'ti', 'ful'] - natural syllables for pitch runs/emphasis\n"
+                prompt += "- Choose based on musical need (pitch runs, rhythmic emphasis, etc.)\n"
+                prompt += "- Avoid mid-syllable nonsense splits ('bea utiful')\n\n"
             else:
-                prompt += "- Fragmentation and splitting allowed for artistic effect\n\n"
+                prompt += "- Fragmentation and syllable splitting encouraged for artistic effect\n\n"
         
         prompt += "="*80 + "\n\n"
+        
+        # NOW add context, lyrics info, and mode-specific handling
+        prompt += context_info
+        prompt += lyrics_info
+        prompt += f"**CREATIVE MODE: {lyrics_mode}**\n"
+        prompt += "**MODE-SPECIFIC SYLLABLE HANDLING:**\n"
+        if lyrics_mode == "EXPERIMENTAL":
+            prompt += "- EXPERIMENTAL MODE: You may create micro-notes and fragmented rhythms for effect\n"
+            prompt += "- Syllable splitting across multiple notes is ENCOURAGED if artistically justified\n"
+            prompt += "- Very short notes are ALLOWED for mechanical/glitchy textures (consider what's audible)\n"
+            prompt += "- Melisma ('-') can be used extensively for sonic exploration\n"
+            prompt += "- **PITCH MANIPULATION**: Rapid pitch sequences can create glitchy/robotic effects\n"
+            prompt += "  → Example: Stutter effect = same pitch repeated with 0.05 beat notes\n"
+            prompt += "  → Example: Granular texture = random pitch jumps within scale\n"
+            prompt += "- Prioritize texture and atmosphere over pure singability\n\n"
+        elif lyrics_mode == "NARRATIVE":
+            prompt += "- NARRATIVE MODE: Create clear, singable vocal lines\n"
+            prompt += "- **SINGABILITY FOCUS**: Prefer longer notes (1.0+ beats) for clear articulation\n"
+            prompt += "- Consider: Can a human singer comfortably pronounce this word in this duration?\n"
+            prompt += "- Keep one syllable = one note whenever possible\n"
+            prompt += "- Use melisma ('-') ONLY when musically compelling\n"
+            prompt += "- Prioritize clarity and natural singing flow\n\n"
+        else:  # BALANCED
+            prompt += "- BALANCED MODE: Adapt to artistic needs\n"
+            prompt += "- **CONTEXT-AWARE DURATIONS**: Let the musical style guide you\n"
+            prompt += "- Single words: Typically 0.5-2.0 beats for comfortable singing\n"
+            prompt += "- Fast flows: Shorter notes (0.3-0.5 beats) are valid\n"
+            prompt += "- Melisma runs: Very short notes (0.05-0.2 beats) are authentic\n"
+            prompt += "- **PITCH ARTICULATION**: You can create slides/runs by using multiple short notes with changing pitches\n"
+            prompt += "  → Example: Glissando = 5 notes of 0.1 beats each with ascending pitches\n"
+            prompt += "  → All pitch changes within one syllable = use melisma ('-') tokens\n"
+            prompt += "- Balance between experimental freedom and singability\n"
+            prompt += "- Use judgment: let the lyrics and musical context guide you\n\n"
         
         prompt += "SYLLABLE-TO-NOTE MAPPING INTELLIGENCE:\n"
         prompt += "- Analyze syllable count per word and map accordingly:\n"
@@ -4319,7 +4504,10 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         prompt += f"NONCE: { _nonce }\n\n"
         prompt += "PROSODY & MAPPING POLICY:\n"
         prompt += "- Map exactly one lyric token to one note. Use '-' tokens to extend the previous note (melisma).\n"
-        prompt += "- Avoid inserting micro rests (< 0.5 beats); extend the preceding note instead.\n"
+        prompt += "- **RESTS & GAPS**: Consider musical breathing and phrasing\n"
+        prompt += "  → Very short rests (<0.2 beats) often sound unnatural - consider extending the preceding note instead\n"
+        prompt += "  → Longer rests (0.5+ beats) create intentional gaps for breathing and musical punctuation\n"
+        prompt += "  → Use your judgment based on the vocal style and musical context\n"
         prompt += "- Place stressed syllables on stronger beats and stable tones; function words on weak parts.\n"
         prompt += f"- **DENSITY GUIDANCE (Context-Intelligent):** Typical density ≈ {round(target_wpb,2)} onsets/bar as baseline\n"
         prompt += f"  → **Deeply analyze '{genre}' and '{inspiration}'** to understand appropriate vocal density\n"
@@ -4416,9 +4604,9 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         prompt += "- **MELODIC INTERACTION**: Create call-and-response with lead instruments, or harmonize with them.\n"
         prompt += "- **EMOTIONAL MATCHING**: Match the energy level and mood of the backing tracks.\n\n"
         prompt += "PHRASING HINTS BY ROLE:\n"
-        prompt += "- intro/whisper/spoken: fewer onsets, longer durations (≥ 1.0–1.25 beats typical).\n"
-        prompt += "- phrase_spot/prechorus: legato motifs, default min durations ≥ 1.0 beats when in doubt.\n"
-        prompt += "- chorus: clear arcs; repetition is fine; avoid syllable-chopping (< 0.5 beats).\n"
+        prompt += "- intro/whisper/spoken: fewer onsets, longer durations (≥ 1.0–1.25 beats typical for clarity).\n"
+        prompt += "- phrase_spot/prechorus: legato motifs, comfortable durations (≥ 1.0 beats typical) for sustained singing.\n"
+        prompt += "- chorus: clear arcs; repetition is fine; consider what's singable for the intended energy level.\n"
         prompt += "- vocal_fx/breaths: very sparse; musical placement; lots of space.\n"
         prompt += "- monotone roles: add rhythmic variation, micro-melodies (±2-3 semitones), dynamic accents.\n\n"
         prompt += _vocal_toolbox_block(
@@ -4471,15 +4659,36 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         prompt += f'   - **User Intent Override:** If the creative direction explicitly requests specific pitch usage, that takes priority\n'
         prompt += f'4.  **Duration Flexibility (Context-Intelligent):**\n'
         prompt += f'   - **Analyze the tempo, energy, and vocal style** to determine appropriate note durations\n'
-        prompt += f'   - **TECHNICAL PERMISSIONS** (when contextually appropriate):\n'
-        prompt += f'     • Fast vocal flows (rap, grime, speed metal): 0.25-0.5 beats (16th/32nd notes) are VALID\n'
-        prompt += f'     • Melismatic runs (wherever appropriate): 0.3-0.6 beats for rapid note changes are AUTHENTIC\n'
-        prompt += f'     • Sustained atmospheres (slow/ambient contexts): 4.0+ beats for long notes are APPROPRIATE\n'
-        prompt += f'     • Staccato/rhythmic styles: Very short notes serve the musical character\n'
+        prompt += f'   - **TECHNICAL PERMISSIONS** (understand what\'s physically possible in different contexts):\n'
+        prompt += f'     • **Fast vocal flows** (rap, grime, speed metal): 0.3-0.5 beats for rapid syllables are standard\n'
+        prompt += f'     • **Melismatic runs** (coloratura, R&B, gospel): 0.05-0.2 beats per pitch change for expressive runs are authentic\n'
+        prompt += f'     • **Sustained atmospheres** (slow/ambient contexts): 4.0+ beats for long notes are appropriate\n'
+        prompt += f'     • **Staccato/rhythmic styles**: Very short notes (0.2-0.4 beats) serve the musical character\n'
+        prompt += f'   - **Singability Check**: Ask yourself - can a human vocalist physically execute this?\n'
+        prompt += f'     → Very short notes (<0.1 beats) are only realistic for pitch bends/runs within a syllable\n'
+        prompt += f'     → Single syllables typically need 0.3+ beats for clear articulation\n'
+        prompt += f'     → Complex consonant clusters need more time than simple vowels\n'
         prompt += f'   - **Standard range:** 0.75–3.0 beats works for most moderate-tempo vocal styles\n'
         prompt += f'   - **Context is key:** Let BPM, groove, and the specific musical moment guide your choices\n'
-        prompt += f'5.  **Required Fields:** Every note MUST have: start_beat, duration_beats, pitch\n'
-        prompt += f'6.  **Timing is Absolute:** start_beat is the absolute position from the beginning of the section.\n\n'
+        prompt += f'5.  **Pitch Articulation through Note Sequences** (Advanced Expressivity):\n'
+        prompt += f'   You can create expressive vocal effects by using sequences of short notes with changing pitches:\n'
+        prompt += f'   - **Glissando/Slide** (Blues, R&B, Jazz): Series of very short notes ascending/descending\n'
+        prompt += f'     → Example: Slide from C (60) to E (64) over 0.5 beats\n'
+        prompt += f'     → [{{"pitch": 60, "duration_beats": 0.1}}, {{"pitch": 61, "duration_beats": 0.1}}, {{"pitch": 62, "duration_beats": 0.1}}, {{"pitch": 63, "duration_beats": 0.1}}, {{"pitch": 64, "duration_beats": 0.1}}]\n'
+        prompt += f'     → All these notes use melisma: ["word", "-", "-", "-", "-"]\n'
+        prompt += f'   - **Melismatic Runs** (Gospel, R&B, Coloratura): Rapid pitch changes on a single syllable\n'
+        prompt += f'     → Example: "Love" with 8-note run over 1.0 beat\n'
+        prompt += f'     → Each note 0.125 beats, pitches: 67→69→71→72→71→69→67→65\n'
+        prompt += f'     → Tokens: ["Love", "-", "-", "-", "-", "-", "-", "-"]\n'
+        prompt += f'   - **Blue Notes** (Blues, Jazz): Chromatic approach/bend into target pitch\n'
+        prompt += f'     → Example: Bend into the 3rd: [{{"pitch": 62, "duration_beats": 0.15}}, {{"pitch": 64, "duration_beats": 1.5}}]\n'
+        prompt += f'   - **Pitch Inflections** (Rap, Spoken): Small pitch movements for natural speech melody\n'
+        prompt += f'     → Example: Question inflection rising: 67→68→69 over 0.6 beats\n'
+        prompt += f'   - **When to use**: These techniques add human expressivity and are authentic in many genres\n'
+        prompt += f'   - **How short is too short?**: 0.05-0.1 beats per note is realistic for fast runs at moderate tempos\n'
+        prompt += f'   - **Remember**: All pitch changes within a syllable must use melisma ("-") tokens\n'
+        prompt += f'6.  **Required Fields:** Every note MUST have: start_beat, duration_beats, pitch\n'
+        prompt += f'7.  **Timing is Absolute:** start_beat is the absolute position from the beginning of the section.\n\n'
         prompt += "**OUTPUT FORMAT:**\n"
         prompt += "- Return JSON with 'notes' array containing objects with: start_beat, duration_beats, pitch\n"
         prompt += f"- Example: {{\"notes\": [{{\"start_beat\": 0.0, \"duration_beats\": 2.5, \"pitch\": {root_note}}}, {{\"start_beat\": 3.0, \"duration_beats\": 2.0, \"pitch\": {root_note + 2}}}, {{\"start_beat\": 5.5, \"duration_beats\": 2.5, \"pitch\": {root_note + 4}}}]}}\n"
@@ -4497,8 +4706,10 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         prompt += f"  • Hooks benefit from repetition with subtle variation\n"
         prompt += f"  • Verses benefit from development and forward motion\n"
         prompt += f"  • Let the role, energy, and musical context guide your choices\n\n"
-        prompt += "**WORD INTEGRITY & TIMING:**\n"
-        prompt += "- The lyrics were already tokenized for you. Keep words intact on single notes when possible.\n"
+        prompt += "**WORD & SYLLABLE HANDLING:**\n"
+        prompt += "- You can use whole words (['awaken', '-', '-']) OR natural syllables (['a', 'wa', 'ken'])\n"
+        prompt += "- Split into syllables when you need pitch runs or rhythmic emphasis on specific syllables\n"
+        prompt += "- Keep whole words when no special articulation is needed - it's simpler\n"
         prompt += "- **Duration Choices:** Let genre and musical context guide you (see Duration Flexibility above)\n"
         prompt += "- Aim for musical authenticity: serve the genre, not rigid rules.\n\n"
         prompt += "**ROLE-SPECIFIC GUIDANCE:**\n"
@@ -4507,7 +4718,7 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         prompt += ("PRE-CHORUS FOCUS (role-specific):\n- Build tension and lift into the chorus; rising contour preferred.\n- Reuse a short priming phrase; avoid revealing the hook.\n\n" if is_prechorus else "")
         prompt += ("BRIDGE FOCUS (role-specific):\n- Provide contrast in color/angle; introduce a complementary motif.\n- Keep range moderate; avoid direct chorus wording.\n\n" if is_bridge else "")
         prompt += (f"BACKING FOCUS (role-specific):\n- Echo/answer the lead with musical phrases\n- Stay out of the way; simple contours and sparse rhythm\n- **Duration Guidance:** Adapt to tempo, energy, and style:\n  → Analyze what backing vocals typically do in this genre/style\n  → Slower contexts often use longer notes (1.5-3.0 beats)\n  → Faster contexts often use shorter rhythmic hits (0.5-1.5 beats)\n  → Let musical context guide your choices\n\n" if is_backing else "")
-        prompt += (f"SPOKEN FOCUS (role-specific):\n- Natural spoken phrases with musical rhythm; use 1-2 pitches for musicality\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders)\n- **Duration Guidance:** Match the speech style and tempo:\n  → Analyze what spoken/rap vocal patterns do in '{genre}'\n  → Fast flows: Very short notes (0.25-0.5 beats)\n  → Conversational: Moderate notes (0.5-2.0 beats)\n  → Theatrical/Slow: Extended notes (2.0-4.0 beats)\n  → Let context determine pacing\n- Include pitch information for every note (typically 1-3 different pitches)\n- Use notes from scale: {scale_notes}\n\n" if is_spoken else "")
+        prompt += (f"SPOKEN FOCUS (role-specific):\n- Natural spoken phrases with musical rhythm; use 1-2 pitches for musicality\n- Use lexical words (no pure 'Ah/Ooh/Mmm' placeholders)\n- **Duration Intelligence:** Match the speech style and tempo:\n  → Analyze what spoken/rap vocal patterns do in '{genre}'\n  → **Fast flows**: Very short notes (0.3-0.5 beats) for rapid syllable delivery\n  → **Melisma runs in rap**: Even shorter notes (0.1-0.2 beats) for pitch inflections are authentic\n  → **Conversational**: Moderate notes (0.5-2.0 beats) for natural speech rhythm\n  → **Theatrical/Slow**: Extended notes (2.0-4.0 beats) for dramatic emphasis\n  → Consider: Can the rapper/speaker physically articulate this fast? If yes, it's valid.\n  → Let musical context and physical possibility determine pacing\n- Include pitch information for every note (typically 1-3 different pitches)\n- Use notes from scale: {scale_notes}\n\n" if is_spoken else "")
         prompt += (f"WHISPER FOCUS (role-specific):\n- Very quiet, breathy words/phrases; leave space\n- Use lexical tokens (not pure vowels unless atmospheric)\n- **Duration Guidance:** Adapt to tempo and atmosphere:\n  → Whispers often use longer, sustained notes (1.5-3.0 beats) for intimacy\n  → But faster tempos or rhythmic whispers can be shorter (0.75+ beats)\n  → Let the musical context and desired effect guide you\n- Include pitch information (subtle pitch variation adds humanity)\n- Use notes from scale: {scale_notes}\n- Typically 2-3 different pitches for intimate expression\n\n" if is_whisper else "")
         prompt += ("CHANT FOCUS (role-specific):\n- Simple repetitive cells sized to bar; minimal vocabulary; percussive alignment.\n- Avoid lyrical progression; keep motif tight.\n- **MANDATORY**: Include pitch information for every note\n- **SCALE AWARENESS**: Use notes from the song's scale: {scale_notes}\n- **ROOT CENTERING**: Center around {root_note} (MIDI {root_note}) for musical coherence\n- **PITCH VARIATION**: Use 2-3 different scale notes for rhythmic patterns\n\n" if is_chant else "")
         prompt += ("ADLIB FOCUS (role-specific):\n- Occasional interjections around lead phrases; extremely sparse.\n- Prefer short ascents/descents; avoid stepping on main content.\n\n" if is_adlib else "")
@@ -4550,11 +4761,13 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         prompt += "OUTPUT (STRICT JSON):\n{\n  \"notes\": [{\"start_beat\": number, \"duration_beats\": number, \"pitch\": int}, ...],\n  \"tokens\": [string, ...]\n}\n\n- Only these two top-level keys are allowed: notes, tokens. No other keys.\n\n"
         prompt += "CONSTRAINTS:\n- Map the provided lyrics in order; you MAY split words or use '-' for sustained continuations.\n- Try to keep len(tokens) ≈ number of notes; exact equality is NOT required if musically justified (but avoid large mismatches).\n- Preserve reading order of words; do not spell letter-by-letter.\n- Clamp total beats to theme length (bars * beats_per_bar); no overlaps; no negative durations.\n"
         prompt += "- HARD: If tokens are provided (len(tokens) ≥ 1), notes MUST NOT be empty (len(notes) ≥ 1). Never return empty notes when tokens exist.\n"
-        prompt += "- DURATION QUALITY: Ensure all note durations are musically appropriate:\n"
-        prompt += "  • No notes shorter than 0.5 beats unless absolutely necessary\n"
-        prompt += "  • Match duration to syllable/word complexity and natural speech rhythm\n"
-        prompt += "  • Create natural, singable phrasing with adequate note lengths\n"
-        prompt += "  • Use melisma ('-') for multi-syllable words rather than creating too many short notes\n"
+        prompt += "- DURATION INTELLIGENCE: Consider singability and musical context for all note durations:\n"
+        prompt += "  • **Single words/syllables**: Typically need 0.5-2.0 beats for clear articulation\n"
+        prompt += "  • **Fast flows (rap/grime)**: Can use 0.3-0.5 beats for rapid delivery\n"
+        prompt += "  • **Melisma runs (coloratura, R&B)**: May use 0.05-0.2 beats per pitch change for expressive runs\n"
+        prompt += "  • **Complex consonants**: Need more time than simple open vowels\n"
+        prompt += "  • **Ask yourself**: Can a human singer physically articulate this in the given duration?\n"
+        prompt += "  • **No hard minimum**: Use your musical judgment - there are no rigid rules, only what's musically effective and physically possible\n"
         prompt += "- ARTICULATION CLARITY: Prioritize clear, singable word delivery:\n"
         prompt += "  • Keep simple words (1-2 syllables) as single notes when possible\n"
         prompt += "  • Avoid over-fragmenting words into micro-notes that are hard to sing\n"
@@ -4680,10 +4893,12 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
                             return False, "note item not object"
                         if not {"start_beat", "duration_beats", "pitch"}.issubset(set(n.keys())):
                             return False, "missing note keys"
-                        # Duration guard (soft): reject only if absurdly short
+                        # Duration validation: No hard minimum - let AI decide based on musical context
+                        # The AI understands singability/pronounceability better than rigid rules
                         dur = float(n.get('duration_beats', 0))
-                        if dur < 0.5:
-                            return False, f"note duration {dur} < 0.5 beats (REJECTED)"
+                        # Only reject truly impossible values (negative or exactly zero)
+                        if dur <= 0:
+                            return False, f"note duration {dur} <= 0 beats (invalid)"
                 # Relaxed token check - only validate if tokens exist
                 if len(tokens) > 0:
                     for t in tokens[:64]:  # Check fewer tokens
@@ -5531,8 +5746,8 @@ def _export_openutau_ust_corrected(themes: List[Dict], track_index: int, syllabl
                             if length_ticks > 0:
                                 if note_blocks and length_ticks <= small_gap_ticks:
                                     note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + length_ticks)
-                                else:
-                                    note_blocks.append({"Lyric": '-', "NoteNum": pitch, "Length": max(1, length_ticks)})
+                            else:
+                                note_blocks.append({"Lyric": '-', "NoteNum": pitch, "Length": max(1, length_ticks)})
                         prev_was_content = False
                         current_beat = start_beat + duration_beats
                         timing_debug["total_notes"] += 1
@@ -7315,7 +7530,7 @@ def build_final_song_basename(config: Dict, themes: List[Dict], timestamp: str, 
         return f"Final_Song_{safe_ts}"
 def load_config(config_file):
     """Loads and validates the configuration from a YAML file using ruamel.yaml."""
-    print(Fore.CYAN + "Loading configuration..." + Style.RESET_ALL)
+    print(Style.DIM + Fore.CYAN + "Loading configuration..." + Style.RESET_ALL)
     try:
         yaml = YAML()
         with open(config_file, 'r', encoding='utf-8') as f:
@@ -7417,7 +7632,7 @@ def load_config(config_file):
                 config["time_signature"] = {"beats_per_bar": 4, "beat_value": 4}
 
 
-        print(Fore.GREEN + "Configuration loaded and validated successfully." + Style.RESET_ALL)
+        print(Style.DIM + Fore.GREEN + "Configuration loaded and validated successfully." + Style.RESET_ALL)
         return config
     except (FileNotFoundError, ValueError) as e:
         raise ValueError(f"Error loading configuration: {str(e)}")
@@ -12242,6 +12457,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 except Exception:
                     ANALYSIS_CTX = {}
                 try:
+                    # Extract backing notes for ALL parts (NEW: full context for planning!)
+                    backing_notes_per_part = []
+                    try:
+                        backing_notes_per_part = _extract_backing_notes_per_part(out_themes, exclude_track_index=track_idx if not new_vocal_track_mode else None)
+                        print(Style.DIM + f"[Step 0] Extracted backing notes: {[len(notes) for notes in backing_notes_per_part]} notes per part" + Style.RESET_ALL)
+                    except Exception as e:
+                        print(Style.DIM + f"[Step 0] Backing notes extraction failed: {e}; continuing with summaries only" + Style.RESET_ALL)
+                        backing_notes_per_part = []
+                    
                     # Step 0: Planning - skip if resuming
                     if resume_data is not None:
                         # Use saved plan data
@@ -12251,9 +12475,9 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         print(Style.DIM + "[Resume] Using saved plan data (skipping Step 0)" + Style.RESET_ALL)
                     else:
                         # Step 0a: Prompt Analysis (already done above)
-                        # Step 0b: Plan vocal roles
-                        print(Style.DIM + "[Step 0b] Planning vocal roles..." + Style.RESET_ALL)
-                        roles = _plan_vocal_roles(config, genre, inspiration, bpm, ts, summaries, ANALYSIS_CTX, user_guidance, cfg)
+                        # Step 0b: Plan vocal roles WITH BACKING NOTES
+                        print(Style.DIM + "[Step 0b] Planning vocal roles with full musical context..." + Style.RESET_ALL)
+                        roles = _plan_vocal_roles(config, genre, inspiration, bpm, ts, summaries, ANALYSIS_CTX, user_guidance, cfg, backing_notes_per_part=backing_notes_per_part)
                         
                         # Step 0c: Generate hints with consistency validation
                         print(Style.DIM + "[Step 0c] Generating hints with consistency validation..." + Style.RESET_ALL)
@@ -12992,20 +13216,20 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     print(f"{Fore.CYAN}🎵 Generating lyrics for '{label}' (lyrics-first approach){Style.RESET_ALL}")
                                     
                                     # Extract musical parameters from JSON (not config.yaml)
-                                    # DEBUG: Show what we're working with
-                                    print(f"[DEBUG] cfg keys: {list(cfg.keys()) if cfg else 'None'}")
-                                    print(f"[DEBUG] cfg key_scale: {cfg.get('key_scale') if cfg else 'None'}")
-                                    print(f"[DEBUG] cfg genre: {cfg.get('genre') if cfg else 'None'}")
+                                    # DEBUG: Show what we're working with (disabled)
+                                    # print(f"[DEBUG] cfg keys: {list(cfg.keys()) if cfg else 'None'}")
+                                    # print(f"[DEBUG] cfg key_scale: {cfg.get('key_scale') if cfg else 'None'}")
+                                    # print(f"[DEBUG] cfg genre: {cfg.get('genre') if cfg else 'None'}")
                                     
                                     # DIRECT extraction from JSON - bypass _get_config_value
                                     # Get the actual selected artifact data that was loaded
                                     progress_data = None
                                     if selected_path and os.path.exists(selected_path):
                                         progress_data = _load_progress_silent(selected_path)
-                                        print(f"[DEBUG] Loading Selected Artifact: {selected_path}")
-                                        print(f"[DEBUG] JSON config key_scale: {progress_data.get('config', {}).get('key_scale', 'NOT_FOUND')}")
-                                        print(f"[DEBUG] JSON config root_note: {progress_data.get('config', {}).get('root_note', 'NOT_FOUND')}")
-                                        print(f"[DEBUG] JSON config scale_type: {progress_data.get('config', {}).get('scale_type', 'NOT_FOUND')}")
+                                        # print(f"[DEBUG] Loading Selected Artifact: {selected_path}")
+                                        # print(f"[DEBUG] JSON config key_scale: {progress_data.get('config', {}).get('key_scale', 'NOT_FOUND')}")
+                                        # print(f"[DEBUG] JSON config root_note: {progress_data.get('config', {}).get('root_note', 'NOT_FOUND')}")
+                                        # print(f"[DEBUG] JSON config scale_type: {progress_data.get('config', {}).get('scale_type', 'NOT_FOUND')}")
                                     else:
                                         print(f"[ERROR] Selected artifact not found: {selected_path}")
                                         continue
@@ -13045,11 +13269,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                             continue
                                     
                                     try:
+                                        # Get backing notes for this specific part
+                                        part_backing_notes = backing_notes_per_part[part_idx] if (backing_notes_per_part and part_idx < len(backing_notes_per_part)) else []
+                                        
                                         lyrics_result = _generate_lyrics_free_with_syllables(
                                             cfg or config, genre, inspiration, 'Vocal', bpm, ts,
                                             section_label=label, section_description=desc_part,
                                             context_tracks_basic=seed_context_basic, user_prompt=user_guidance,
-                                            history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, part_idx=part_idx
+                                            history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, part_idx=part_idx,
+                                            backing_notes=part_backing_notes
                                         )
                                         words = lyrics_result.get('words', [])
                                         syllables = lyrics_result.get('syllables', [])
@@ -13060,7 +13288,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                         syllables = []
                                         arranger_note = "intentional silence: lyrics generation failed"
                                 
-                                print(f"{Fore.BLUE}  🎼 Composing notes for '{label}'{Style.RESET_ALL}")
+                                # Note composition happens automatically - no separate print needed
                                 # Use the generated lyrics to compose notes
                                 if words and syllables:
                                     # Extract musical parameters from JSON (not config.yaml)
@@ -13068,10 +13296,10 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     progress_data = None
                                     if selected_path and os.path.exists(selected_path):
                                         progress_data = _load_progress_silent(selected_path)
-                                        print(f"[DEBUG] Loading Selected Artifact for notes: {selected_path}")
-                                        print(f"[DEBUG] JSON config key_scale: {progress_data.get('config', {}).get('key_scale', 'NOT_FOUND')}")
-                                        print(f"[DEBUG] JSON config root_note: {progress_data.get('config', {}).get('root_note', 'NOT_FOUND')}")
-                                        print(f"[DEBUG] JSON config scale_type: {progress_data.get('config', {}).get('scale_type', 'NOT_FOUND')}")
+                                        # print(f"[DEBUG] Loading Selected Artifact for notes: {selected_path}")
+                                        # print(f"[DEBUG] JSON config key_scale: {progress_data.get('config', {}).get('key_scale', 'NOT_FOUND')}")
+                                        # print(f"[DEBUG] JSON config root_note: {progress_data.get('config', {}).get('root_note', 'NOT_FOUND')}")
+                                        # print(f"[DEBUG] JSON config scale_type: {progress_data.get('config', {}).get('scale_type', 'NOT_FOUND')}")
                                     else:
                                         print(f"[ERROR] Selected artifact not found for notes: {selected_path}")
                                         continue
