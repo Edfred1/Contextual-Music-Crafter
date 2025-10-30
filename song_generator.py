@@ -3786,7 +3786,63 @@ PHRASING GUIDANCE:
             + (f"OTHER TRACKS: {json.dumps(ctx_summary)}\n" if ctx_summary else "")
             + (f"PREVIOUS SECTIONS (LYRICAL CONTEXT):\n{history_context}\n" if (isinstance(history_context, str) and history_context.strip()) else "")
             + (f"MELODY: {json.dumps(preview)}\n" if preview else "")
-            + "\nSONG POSITION GATING:\n"
+        )
+        
+        # Add backing notes analysis if available
+        if backing_notes and isinstance(backing_notes, list) and len(backing_notes) > 0:
+            try:
+                # Analyze backing notes for musical context
+                total_notes = len(backing_notes)
+                section_duration = max((float(n.get('start_beat', 0)) + float(n.get('duration_beats', 0))) for n in backing_notes) if backing_notes else 32.0
+                density = total_notes / max(1.0, section_duration / int(ts.get('beats_per_bar', 4)))
+                
+                pitches = [int(n.get('pitch', 60)) for n in backing_notes if 'pitch' in n]
+                avg_pitch = sum(pitches) / len(pitches) if pitches else 60
+                pitch_range = max(pitches) - min(pitches) if pitches else 0
+                
+                durations = [float(n.get('duration_beats', 1)) for n in backing_notes if 'duration_beats' in n]
+                avg_duration = sum(durations) / len(durations) if durations else 1.0
+                
+                # Find gaps in backing notes
+                sorted_notes = sorted(backing_notes, key=lambda n: float(n.get('start_beat', 0)))
+                gaps = []
+                for i in range(len(sorted_notes) - 1):
+                    end_current = float(sorted_notes[i].get('start_beat', 0)) + float(sorted_notes[i].get('duration_beats', 0))
+                    start_next = float(sorted_notes[i+1].get('start_beat', 0))
+                    gap_size = start_next - end_current
+                    if gap_size > 0.5:  # Only consider gaps > 0.5 beats
+                        gaps.append(gap_size)
+                max_gap = max(gaps) if gaps else 0.0
+                
+                # Determine musical character
+                energy_level = 'high-energy' if density > 2 else 'sparse' if density < 0.5 else 'moderate'
+                pitch_character = 'high/bright' if avg_pitch > 72 else 'low/dark' if avg_pitch < 55 else 'mid-range'
+                texture = 'staccato/rhythmic' if avg_duration < 1.5 else 'sustained/legato' if avg_duration > 2.5 else 'balanced'
+                
+                backing_analysis = f"""
+🎵 **BACKING NOTES MUSICAL CONTEXT** (use this to inform your vocal approach!):
+- **Energy:** {energy_level} ({density:.2f} notes/beat, avg duration {avg_duration:.2f} beats)
+- **Pitch Character:** {pitch_character} (avg {avg_pitch:.0f} MIDI, range {pitch_range} semitones)
+- **Texture:** {texture} with {total_notes} notes across {section_duration:.1f} beats
+- **Space/Gaps:** {len(gaps)} gaps detected, largest {max_gap:.1f} beats
+- **Musical Feel:** {'Energetic and driving' if density > 2 and avg_duration < 1.5 else 'Sparse and contemplative' if density < 0.5 else 'Flowing and melodic' if avg_duration > 2.5 else 'Balanced and moderate'}
+
+**VOCAL APPROACH GUIDANCE based on actual backing music:**
+→ The {'dense, fast-paced' if density > 2 else 'sparse, spacious' if density < 0.5 else 'moderate'} backing suggests vocals that are {'punchy/rhythmic/fragmented' if density > 2 else 'sustained/melodic/spacious' if density < 0.5 else 'balanced/flowing'}
+→ {'HIGH pitch energy - consider energetic, excited vocal delivery' if avg_pitch > 72 else 'LOW pitch character - consider grounded, intimate vocal approach' if avg_pitch < 55 else 'MID-RANGE pitch - versatile vocal range appropriate'}
+→ {'STACCATO backing - short, rhythmic vocal phrases work well' if avg_duration < 1.5 else 'LEGATO backing - sustained vocal lines complement nicely' if avg_duration > 2.5 else 'BALANCED backing - mix of sustained and rhythmic vocals'}
+→ {'LARGE GAPS PRESENT ({max_gap:.1f} beats) - excellent opportunities for call-and-response or sparse phrasing' if max_gap > 4 else 'MODERATE GAPS - natural breathing room available' if max_gap > 2 else 'CONTINUOUS backing - consider tight vocal integration or intentional contrast'}
+
+**CRITICAL:** Let the actual music guide your creative choices. This is real-time musical context, not generic rules.
+
+"""
+                prompt += backing_analysis
+            except Exception as e:
+                # Silently skip if analysis fails
+                pass
+        
+        prompt += (
+            "\nSONG POSITION GATING:\n"
             + (f"- FIRST PART: You are creating the opening of the song. Establish the main theme, mood, and narrative foundation. Set up key imagery and emotional tone that will carry through the entire song.\n" if part_idx == 0 else "")
             + (f"- MIDDLE PART: You are in the middle of the song. Build on established themes, develop the narrative, and create emotional progression. Reference earlier parts while advancing the story.\n" if 0 < part_idx < 15 else "")
             + (f"- FINAL PART: You are concluding the song. Bring closure to the narrative, resolve emotional arcs, and create a satisfying ending. Reference earlier themes for unity.\n" if part_idx >= 15 else "")
@@ -4089,7 +4145,7 @@ def _infer_hook_from_text(text: str | None) -> str | None:
         return None
 
 # --- Lyrics-first STAGE 2: Compose notes to syllables (uses full context) ---
-def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: float | int, ts: Dict, theme_len_bars: int, syllables: List[List[str]], arranger_note: str | None, context_tracks_basic: List[Dict] | None = None, key_scale: str | None = None, section_label: str | None = None, hook_canonical: str | None = None, chorus_lines: List[str] | None = None, section_description: str | None = None, lyrics_words: List[str] | None = None, cfg: Dict | None = None) -> Dict:
+def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: float | int, ts: Dict, theme_len_bars: int, syllables: List[List[str]], arranger_note: str | None, context_tracks_basic: List[Dict] | None = None, key_scale: str | None = None, section_label: str | None = None, hook_canonical: str | None = None, chorus_lines: List[str] | None = None, section_description: str | None = None, lyrics_words: List[str] | None = None, cfg: Dict | None = None, backing_notes: List[Dict] | None = None) -> Dict:
     try:
         import google.generativeai as genai_local
     except Exception:
@@ -4420,6 +4476,85 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
                 prompt += "- Fragmentation and syllable splitting encouraged for artistic effect\n\n"
         
         prompt += "="*80 + "\n\n"
+        
+        # Add backing notes musical context analysis (PRIORITY: right after word integrity)
+        if backing_notes and isinstance(backing_notes, list) and len(backing_notes) > 0:
+            try:
+                # Analyze backing notes for musical context
+                total_notes = len(backing_notes)
+                section_duration = max((float(n.get('start_beat', 0)) + float(n.get('duration_beats', 0))) for n in backing_notes) if backing_notes else 32.0
+                density = total_notes / max(1.0, section_duration / int(ts.get('beats_per_bar', 4)))
+                
+                pitches = [int(n.get('pitch', 60)) for n in backing_notes if 'pitch' in n]
+                avg_pitch = sum(pitches) / len(pitches) if pitches else 60
+                pitch_range = max(pitches) - min(pitches) if pitches else 0
+                
+                durations = [float(n.get('duration_beats', 1)) for n in backing_notes if 'duration_beats' in n]
+                avg_duration = sum(durations) / len(durations) if durations else 1.0
+                
+                # Find gaps in backing notes
+                sorted_notes = sorted(backing_notes, key=lambda n: float(n.get('start_beat', 0)))
+                gaps = []
+                for i in range(len(sorted_notes) - 1):
+                    end_current = float(sorted_notes[i].get('start_beat', 0)) + float(sorted_notes[i].get('duration_beats', 0))
+                    start_next = float(sorted_notes[i+1].get('start_beat', 0))
+                    gap_size = start_next - end_current
+                    if gap_size > 0.5:  # Only consider gaps > 0.5 beats
+                        gaps.append(gap_size)
+                max_gap = max(gaps) if gaps else 0.0
+                
+                # Determine musical character
+                energy_level = 'high-energy' if density > 2 else 'sparse' if density < 0.5 else 'moderate'
+                pitch_character = 'high/bright' if avg_pitch > 72 else 'low/dark' if avg_pitch < 55 else 'mid-range'
+                texture = 'staccato/rhythmic' if avg_duration < 1.5 else 'sustained/legato' if avg_duration > 2.5 else 'balanced'
+                
+                # Melodic/Rhythmic recommendations
+                melodic_rec = ""
+                if density > 2:
+                    melodic_rec = "Dense backing → Short, rhythmic note durations (0.3-1.0 beats) fit well. Consider syncopated patterns."
+                elif density < 0.5:
+                    melodic_rec = "Sparse backing → Longer, sustained notes (2.0-4.0 beats) can fill space beautifully. Room for expressive melisma."
+                else:
+                    melodic_rec = "Balanced backing → Mix note durations flexibly (0.5-2.5 beats). Follow the natural phrasing."
+                
+                pitch_rec = ""
+                if avg_pitch > 72:
+                    pitch_rec = "High backing → Vocal melody can soar above (consider 70-85 MIDI) or create contrast below (55-70 MIDI)."
+                elif avg_pitch < 55:
+                    pitch_rec = "Low backing → Vocal melody can float above (65-80 MIDI) for clarity, or match depth (50-65 MIDI) for blend."
+                else:
+                    pitch_rec = "Mid-range backing → Vocal melody has full range available (55-80 MIDI). Consider moments above and below."
+                
+                gap_rec = ""
+                if max_gap > 4:
+                    gap_rec = f"LARGE GAPS ({max_gap:.1f} beats) → Excellent for call-and-response patterns, or intentional silence for dramatic effect."
+                elif max_gap > 2:
+                    gap_rec = "Moderate gaps → Natural breathing room. Phrases can extend across gaps or pause for phrasing."
+                else:
+                    gap_rec = "Continuous backing → Vocal timing can either integrate tightly with backing or create intentional contrast through silence."
+                
+                backing_analysis = f"""
+🎵 **BACKING NOTES MUSICAL CONTEXT** (HIGH PRIORITY - use this for note composition!):
+
+**MUSICAL ANALYSIS:**
+- **Energy:** {energy_level} ({density:.2f} notes/beat, {total_notes} notes total)
+- **Pitch Character:** {pitch_character} (avg {avg_pitch:.0f} MIDI, range {pitch_range} semitones)
+- **Texture:** {texture} (avg note duration {avg_duration:.2f} beats)
+- **Space:** {len(gaps)} gaps > 0.5 beats, largest gap {max_gap:.1f} beats
+
+**NOTE COMPOSITION GUIDANCE:**
+→ **Duration:** {melodic_rec}
+→ **Pitch Range:** {pitch_rec}
+→ **Phrasing/Gaps:** {gap_rec}
+→ **Overall Feel:** {'Energetic/Driving - match the intensity with shorter, punchier notes' if density > 2 and avg_duration < 1.5 else 'Sparse/Contemplative - use longer, more expressive notes' if density < 0.5 else 'Flowing/Melodic - balanced note durations create natural flow' if avg_duration > 2.5 else 'Balanced/Moderate - versatile approach, let lyrics guide note lengths'}
+
+**CRITICAL:** This is the ACTUAL MUSIC you're composing vocals for. Let these real notes guide your melodic and rhythmic choices.
+
+"""
+                prompt += backing_analysis
+            except Exception as e:
+                # Silently skip if analysis fails
+                pass
         
         # NOW add context, lyrics info, and mode-specific handling
         prompt += context_info
@@ -5746,8 +5881,8 @@ def _export_openutau_ust_corrected(themes: List[Dict], track_index: int, syllabl
                             if length_ticks > 0:
                                 if note_blocks and length_ticks <= small_gap_ticks:
                                     note_blocks[-1]['Length'] = int(note_blocks[-1]['Length'] + length_ticks)
-                            else:
-                                note_blocks.append({"Lyric": '-', "NoteNum": pitch, "Length": max(1, length_ticks)})
+                                else:
+                                    note_blocks.append({"Lyric": '-', "NoteNum": pitch, "Length": max(1, length_ticks)})
                         prev_was_content = False
                         current_beat = start_beat + duration_beats
                         timing_debug["total_notes"] += 1
@@ -6622,9 +6757,14 @@ def _create_midi_from_ust(ust_path: str, bpm: float | int, ts: Dict, output_file
             bval = int(ts.get('beat_value', 4)) if isinstance(ts, dict) else 4
         except Exception:
             bval = 4
+        
+        # MIDIFile library expects denominator as power of 2 (0=1, 1=2, 2=4, 3=8, 4=16)
+        # Convert beat_value (4, 8, 16) to MIDI format
+        midi_denominator = {1: 0, 2: 1, 4: 2, 8: 3, 16: 4}.get(bval, 2)  # Default to 2 (=4/4)
+        
         midi = MIDIFile(1, removeDuplicates=True, deinterleave=False)
         midi.addTempo(track=0, time=0, tempo=float(bpm))
-        midi.addTimeSignature(track=0, time=0, numerator=bpb, denominator=bval, clocks_per_tick=24)
+        midi.addTimeSignature(track=0, time=0, numerator=bpb, denominator=midi_denominator, clocks_per_tick=24)
 
         current_ticks = 0
         prev_content_pitch = None
@@ -13327,10 +13467,13 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     chorus_lines = stored_config.get('chorus_lines', []) if stored_config else []
                                     section_description = desc_part
                                     
+                                    # Get backing notes for this specific part
+                                    part_backing_notes = backing_notes_per_part[part_idx] if (backing_notes_per_part and part_idx < len(backing_notes_per_part)) else []
+                                    
                                     stage2 = _compose_notes_for_syllables(
                                         cfg or config, genre, inspiration, 'Vocal', bpm, ts, theme_len_bars,
                                         syllables, arranger_note, seed_context_basic, key_scale, label, hook_canonical, 
-                                        chorus_lines, section_description, words, cfg
+                                        chorus_lines, section_description, words, cfg, backing_notes=part_backing_notes
                                     )
                                 else:
                                     # Fallback to minimal content - use the same cfg data that was already loaded
@@ -13356,10 +13499,13 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                             chorus_lines = cfg.get('chorus_lines', [])
                                             section_description = desc_part
                                             
+                                            # Get backing notes for this specific part
+                                            part_backing_notes_fallback = backing_notes_per_part[part_idx] if (backing_notes_per_part and part_idx < len(backing_notes_per_part)) else []
+                                            
                                             stage2 = _compose_notes_for_syllables(
                                                 cfg, genre, inspiration, 'Vocal', bpm, ts, theme_len_bars,
                                                 [["ah"]], arranger_note, seed_context_basic, key_scale, label, hook_canonical, 
-                                                chorus_lines, section_description, ["ah"], cfg
+                                                chorus_lines, section_description, ["ah"], cfg, backing_notes=part_backing_notes_fallback
                                             )
                                 # Set notes2 and tokens2 for new vocal tracks
                                 if isinstance(stage2, dict) and 'notes' in stage2:
@@ -13423,10 +13569,13 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             if role_lower == 'silence' or is_contradictory or model_silence:
                                 # For silence roles, generate minimal atmospheric notes instead of complete silence
                                 print(f"[DEBUG] Silence role detected: {role_lower}, generating minimal atmospheric content")
+                                # Get backing notes for this specific part (silence role)
+                                part_backing_notes_silence = backing_notes_per_part[part_idx] if (backing_notes_per_part and part_idx < len(backing_notes_per_part)) else []
+                                
                                 stage2 = _compose_notes_for_syllables(
                                     cfg or config, genre, inspiration, 'Vocal', bpm, ts, theme_len_bars,
                                     [["ah"]], arranger_note, seed_context_basic, key_scale, label, hook_canonical, 
-                                    chorus_lines, section_description, ["ah"], cfg
+                                    chorus_lines, section_description, ["ah"], cfg, backing_notes=part_backing_notes_silence
                                 )
                                 # Mark as minimal silence content
                                 if isinstance(stage2, dict) and 'notes' in stage2:
@@ -13437,12 +13586,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                             else:
                                 # Extract key_scale safely
                                 key_scale = cfg.get('key_scale') if cfg else config.get('key_scale', 'C major')
+                                # Get backing notes for this specific part (main path)
+                                part_backing_notes_main = backing_notes_per_part[part_idx] if (backing_notes_per_part and part_idx < len(backing_notes_per_part)) else []
+                                
                                 stage2 = _compose_notes_for_syllables(
                                     cfg or config, genre, inspiration, 'Vocal', bpm, ts, theme_len_bars,
                                     (stage1.get('syllables') if isinstance(stage1.get('syllables'), list) else []), arranger_note, seed_context_basic, key_scale, section_label=label,
                                     hook_canonical=(stage1.get('hook_canonical') if isinstance(stage1.get('hook_canonical'), str) else None),
                                     chorus_lines=(stage1.get('chorus_lines') if isinstance(stage1.get('chorus_lines'), list) else None),
-                                    section_description=(plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part, lyrics_words=(words or []), cfg=cfg
+                                    section_description=(plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part, lyrics_words=(words or []), cfg=cfg, backing_notes=part_backing_notes_main
                                 )
                                 # For existing tracks, continue with the original logic
                             # Enforce role-based timing to slow down overly hasty mapping
@@ -13503,12 +13655,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                         print(Fore.CYAN + f"[Composer] Retrying Stage-2 for '{label}' ({rtry+1}/{max_retries_s2})" + Style.RESET_ALL)
                                     except Exception:
                                         pass
+                                    # Get backing notes for this specific part (retry path)
+                                    part_backing_notes_retry = backing_notes_per_part[part_idx] if (backing_notes_per_part and part_idx < len(backing_notes_per_part)) else []
+                                    
                                     stage2 = _compose_notes_for_syllables(
                                         cfg or config, genre, inspiration, 'Vocal', bpm, ts, theme_len_bars,
                                         (stage1.get('syllables') if isinstance(stage1.get('syllables'), list) else []), arranger_note, context_tracks_basic=seed_context_basic, key_scale=(cfg or config).get('key_scale',''), section_label=label,
                                         hook_canonical=(stage1.get('hook_canonical') if isinstance(stage1.get('hook_canonical'), str) else None),
                                         chorus_lines=(stage1.get('chorus_lines') if isinstance(stage1.get('chorus_lines'), list) else None),
-                                        section_description=(plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part, lyrics_words=(words or [])
+                                        section_description=(plan_by_idx.get(part_idx, {}) or {}).get('plan_hint') or desc_part, lyrics_words=(words or []), backing_notes=part_backing_notes_retry
                                     )
                                     notes2 = stage2.get('notes') if isinstance(stage2, dict) else None
                                     tokens2 = stage2.get('tokens') if isinstance(stage2, dict) else None
@@ -13838,21 +13993,21 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     if not new_vocal_track_mode:
                         plan = {}
                         adjusted_notes, adjusted_tokens = notes, tokens
-                        if not (isinstance(target_tr, dict) and target_tr.get('__final_vocal__')):
-                            # Add safety check to prevent infinite loops
-                            try:
-                                # Disabled conservative merging/adjustments to preserve 1:1 mapping during debugging
-                                # plan = _propose_lyric_note_adjustments(cfg or config, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes, tokens, label, desc, context_tracks=[t for j,t in enumerate(trks) if j != track_idx_effective])
-                                # adjusted_notes, adjusted_tokens = _apply_note_adjustments_conservative(notes, tokens, plan)
-                                target_tr['notes'] = notes
-                                target_tr['lyrics'] = tokens
-                            except Exception as e:
-                                print(Style.DIM + f"[Notes-Adapt] Error in note adjustments: {e}, using original notes" + Style.RESET_ALL)
-                                target_tr['notes'] = notes
-                                target_tr['lyrics'] = tokens
-                        else:
+                    if not (isinstance(target_tr, dict) and target_tr.get('__final_vocal__')):
+                        # Add safety check to prevent infinite loops
+                        try:
+                            # Disabled conservative merging/adjustments to preserve 1:1 mapping during debugging
+                            # plan = _propose_lyric_note_adjustments(cfg or config, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes, tokens, label, desc, context_tracks=[t for j,t in enumerate(trks) if j != track_idx_effective])
+                            # adjusted_notes, adjusted_tokens = _apply_note_adjustments_conservative(notes, tokens, plan)
                             target_tr['notes'] = notes
                             target_tr['lyrics'] = tokens
+                        except Exception as e:
+                            print(Style.DIM + f"[Notes-Adapt] Error in note adjustments: {e}, using original notes" + Style.RESET_ALL)
+                            target_tr['notes'] = notes
+                            target_tr['lyrics'] = tokens
+                    else:
+                        target_tr['notes'] = notes
+                        target_tr['lyrics'] = tokens
                                     
                     # For new vocal tracks, the track was already added earlier (line 12873)
                     # Don't add or update again - the notes and lyrics are already correct in track_data!

@@ -511,7 +511,8 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict, str
             bpm = float(mido.tempo2bpm(msg.tempo))
         if msg.is_meta and msg.type == "time_signature":
             time_signature["beats_per_bar"] = msg.numerator
-            time_signature["beat_value"] = msg.denominator
+            # MIDI denominator is a power of 2: 0=1, 1=2, 2=4, 3=8, 4=16
+            time_signature["beat_value"] = 2 ** msg.denominator
         if msg.is_meta and msg.type == "key_signature":
             # MIDI key signature: 0=C, 1=G, 2=D, etc. (sharps) or -1=F, -2=Bb, etc. (flats)
             # mode: 0=major, 1=minor
@@ -568,7 +569,16 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict, str
     if root_note == "C" and scale_type == "major":
         all_notes = []
         for track in tracks:
-            all_notes.extend(track.get("notes", []))
+            # CRITICAL FIX: Exclude drums/percussion from scale analysis!
+            # Drums use MIDI pitches for different drum sounds, not musical pitches
+            role = track.get("role", "").lower()
+            is_drums = (role in ["drums", "percussion", "perc", "drum"] or 
+                       track.get("is_drum", False) or
+                       track.get("channel") == 9)  # MIDI channel 10 (index 9) is drums
+            
+            if not is_drums:
+                all_notes.extend(track.get("notes", []))
+        
         analyzed_root, analyzed_scale = _analyze_key_from_pitches(all_notes)
         if analyzed_root != "C" or analyzed_scale != "major":
             root_note = analyzed_root
