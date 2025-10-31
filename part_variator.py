@@ -137,7 +137,20 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], int, int, Dict]:
                 bpm = mido.tempo2bpm(msg.tempo)
             if msg.is_meta and msg.type == 'time_signature':
                 time_signature["beats_per_bar"] = msg.numerator
-                time_signature["beat_value"] = msg.denominator
+                # MIDI denominator is a power of 2: 0=1, 1=2, 2=4, 3=8, 4=16
+                # BUT: Some buggy MIDI files store the direct value (4, 8, 16) instead of the exponent (2, 3, 4)
+                # Detect and handle both cases
+                if msg.denominator <= 4:
+                    # Likely a correct exponent (0-4 → 1, 2, 4, 8, 16)
+                    time_signature["beat_value"] = 2 ** msg.denominator
+                else:
+                    # Likely already the direct value (buggy MIDI)
+                    # Accept common values: 1, 2, 4, 8, 16
+                    if msg.denominator in [1, 2, 4, 8, 16]:
+                        time_signature["beat_value"] = msg.denominator
+                    else:
+                        # Unknown/invalid - default to 4
+                        time_signature["beat_value"] = 4
                 # We assume the time signature stays constant for simplicity
 
         print(Fore.CYAN + f"Analyzed MIDI: BPM={bpm:.2f}, Time Signature={time_signature['beats_per_bar']}/{time_signature['beat_value']}" + Style.RESET_ALL)

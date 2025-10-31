@@ -85,7 +85,7 @@ def extract_from_progress(pdata):
     """Best-effort extraction of (config, themes, length_bars, timestamp) from a progress JSON."""
     config = pdata.get("config")
     ts = pdata.get("timestamp") or time.strftime("%Y%m%d-%H%M%S")
-    length = int(pdata.get("theme_length") or pdata.get("length") or 16)
+    length = int(pdata.get("theme_length") or pdata.get("length") or 8)  # Consistent fallback with other modules
 
     themes = None
     # Try common fields by type priority
