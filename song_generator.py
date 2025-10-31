@@ -796,7 +796,7 @@ def _extract_backing_notes_per_part(themes: List[Dict], exclude_track_index: int
     
     return backing_notes_per_part
 
-def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | int, ts: Dict, summaries: List[Dict], analysis_ctx: Dict, user_prompt: str | None = None, cfg: Dict | None = None, backing_notes_per_part: List[List[Dict]] | None = None) -> List[Dict]:
+def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | int, ts: Dict, summaries: List[Dict], analysis_ctx: Dict, user_prompt: str | None = None, cfg: Dict | None = None, backing_notes_per_part: List[List[Dict]] | None = None, theme_len_bars: int | float | None = None) -> List[Dict]:
     """
     Step 0b: Plan vocal roles for each part based on song structure and analysis.
     Focus only on logical role distribution, no hints yet.
@@ -813,6 +813,14 @@ def _plan_vocal_roles(config: Dict, genre: str, inspiration: str, bpm: float | i
         # Extract key_scale from artifact if available, otherwise use config
         # Note: cfg parameter should contain the artifact/progress data with key_scale
         key_scale_to_use = cfg.get('key_scale', '') if cfg else config.get('key_scale', 'Unknown')
+        
+        # Extract part length (bars per part) from cfg or parameter
+        part_length_for_prompt = theme_len_bars
+        if part_length_for_prompt is None and cfg:
+            part_length_for_prompt = cfg.get('theme_length') or cfg.get('length') or cfg.get('part_length')
+        if part_length_for_prompt is None:
+            part_length_for_prompt = config.get('part_length') or config.get('length') or 8
+        part_length_for_prompt = float(part_length_for_prompt) if part_length_for_prompt else 8.0
         
         # Analyze backing notes if provided (NEW: full note context!)
         notes_analysis_text = ""
@@ -898,42 +906,62 @@ ROLE CATALOG:
 - talkbox: Synthesized speech
 - vocal_fx: Special effects
 
-VOCAL BUDGET & DENSITY (Genre-Intelligent Analysis):
-**YOUR TASK:** Deeply analyze '{genre}' and '{inspiration}' using your musical knowledge to determine authentic vocal density.
+VOCAL BUDGET & DENSITY (Context-Aware Analysis):
+**YOUR TASK:** Analyze the musical context (including '{genre}' and '{inspiration}' if provided) to determine appropriate vocal density for THIS specific song.
 
-**GENRE AWARENESS FRAMEWORK (not prescriptive rules):**
-Use your understanding of '{genre}' to inform your decisions. Consider that:
+**MUSICAL CONTEXT AWARENESS**:
+Observe the musical context and let it inform your decisions. Consider that:
 
-• Some genres traditionally center vocals (e.g., singer-songwriter traditions often feature continuous vocal presence)
-• Other genres use vocals as textural elements among many layers (e.g., certain electronic styles)
-• Some styles embrace call-and-response conversational patterns (e.g., gospel traditions, funk grooves)
-• Instrumental-focused genres may use vocals sparingly as dramatic accents
-• Many genres exist on a spectrum and blend conventions
+• Some musical contexts benefit from continuous vocal presence
+• Other contexts use vocals as textural elements among many layers
+• Some contexts embrace call-and-response conversational patterns
+• Instrumental-focused contexts may use vocals sparingly as dramatic accents
+• Musical contexts exist on a spectrum and blend conventions
 
 **CALL-AND-RESPONSE OPPORTUNITIES:**
-• When you notice gaps in the instrumental note patterns (sparse sections with space), consider whether a conversational vocal exchange would fit the style
+• When you notice gaps in the instrumental note patterns (sparse sections with space), consider whether a conversational vocal exchange would serve the music
 • The 'response' role is available for creating vocal answers and dialogues
-• Think about whether the genre/inspiration typically features vocal conversations or layered vocal interactions
+• Consider whether this musical context would benefit from vocal conversations or layered vocal interactions
 
 **CRITICAL PRINCIPLES:**
-1. **Trust your genre knowledge** - you understand musical conventions better than rigid rules
+1. **Trust your musical judgment** - observe what THIS context needs, not rigid templates
 2. **Silence is compositionally valid** - instrumental sections are not "gaps to fill" but intentional choices
-3. **User intent overrides conventions** - if the prompt requests specific vocal density, prioritize that
+3. **User intent is paramount** - if the prompt requests specific vocal density, prioritize that
 4. **Atmospheric roles are artistic tools** - whisper/hum/breaths/vocal_fx serve musical purposes, not as "silence replacements"
 5. **Variety creates interest** - consider dynamic contrast between vocal-dense and vocal-sparse sections
 
 **YOUR CREATIVE FREEDOM:** Use the full spectrum of vocal density as your artistic judgment dictates. There are no "correct" percentages - only authentic choices for this specific musical context.
 
+ROLE DISTRIBUTION GUIDANCE (Context-Aware):
+**PART LENGTH CONSIDERATION**: This song uses {part_length_for_prompt:.0f}-bar parts. Consider:
+- Longer parts (16-32 bars) represent more musical space - consecutive choruses create longer sections
+- Shorter parts (8 bars) represent compact musical units - consecutive choruses accumulate more quickly
+- Think in terms of TOTAL MUSICAL TIME: 32 bars of chorus might feel appropriate in some contexts, excessive in others
+
+**VOCAL PRESENCE SPECTRUM** (observe, don't prescribe):
+- Some musical contexts benefit from continuous vocal presence (70-90% of parts)
+- Other contexts use vocals as selective accents (10-30% of parts)
+- Many contexts fall in between (40-70% of parts)
+- Consider: What does THIS musical context call for? What serves the emotional arc and energy flow?
+
+**CHORUS DISTRIBUTION PRINCIPLES** (musical guidance, not rules):
+1. **Musical Time Awareness**: Consider total chorus duration in bars, not just part count. Longer parts = more musical space per chorus.
+2. **Dynamic Flow**: After extended energetic sections, contrast can create interest. But contrast is not mandatory - trust the musical flow.
+3. **Song Arc**: Early parts often establish, middle parts develop, final parts resolve. But musical intuition overrides structural templates.
+4. **Listener Engagement**: Repetition creates familiarity and emphasis. Variation creates development and surprise. Both serve different purposes.
+
+**MUSICAL PRINCIPLES** (not genre templates):
+- Consider what THIS song needs, not what genre conventions say
+- Some songs benefit from extended chorus sections (24-48 bars), others need more variety
+- Vocal density should serve the musical narrative and emotional arc
+- Structure serves the music, not the other way around
+
+**KEY PRINCIPLE**: Trust your musical judgment. Consider part length, total musical time, and what serves the song's emotional and energetic flow. 
+There are no universal rules - only principles that adapt to each unique musical context.
+
 TASK:
 For each part, assign ONLY a role. No hints, descriptions, or explanations.
 Return as JSON array: [{{"idx": 1, "role": "silence"}}, {{"idx": 2, "role": "verse"}}, ...]
-
-Focus on:
-1. **GENRE-AUTHENTIC VOCAL DENSITY**: Match the conventions of '{genre}' / '{inspiration}'
-2. **CALL-AND-RESPONSE AWARENESS**: Detect instrumental gaps that invite vocal responses
-3. **USER INTENT OVERRIDE**: If user prompt explicitly requests vocal density, prioritize that
-4. **ATMOSPHERIC ROLES**: Use whisper/hum/breaths/vocal_fx for textural accents (not as silence replacements)
-5. **SILENCE IS VALID**: In electronic/ambient/instrumental genres, silence is often the RIGHT choice
 
 Return only the JSON array, no other text."""
 
@@ -3541,7 +3569,7 @@ OUTPUT (JSON):
         print(f"[Phrase Planning Error] Unexpected error: {e}")
         return {}
 
-def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, user_prompt: str | None = None, history_context: str | None = None, theme_len_bars: int | float | None = None, cfg: Dict | None = None, key_scale: str | None = None, part_idx: int = 0, backing_notes: List[Dict] | None = None) -> Dict:
+def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, user_prompt: str | None = None, history_context: str | None = None, theme_len_bars: int | float | None = None, cfg: Dict | None = None, key_scale: str | None = None, part_idx: int = 0, backing_notes: List[Dict] | None = None, plan_items: List[Dict] | None = None) -> Dict:
     try:
         import google.generativeai as genai_local
     except Exception:
@@ -3648,30 +3676,53 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
         # Build role-specific gating block + minimal toolbox
         role_gate_block = []
         if is_chorus:
-            # Determine hook usage based on part position
-            # First 2 chorus parts: introduce hook
-            # Middle chorus parts: vary or omit hook
-            # Final chorus parts: bring back hook
-            total_chorus_so_far = sum(1 for i in range(part_idx) if 'chorus' in str(section_description).lower())
+            # Determine hook usage based on Genre, Part-Length, and Context (NOT rigid rules!)
+            # Count how many chorus roles appeared BEFORE this part
+            total_chorus_so_far = 0
+            total_parts = len(plan_items) if plan_items else 25
+            if plan_items and isinstance(plan_items, list):
+                for i, item in enumerate(plan_items):
+                    if i < part_idx:
+                        item_role = str(item.get('role', '')).lower()
+                        if item_role == 'chorus':
+                            total_chorus_so_far += 1
+            
+            # Calculate total chorus length so far (in bars) for context-aware decisions
+            part_length_bars = float(theme_len_bars) if theme_len_bars else 8.0
+            total_chorus_bars_so_far = total_chorus_so_far * part_length_bars
+            
+            # Context-based hook strategy (not genre-based!)
+            # Consider: song position, hook exposure so far, part length, musical context
             
             if total_chorus_so_far <= 1:
-                # Early chorus - establish hook
-                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (establishing) → Use the exact HOOK as the first line to establish it; keep a few short lines sized to the part; reuse hook across repeats.")
+                # First chorus: Establish hook
+                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (establishing) → Use the HOOK to establish the main theme. You may repeat it 1-2 times within this part.")
                 role_gate_block.append("Keep hook words unbroken; avoid syllable splitting inside hook.")
-            elif part_idx >= 18:  # Final sections (last ~7 parts)
-                # Final chorus - callback to hook
-                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (finale) → Bring back the HOOK for strong closure; you may vary or extend it for climactic effect.")
-                role_gate_block.append("Keep hook words unbroken when using them.")
-            else:
-                # Middle chorus - MANDATORY variation (prevent hook overuse)
-                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (variation) → 🚨 DO NOT use the exact hook line! Instead, choose ONE of these:")
-                role_gate_block.append("  OPTION 1: Create NEW high-energy phrases that fit the theme (explore different angles)")
-                role_gate_block.append("  OPTION 2: Use only KEY FRAGMENTS of the hook (1-2 words max, not the full line)")
-                role_gate_block.append("  OPTION 3: Vary the wording while keeping the core concept (synonym substitution, rephrasing)")
+            elif total_chorus_bars_so_far >= (part_length_bars * 4):  # Already had significant hook exposure (e.g., 32 bars for 8-bar parts)
+                # Significant hook exposure accumulated - consider variation
+                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (variation opportunity) → You've already established the hook. Consider creating VARIATION:")
+                role_gate_block.append("  - OPTION 1: Use hook once, then NEW phrases")
+                role_gate_block.append("  - OPTION 2: Vary hook wording (synonyms, rephrasing, different perspective)")
+                role_gate_block.append("  - OPTION 3: Use hook fragments mixed with new content")
+                role_gate_block.append("  - OPTION 4: Create completely NEW phrases that fit the theme")
                 if hook_text_hint:
-                    role_gate_block.append(f"  Example: If hook is '{hook_text_hint}', use fragments or variations, NOT the full line")
-                role_gate_block.append("🎯 GOAL: Avoid monotony. The hook will return in the finale (part 18+) for maximum impact.")
-                role_gate_block.append("⚠️ FORBIDDEN: Repeating the full hook line in middle sections kills dynamic contrast!")
+                    role_gate_block.append(f"  - If hook is '{hook_text_hint}', you might use fragments or create variations")
+                role_gate_block.append("💡 PRINCIPLE: Variation maintains listener interest. But if the hook still serves the musical moment, you may use it.")
+            elif part_idx >= int(total_parts * 0.8):  # Final section of song
+                # Finale: Hook can return for closure
+                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (finale) → You MAY bring back the HOOK for closure, or continue with variations. Follow what serves the musical resolution.")
+                role_gate_block.append("If using hook, keep words unbroken when possible.")
+            else:
+                # Middle section: Flexible approach
+                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (middle section) → Hook usage is COMPLETELY OPTIONAL here:")
+                role_gate_block.append("  - You may use hook 0-1 times, or omit it entirely")
+                role_gate_block.append("  - You may create NEW phrases that explore different angles of the theme")
+                role_gate_block.append("  - You may use hook fragments or variations")
+                role_gate_block.append("  - You may mix hook with completely new content")
+                if hook_text_hint:
+                    role_gate_block.append(f"  - If hook is '{hook_text_hint}', use it sparingly or create variations, or omit it")
+                role_gate_block.append("🎯 PRINCIPLE: Hook is a creative TOOL. Use it when it serves the music and maintains interest. Omit it when new content serves better.")
+                role_gate_block.append("💡 Consider: What does THIS moment need? Repetition for emphasis, or variation for development?")
         elif is_prechorus:
             role_gate_block.append("ROLE-SPECIFIC: Pre-chorus → tighten phrasing; raise tension; hint hook without stating it; end with lift.")
         elif is_verse:
@@ -3890,6 +3941,13 @@ PHRASING GUIDANCE:
 - **Space/Gaps:** {len(gaps)} gaps detected, largest {max_gap:.1f} beats
 - **Musical Feel:** {'Energetic and driving' if density > 2 and avg_duration < 1.5 else 'Sparse and contemplative' if density < 0.5 else 'Flowing and melodic' if avg_duration > 2.5 else 'Balanced and moderate'}
 
+🚨 **CRITICAL: BACKING DENSITY → VOCAL SPARSITY** 🚨
+**This section has {total_notes} backing notes ({density:.2f} notes/beat).**
+- **Many backing notes ({total_notes}+) = LESS vocals needed** - the music is already dense and full
+- **Sparse backing ({total_notes} < 20) = MORE vocal space available** - you can fill more if appropriate
+- **Dense backing ({density:.2f} > 2.0 notes/beat) = Use SPARSE vocals** - let the instrumental shine
+- **Gaps detected ({len(gaps)} gaps) = Opportunities for selective vocal placement** - not mandates to fill
+
 **VOCAL APPROACH OPTIONS based on actual backing music:**
 
 **Backing Character:** {'Dense, fast-paced' if density > 2 else 'Sparse, spacious' if density < 0.5 else 'Moderate'} ({density:.2f} notes/beat)
@@ -4042,10 +4100,24 @@ Let genre, emotion, lyrics, and your artistic vision guide you - not prescriptiv
             + "  → Vocals as rare, impactful moments\n"
             + "  → Extended silences between vocal events (8+ beats)\n"
             + "  → Focus on 2-3 key moments per part, not filling every bar\n\n"
-            + "🚨 **DEFAULT ASSUMPTION:** Unless the genre/inspiration explicitly requires continuous singing,\n"
-            + "prefer **meaningful points** over **monologue-style** continuous filling.\n\n"
-            + "  → Words become sonic events rather than continuous narrative\n"
-            + "  → Space is an intentional compositional choice\n\n"
+            + "🚨 **CRITICAL PRINCIPLE: SPARSITY FIRST** 🚨\n"
+            + "**DEFAULT ASSUMPTION:** Unless the genre/inspiration explicitly REQUIRES continuous singing,\n"
+            + "**ALWAYS prefer SELECTIVE MOMENTS over continuous filling.**\n\n"
+            + "**\"LESS IS MORE\" APPROACH:**\n"
+            + "  → **FEWER words create MORE impact** - choose quality over quantity\n"
+            + "  → **Space is intentional** - instrumental elements need room to breathe\n"
+            + "  → **Words become sonic events** - each phrase should feel meaningful and deliberate\n"
+            + "  → **Avoid filler** - if a phrase doesn't add musical value, omit it\n"
+            + "  → **Let backing tracks shine** - dense instrumental sections benefit from sparse vocals\n\n"
+            + "**CONCRETE EXAMPLES OF SPARSITY:**\n"
+            + "  → Instead of 40 words: Use 8-12 powerful words placed at key moments\n"
+            + "  → Instead of filling every bar: Use 2-3 impactful phrases with 4-8 beat gaps\n"
+            + "  → Instead of continuous narrative: Use single words or short phrases as accents\n"
+            + "  → Instead of repeating everything: Use silence and space for contrast\n\n"
+            + "**WHEN TO FILL MORE:**\n"
+            + "  → Only if genre conventions EXPLICITLY demand it (e.g., dense rap flows, Broadway-style continuous singing)\n"
+            + "  → Only if the musical moment TRULY calls for vocal density (e.g., climactic chorus sections)\n"
+            + "  → Otherwise: **DEFAULT TO SPARSITY**\n\n"
             + "• Call-and-response traditions (gospel/blues/funk/afrobeat) create **vocal conversations**\n"
             + "  → Short phrases with space for answers\n"
             + "  → Rhythmic interplay between 'call' and 'response'\n\n"
@@ -4859,22 +4931,38 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         prompt += "  • **Human Feel**: Add subtle rhythmic variation to avoid robotic precision\n\n"
         prompt += f"**RESTS, GAPS & PHRASE SPACING (Genre-Aware Composition):**\n"
         prompt += f"**Use your understanding of '{genre}' and '{inspiration}' to guide your use of silence and space.**\n\n"
-        prompt += "🎯 **CRITICAL: Avoid monologue-style continuous singing unless the genre demands it!**\n\n"
+        prompt += "🚨 **CRITICAL PRINCIPLE: SPARSITY FIRST - LESS IS MORE** 🚨\n"
+        prompt += "**DEFAULT ASSUMPTION:** Unless genre EXPLICITLY REQUIRES continuous singing,\n"
+        prompt += "**ALWAYS prefer SELECTIVE MOMENTS over continuous monologue filling.**\n\n"
+        prompt += "**\"LESS IS MORE\" COMPOSITIONAL APPROACH:**\n"
+        prompt += "  → **FEWER notes create MORE impact** - choose impactful placement over quantity\n"
+        prompt += "  → **Space is intentional** - gaps allow backing tracks to breathe and create contrast\n"
+        prompt += "  → **Avoid filler notes** - if a note doesn't add musical value, use a rest instead\n"
+        prompt += "  → **Let backing tracks shine** - dense instrumental sections benefit from sparse vocals\n"
+        prompt += "  → **Quality over quantity** - 8-12 well-placed notes > 40+ continuous notes\n\n"
+        prompt += "**CONCRETE EXAMPLES:**\n"
+        prompt += "  → Instead of 40 notes filling 0.0→32.0: Use 8-12 notes at key moments (0.0→2.0, 8.0→10.0, 16.0→18.0, 24.0→26.0)\n"
+        prompt += "  → Instead of continuous phrases: Use single words or short phrases (2-4 beats) with 4-8 beat gaps\n"
+        prompt += "  → Instead of filling every bar: Use 2-3 impactful moments per 32-beat part\n"
+        prompt += "  → Instead of avoiding rests: EMBRACE rests - they create musical punctuation and breathing room\n\n"
         prompt += "**Compositional approaches by genre:**\n\n"
-        prompt += "• **CONTINUOUS SINGING** (pop/R&B/musical theater)\n"
+        prompt += "• **CONTINUOUS SINGING** (pop/R&B/musical theater) - ONLY IF EXPLICITLY REQUIRED\n"
         prompt += "  → Fill most of the part with notes\n"
-        prompt += "  → Example: notes throughout 0.0→32.0 beats with minimal gaps\n\n"
-        prompt += "• **CALL-AND-RESPONSE** (rock/indie/jazz/funk) 🔥 COMMON DEFAULT\n"
+        prompt += "  → Example: notes throughout 0.0→32.0 beats with minimal gaps\n"
+        prompt += "  → **USE SPARINGLY** - most genres don't require this\n\n"
+        prompt += "• **CALL-AND-RESPONSE** (rock/indie/jazz/funk) 🔥 **PREFERRED DEFAULT**\n"
         prompt += "  → Vocals on MEANINGFUL POINTS (downbeats, hooks, accents)\n"
         prompt += "  → Example: note@0.0→2.0 (phrase), GAP 4 beats, note@6.0→8.0 (response), GAP 4 beats, etc.\n"
         prompt += "  → Create conversational dynamic with instrumental elements\n"
-        prompt += "  → Focus on 3-5 key moments per 32-beat part, NOT filling every bar\n\n"
-        prompt += "• **SPARSE/TEXTURAL** (electronic/ambient/experimental)\n"
+        prompt += "  → Focus on 3-5 key moments per 32-beat part, NOT filling every bar\n"
+        prompt += "  → **THIS IS THE DEFAULT APPROACH** unless genre explicitly requires continuous singing\n\n"
+        prompt += "• **SPARSE/TEXTURAL** (electronic/ambient/experimental) 🔥 **ALSO PREFERRED**\n"
         prompt += "  → Vocals as rare, impactful sonic events\n"
         prompt += "  → Example: note@0.0→1.5, GAP 8+ beats, note@12.0→13.0, GAP 8+ beats\n"
-        prompt += "  → Only 1-3 vocal moments per part\n\n"
-        prompt += "🚨 **DEFAULT ASSUMPTION:** Unless genre explicitly requires continuous singing,\n"
-        prompt += "prefer **selective meaningful points** over **continuous monologue filling**.\n\n"
+        prompt += "  → Only 1-3 vocal moments per part\n"
+        prompt += "  → **THIS APPROACH WORKS FOR MANY GENRES** - don't underestimate the power of silence\n\n"
+        prompt += "🚨 **REMEMBER:** Unless the genre/inspiration EXPLICITLY requires continuous singing,\n"
+        prompt += "**DEFAULT TO SPARSITY** - fewer notes placed at meaningful moments create more impact.\n\n"
         prompt += "  → Natural phrase breaks allow instrumental commentary\n"
         prompt += "  → Example: note@0.0→3.5, phrase break, note@5.0→8.0\n\n"
         prompt += "• **Continuous vocal lines** (typical in some pop/R&B/rap contexts)\n"
@@ -5070,12 +5158,17 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
         prompt += ("MOTIF & SIMPLICITY (soft):\n- Build a compact motif and reuse with minimal change per repeat (size it to the part).\n- Limit pitch set; use longer sustains where possible.\n- Align main syllables to clear accents; avoid filler between accent peaks.\n\n")
         prompt += ("DROP ONSET PREFERENCE (soft):\n- For DROP-like sections, keep onset density moderate relative to texture and tempo; brief peaks are fine if musically justified.\n- Prefer turning minor notes into '-' sustains on open vowels rather than adding new onsets when texture feels crowded.\n\n" if is_drop else "")
         prompt += "ANTI-LOOP CONTROL (soft):\n- Avoid three identical bars in a row; prefer subtle micro-variation across repeats.\n\n"
-        prompt += "HOOK USAGE (hard for CHORUS/DROP):\n"
-        prompt += "- Use hook_canonical verbatim at least once per chorus/drop occurrence (place where it best serves form and length).\n"
-        prompt += "- Map ONE note per hook word in order; do NOT split a hook word across multiple tokens/notes.\n"
+        prompt += "HOOK USAGE (contextual guidance):\n"
+        prompt += "- Hook is AVAILABLE but NOT MANDATORY. Use it when it serves the music, omit when it doesn't.\n"
+        prompt += "- Consider context: How much hook exposure has occurred so far? Does repetition serve or hinder this moment?\n"
+        prompt += "- Repetition creates emphasis and familiarity. Variation creates development and surprise. Both have value.\n"
+        prompt += "- Some musical contexts benefit from sparse hook usage (fragments, occasional appearance).\n"
+        prompt += "- Other contexts benefit from more hook presence (with variation to maintain interest).\n"
+        prompt += "- When using hook: Map ONE note per hook word in order; do NOT split a hook word across multiple tokens/notes.\n"
         prompt += "- Keep hook words unbroken; prefer whole words over syllable splits.\n"
         prompt += "- Keep hook tokens contiguous (no rests inside); prefer sustaining with '-' rather than inserting short notes.\n"
-        prompt += "- Outside CHORUS/DROP: avoid exact hook; hint with synonyms/metaphor if needed.\n\n"
+        prompt += "- **CREATIVE FREEDOM**: Hook is a creative TOOL. Use it when it enhances the music, omit when new content serves better.\n"
+        prompt += "- Trust your musical judgment: What does THIS moment need?\n\n"
         prompt += "DENSITY-AWARE MAPPING (recommendations):\n- If onset rate feels low: increase melisma; hold open vowels with '-' on weak beats; avoid creating micro rests.\n- If onset rate feels moderate/high: prefer one syllable per note; avoid over-fragmenting short words.\n- Inside a word: do not create gaps; continuation notes must start exactly at previous end.\n- Minimum content duration: avoid launching new content on notes shorter than ≈1/8 beat; prefer '-' sustains.\n\n"
         prompt += "SMOOTHING & LEGATO (recommendations):\n- Avoid very short notelets unless they land on a clear accent; otherwise merge into adjacent durations.\n- Prefer legato within words: extend previous duration instead of inserting micro-gaps/rests.\n- Use inter-word gaps only when musically justified; otherwise smooth by sustain.\n- Long vowels (a/ah/o) should carry sustained notes; consonant clusters avoid fragmentation.\n\n"
         prompt += "MICRO-NOTE HANDLING (context-sensitive):\n- **GENERAL RULE**: Prefer longer notes (0.5+ beats) for clear lyrical delivery\n- **EXCEPTION for PITCH ARTICULATION**: Rapid note sequences (0.1-0.3 beats) are PERFECT for expressive pitch runs on syllables (e.g., 'wa' → 3 notes ascending for smooth pitch articulation)\n- **EXCEPTION for VOCAL RUNS**: Short note sequences allowed for melismatic runs, trills, or ornamental passages\n- For short consecutive notes on the same pitch: map them under a single token; fill intervening notes with '-'.\n- When density feels high, lower onset count by sustaining open vowels rather than adding tokens.\n\n"
@@ -6100,6 +6193,7 @@ def _export_openutau_ust_corrected(themes: List[Dict], track_index: int, syllabl
                                 else:
                                     note_blocks.append({"Lyric": '-', "NoteNum": pitch, "Length": max(1, length_ticks)})
                         prev_was_content = False
+                        # Update timing and continue (melisma handled)
                         current_beat = start_beat + duration_beats
                         timing_debug["total_notes"] += 1
                         timing_debug["total_beats"] = max(timing_debug["total_beats"], current_beat)
@@ -12852,7 +12946,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         # Step 0a: Prompt Analysis (already done above)
                         # Step 0b: Plan vocal roles WITH BACKING NOTES
                         print(Style.DIM + "[Step 0b] Planning vocal roles with full musical context..." + Style.RESET_ALL)
-                        roles = _plan_vocal_roles(config, genre, inspiration, bpm, ts, summaries, ANALYSIS_CTX, user_guidance, cfg, backing_notes_per_part=backing_notes_per_part)
+                        roles = _plan_vocal_roles(config, genre, inspiration, bpm, ts, summaries, ANALYSIS_CTX, user_guidance, cfg, backing_notes_per_part=backing_notes_per_part, theme_len_bars=theme_len_bars)
                         
                         # Step 0c: Generate hints with consistency validation
                         print(Style.DIM + "[Step 0c] Generating hints with consistency validation..." + Style.RESET_ALL)
@@ -13398,7 +13492,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     cfg or config, genre, inspiration, 'Vocal', bpm, ts,
                                     section_label=label, section_description=desc_part,
                                     context_tracks_basic=seed_context_basic, user_prompt=user_guidance,
-                                    history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, part_idx=part_idx
+                                    history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, part_idx=part_idx,
+                                    plan_items=plan_items
                                 )
                             except Exception as e:
                                 # If Step-1 fails, accept silence for this part
@@ -13417,7 +13512,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                         cfg or config, genre, inspiration, 'Vocal', bpm, ts,
                                         section_label=label, section_description=desc_part,
                                         context_tracks_basic=seed_context_basic, user_prompt=user_guidance,
-                                        history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, part_idx=part_idx
+                                        history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, part_idx=part_idx,
+                                        plan_items=plan_items
                                     )
                                     
                                     preview = stage1.get('preview', '')
@@ -13563,7 +13659,8 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                             cfg, genre, inspiration, 'Vocal', bpm, ts,
                                             section_label=label, section_description=desc_part,
                                             context_tracks_basic=seed_context_basic, user_prompt="Generate meaningful lyrics",
-                                            history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, key_scale=key_scale, part_idx=part_idx
+                                            history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, key_scale=key_scale, part_idx=part_idx,
+                                            plan_items=plan_items
                                         )
                                         words = retry_result.get('words', [])
                                         syllables = retry_result.get('syllables', [])
@@ -13681,7 +13778,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                             section_label=label, section_description=desc_part,
                                             context_tracks_basic=seed_context_basic, user_prompt=user_guidance,
                                             history_context=history_text_seed, theme_len_bars=theme_len_bars, cfg=cfg, part_idx=part_idx,
-                                            backing_notes=part_backing_notes
+                                            backing_notes=part_backing_notes, plan_items=plan_items
                                         )
                                         words = lyrics_result.get('words', [])
                                         syllables = lyrics_result.get('syllables', [])
