@@ -9213,40 +9213,45 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
 
                 # 3. Parse the JSON response
                 # The model should return a JSON object with a "notes" key and an optional "sustain_pedal" key
-                json_payload = _extract_json_object(response_text)
+                try:
+                    json_payload = _extract_json_object(response_text)
+                except Exception as json_extract_error:
+                    json_failure_count += 1
+                    json_payload = None
+                
                 if not json_payload:
                     json_failure_count += 1
                     print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: Could not extract JSON object for {instrument_name}." + Style.RESET_ALL)
                     failure_for_escalation_count += 1
                     _escalate_if_needed()
-                    # Offer one-time model switch for this track after repeated JSON failures
-                    if json_failure_count == 2:
-                        try:
-                            print(Fore.CYAN + "\nModel appears to struggle with strict JSON. Switch model for THIS track only?" + Style.RESET_ALL)
-                            try:
-                                cfg_model_name = str(config.get("model_name", "gemini-2.5-pro"))
-                                alt_model_name = "gemini-2.5-flash" if cfg_model_name != "gemini-2.5-flash" else config.get("model_name", "gemini-2.5-pro")
-                                print(f"  1) {cfg_model_name}\n  2) {alt_model_name}\n  3) custom\n  4) keep current")
-                            except Exception:
-                                print("  1) gemini-2.5-pro\n  2) gemini-2.5-flash\n  3) custom\n  4) keep current")
-                            sel = input(Fore.GREEN + "> " + Style.RESET_ALL).strip()
-                            if sel == '1':
-                                local_model_name = config.get("model_name", "gemini-2.5-pro")
-                                attempt_count = 0
-                                continue
-                            elif sel == '2':
-                                alt_model_name = "gemini-2.5-flash" if str(config.get("model_name", "gemini-2.5-pro")) != "gemini-2.5-flash" else config.get("model_name", "gemini-2.5-pro")
-                                local_model_name = alt_model_name
-                                attempt_count = 0
-                                continue
-                            elif sel == '3':
-                                custom = input(Fore.GREEN + "Enter model name: " + Style.RESET_ALL).strip()
-                                if custom:
-                                    local_model_name = custom
-                                    attempt_count = 0
-                                    continue
-                        except Exception:
-                            pass
+                    # Note: Model switch prompt disabled in automatic mode to prevent blocking
+                    # if json_failure_count == 2:
+                    #     try:
+                    #         print(Fore.CYAN + "\nModel appears to struggle with strict JSON. Switch model for THIS track only?" + Style.RESET_ALL)
+                    #         try:
+                    #             cfg_model_name = str(config.get("model_name", "gemini-2.5-pro"))
+                    #             alt_model_name = "gemini-2.5-flash" if cfg_model_name != "gemini-2.5-flash" else config.get("model_name", "gemini-2.5-pro")
+                    #             print(f"  1) {cfg_model_name}\n  2) {alt_model_name}\n  3) custom\n  4) keep current")
+                    #         except Exception:
+                    #             print("  1) gemini-2.5-pro\n  2) gemini-2.5-flash\n  3) custom\n  4) keep current")
+                    #         sel = input(Fore.GREEN + "> " + Style.RESET_ALL).strip()
+                    #         if sel == '1':
+                    #             local_model_name = config.get("model_name", "gemini-2.5-pro")
+                    #             attempt_count = 0
+                    #             continue
+                    #         elif sel == '2':
+                    #             alt_model_name = "gemini-2.5-flash" if str(config.get("model_name", "gemini-2.5-pro")) != "gemini-2.5-flash" else config.get("model_name", "gemini-2.5-pro")
+                    #             local_model_name = alt_model_name
+                    #             attempt_count = 0
+                    #             continue
+                    #         elif sel == '3':
+                    #             custom = input(Fore.GREEN + "Enter model name: " + Style.RESET_ALL).strip()
+                    #             if custom:
+                    #                 local_model_name = custom
+                    #                 attempt_count = 0
+                    #                 continue
+                    #     except Exception:
+                    #         pass
                     # Counts as content-related error
                     attempt_count += 1
                     base = 3
@@ -9307,23 +9312,23 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     if len(validated_notes) != len(notes_list):
                         invalid_count = len(notes_list) - len(validated_notes)
                         print(Fore.YELLOW + f"Warning: Skipped {invalid_count} invalid note objects" + Style.RESET_ALL)
-                        
-                        # --- Sustain Validation ---
-                        validated_sustain = []
-                        for event in sustain_events:
-                            if not all(k in event for k in ["beat", "action"]):
-                                print(Fore.YELLOW + f"Warning: Skipping invalid sustain event: {event}" + Style.RESET_ALL)
-                                continue
-                            validated_sustain.append(event)
+                    
+                    # --- Sustain Validation ---
+                    validated_sustain = []
+                    for event in sustain_events:
+                        if not all(k in event for k in ["beat", "action"]):
+                            print(Fore.YELLOW + f"Warning: Skipping invalid sustain event: {event}" + Style.RESET_ALL)
+                            continue
+                        validated_sustain.append(event)
 
-                        print(Fore.GREEN + f"Successfully generated part for {instrument_name}." + Style.RESET_ALL)
-                        return ({
-                            "instrument_name": instrument_name,
-                            "program_num": program_num,
-                            "role": role,
-                            "notes": validated_notes,
-                            "sustain_pedal": validated_sustain
-                        }, total_token_count)
+                    print(Fore.GREEN + f"Successfully generated part for {instrument_name}." + Style.RESET_ALL)
+                    return ({
+                        "instrument_name": instrument_name,
+                        "program_num": program_num,
+                        "role": role,
+                        "notes": validated_notes,
+                        "sustain_pedal": validated_sustain
+                    }, total_token_count)
 
                 except (json.JSONDecodeError, TypeError) as e:
                     print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: Data validation failed for {instrument_name}. Reason: {str(e)}" + Style.RESET_ALL)
@@ -9331,6 +9336,19 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     if "response_text" in locals():
                         print(Fore.YELLOW + "Model response was:\n" + response_text + Style.RESET_ALL)
                     # Counts as content-related error
+                    json_failure_count += 1
+                    failure_for_escalation_count += 1
+                    _escalate_if_needed()
+                    attempt_count += 1
+                    base = 3
+                    wait_time = base * (2 ** max(0, attempt_count - 1))
+                    jitter = random.uniform(0, 1.5)
+                    wait_time = min(30, wait_time + jitter)
+                    print(Fore.YELLOW + f"Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
+                    _wait_with_optional_switch(wait_time)
+                    continue
+                except Exception as inner_e:
+                    # Catch-all for any other exceptions in the try block
                     json_failure_count += 1
                     failure_for_escalation_count += 1
                     _escalate_if_needed()
