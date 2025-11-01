@@ -3713,16 +3713,20 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
                 role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (finale) → You MAY bring back the HOOK for closure, or continue with variations. Follow what serves the musical resolution.")
                 role_gate_block.append("If using hook, keep words unbroken when possible.")
             else:
-                # Middle section: Flexible approach
-                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (middle section) → Hook usage is COMPLETELY OPTIONAL here:")
-                role_gate_block.append("  - You may use hook 0-1 times, or omit it entirely")
-                role_gate_block.append("  - You may create NEW phrases that explore different angles of the theme")
-                role_gate_block.append("  - You may use hook fragments or variations")
-                role_gate_block.append("  - You may mix hook with completely new content")
+                # Middle section: STRICT variation required
+                role_gate_block.append("ROLE-SPECIFIC: Chorus/Drop (middle section) → 🚨 DO NOT use the exact hook line!")
+                role_gate_block.append("  - OPTION 1: Create completely NEW phrases that fit the theme (PREFERRED)")
+                role_gate_block.append("  - OPTION 2: Use hook fragments (1-2 words max, not the full line)")
+                role_gate_block.append("  - OPTION 3: Vary hook wording (synonyms, rephrasing, different perspective)")
+                role_gate_block.append("  - OPTION 4: Omit hook entirely and use new content")
                 if hook_text_hint:
-                    role_gate_block.append(f"  - If hook is '{hook_text_hint}', use it sparingly or create variations, or omit it")
-                role_gate_block.append("🎯 PRINCIPLE: Hook is a creative TOOL. Use it when it serves the music and maintains interest. Omit it when new content serves better.")
-                role_gate_block.append("💡 Consider: What does THIS moment need? Repetition for emphasis, or variation for development?")
+                    role_gate_block.append(f"  - Example: If hook is '{hook_text_hint}', use fragments like 'Breaking' or 'reality' separately, or create variations like 'The news broke' or 'Reality's gone'")
+                if hook_text_hint:
+                    role_gate_block.append(f"🚨 FORBIDDEN: Repeating the full hook line '{hook_text_hint}' kills dynamic contrast!")
+                else:
+                    role_gate_block.append("🚨 FORBIDDEN: Repeating the full hook line kills dynamic contrast!")
+                role_gate_block.append("🎯 PRINCIPLE: Middle sections need VARIATION. The hook will return in the finale (part 20+) for maximum impact.")
+                role_gate_block.append("💡 CREATIVE CHALLENGE: Can you express the same theme WITHOUT using the exact hook? YES - do it!")
         elif is_prechorus:
             role_gate_block.append("ROLE-SPECIFIC: Pre-chorus → tighten phrasing; raise tension; hint hook without stating it; end with lift.")
         elif is_verse:
@@ -3943,10 +3947,22 @@ PHRASING GUIDANCE:
 
 🚨 **CRITICAL: BACKING DENSITY → VOCAL SPARSITY** 🚨
 **This section has {total_notes} backing notes ({density:.2f} notes/beat).**
-- **Many backing notes ({total_notes}+) = LESS vocals needed** - the music is already dense and full
-- **Sparse backing ({total_notes} < 20) = MORE vocal space available** - you can fill more if appropriate
-- **Dense backing ({density:.2f} > 2.0 notes/beat) = Use SPARSE vocals** - let the instrumental shine
-- **Gaps detected ({len(gaps)} gaps) = Opportunities for selective vocal placement** - not mandates to fill
+
+**CONCRETE WORD LIMITS (MANDATORY):**
+- **Very dense backing ({total_notes} >= 400) → MAX 15-20 words** - the music is already full, vocals are accents
+- **Dense backing ({total_notes} >= 300) → MAX 20-25 words** - let the instrumental shine, use selective moments
+- **Moderate backing ({total_notes} >= 200) → MAX 25-30 words** - balanced approach, avoid filling
+- **Light backing ({total_notes} >= 100) → MAX 30-35 words** - more space available, but still selective
+- **Sparse backing ({total_notes} < 100) → MAX 35-40 words** - most space, but prefer quality over quantity
+
+**DENSITY-BASED GUIDANCE:**
+- **Dense backing ({density:.2f} > 2.0 notes/beat) = MAX 20 words** - let the instrumental breathe
+- **Moderate backing ({density:.2f} 1.0-2.0) = MAX 25-30 words** - balanced approach
+- **Sparse backing ({density:.2f} < 1.0) = MAX 30-35 words** - more vocal space available
+
+**Gaps detected ({len(gaps)} gaps) = Opportunities for selective vocal placement** - not mandates to fill every gap
+
+**🎯 REMEMBER: These are MAXIMUM limits. LESS is BETTER. Prefer 8-12 words for dense sections, 15-20 for moderate sections.**
 
 **VOCAL APPROACH OPTIONS based on actual backing music:**
 
@@ -4109,6 +4125,12 @@ Let genre, emotion, lyrics, and your artistic vision guide you - not prescriptiv
             + "  → **Words become sonic events** - each phrase should feel meaningful and deliberate\n"
             + "  → **Avoid filler** - if a phrase doesn't add musical value, omit it\n"
             + "  → **Let backing tracks shine** - dense instrumental sections benefit from sparse vocals\n\n"
+            + "**CONCRETE WORD LIMITS (32-beat parts):**\n"
+            + "  → **Dense instrumental sections (300+ backing notes): MAX 15-20 words** - vocals are accents, not narrative\n"
+            + "  → **Moderate sections (200-300 backing notes): MAX 20-25 words** - selective moments, not continuous\n"
+            + "  → **Light sections (100-200 backing notes): MAX 25-30 words** - balanced approach, avoid overfilling\n"
+            + "  → **Sparse sections (<100 backing notes): MAX 30-35 words** - more space, but still prefer quality\n"
+            + "  → **🎯 TARGET: For most sections, aim for 8-15 words. Only exceed 20 words if the moment TRULY demands it.**\n\n"
             + "**CONCRETE EXAMPLES OF SPARSITY:**\n"
             + "  → Instead of 40 words: Use 8-12 powerful words placed at key moments\n"
             + "  → Instead of filling every bar: Use 2-3 impactful phrases with 4-8 beat gaps\n"
@@ -4117,7 +4139,8 @@ Let genre, emotion, lyrics, and your artistic vision guide you - not prescriptiv
             + "**WHEN TO FILL MORE:**\n"
             + "  → Only if genre conventions EXPLICITLY demand it (e.g., dense rap flows, Broadway-style continuous singing)\n"
             + "  → Only if the musical moment TRULY calls for vocal density (e.g., climactic chorus sections)\n"
-            + "  → Otherwise: **DEFAULT TO SPARSITY**\n\n"
+            + "  → **EVEN THEN: Respect the MAX limits above. Dense rap might mean 30 words, not 50.**\n"
+            + "  → Otherwise: **DEFAULT TO SPARSITY** - 8-15 words is usually perfect\n\n"
             + "• Call-and-response traditions (gospel/blues/funk/afrobeat) create **vocal conversations**\n"
             + "  → Short phrases with space for answers\n"
             + "  → Rhythmic interplay between 'call' and 'response'\n\n"
@@ -4253,6 +4276,60 @@ Let genre, emotion, lyrics, and your artistic vision guide you - not prescriptiv
             except Exception:
                 rl_fix = ''
             words_list = obj.get('words') if isinstance(obj.get('words'), list) else []
+            
+            # VALIDATION: Check word count against backing density (SPARSITY ENFORCEMENT)
+            if words_list and backing_notes and isinstance(backing_notes, list) and len(backing_notes) > 0:
+                try:
+                    total_backing = len(backing_notes)
+                    word_count = len(words_list)
+                    
+                    # Define max word limits based on backing density
+                    if total_backing >= 400:
+                        max_words = 20
+                    elif total_backing >= 300:
+                        max_words = 25
+                    elif total_backing >= 200:
+                        max_words = 30
+                    elif total_backing >= 100:
+                        max_words = 35
+                    else:
+                        max_words = 40
+                    
+                    # Retry loop: enforce limits strictly
+                    retry_count = 0
+                    max_retries = 3
+                    while word_count > max_words and retry_count < max_retries:
+                        retry_count += 1
+                        try:
+                            print(Fore.YELLOW + f"[Lyrics] REJECTED (attempt {retry_count}/{max_retries}): {word_count} words for {total_backing} backing notes (max {max_words}) - requesting sparser version" + Style.RESET_ALL)
+                        except Exception:
+                            pass
+                        # Request retry with sparsity emphasis
+                        retry_prompt = prompt + f"\n\n🚨 **VALIDATION FAILED (ATTEMPT {retry_count}):** You generated {word_count} words, but this section has {total_backing} backing notes. Maximum allowed: {max_words} words. Please regenerate with FEWER words - aim for 8-{max_words} words maximum. This is MANDATORY - reduce word count NOW.\n"
+                        retry_obj = _call_with_rotation_free(retry_prompt)
+                        if isinstance(retry_obj, dict):
+                            retry_words = retry_obj.get('words') if isinstance(retry_obj.get('words'), list) else []
+                            if retry_words and len(retry_words) <= max_words:
+                                obj = retry_obj
+                                words_list = retry_words
+                                word_count = len(retry_words)
+                                try:
+                                    print(Fore.GREEN + f"[Lyrics] ACCEPTED after retry: {word_count} words (was {len(obj.get('words', []))})" + Style.RESET_ALL)
+                                except Exception:
+                                    pass
+                                break
+                            elif retry_words:
+                                words_list = retry_words
+                                word_count = len(retry_words)
+                                # Continue retry loop
+                        else:
+                            break  # Stop retrying if API call fails
+                except Exception as e:
+                    # Log error but don't fail completely
+                    try:
+                        print(Fore.RED + f"[Lyrics] Validation error: {str(e)[:100]}" + Style.RESET_ALL)
+                    except Exception:
+                        pass
             if (rl_fix in ('outro','vowels','silence','breaths')) and (not words_list or len(words_list) == 0):
                 # Allow empty words for these roles and mark intentional non-lexical/silence
                 try:
@@ -9049,6 +9126,10 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                         print(Fore.YELLOW + "Not counting this attempt due to MAX_TOKENS. Retrying..." + Style.RESET_ALL)
                         failure_for_escalation_count += 1
                         _escalate_if_needed()
+                        # Safety guard: If MAX_TOKENS happens repeatedly without progress, increment attempt_count to prevent infinite loop
+                        if (('flash' in (local_model_name or '')) and max_tokens_fail_flash >= 3) or (('pro' in (local_model_name or '')) and max_tokens_fail_pro >= 3):
+                            print(Fore.YELLOW + f"MAX_TOKENS occurred {max_tokens_fail_flash if 'flash' in (local_model_name or '') else max_tokens_fail_pro} times. Incrementing attempt count to prevent infinite loop." + Style.RESET_ALL)
+                            attempt_count += 1
                         # After two MAX_TOKENS, reduce historical context by half and retry
                         try:
                             if (('flash' in (local_model_name or '')) and max_tokens_fail_flash >= 2) or (('pro' in (local_model_name or '')) and max_tokens_fail_pro >= 2):
