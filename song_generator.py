@@ -1396,8 +1396,8 @@ OUTPUT JSON (strict):
                                                 parts_local = [p for p in parts_local if not p.lower().startswith('token_policy=')]
                                                 parts_local.append(f'token_policy={pol}')
                                                 return '; '.join(parts_local)
-                                            if role in ('whisper','spoken','phrase_spot','chorus','prechorus','verse','bridge','intro','outro','backing','harmony','doubles','response','rap','chant','tag'):
-                                                # lexical-required roles
+                                            if role in ('whisper','spoken','phrase_spot','chorus','prechorus','verse','bridge','intro','outro','backing','harmony','doubles','response','rap','chant','tag','hum','adlib','choir'):
+                                                # lexical-required roles (inkl. hum für echte Wörter statt nur Vokal-Platzhalter)
                                                 hint = _enforce_token_policy(hint, 'lexical')
                                             elif role in ('vocal_fx','vocoder','talkbox','scat','vowels'):
                                                 # vowel-based textures
@@ -2350,7 +2350,7 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
     
     return mapped
 
-def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, notes: List[Dict], section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, user_prompt: str | None = None, history_context: str | None = None, cfg: Dict | None = None) -> List[str]:
+def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str, track_name: str, bpm: int | float, ts: Dict, notes: List[Dict], section_label: str | None = None, section_description: str | None = None, context_tracks_basic: List[Dict] | None = None, user_prompt: str | None = None, history_context: str | None = None, cfg: Dict | None = None, plan_items: List[Dict] | None = None, part_idx: int = 0) -> List[str]:
     """
     Word-first lyric generation with melisma spans.
     Returns a per-note token list equal to len(notes): first note of a word gets the word; continuation notes get '-'.
@@ -2587,6 +2587,24 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
                     section_role = plan_role
     except Exception:
         pass
+    
+    # Genre-specific lyric style (Dance/4x4/Electronic etc.)
+    try:
+        genre_lc = str(genre or "").lower()
+        insp_lc = str(inspiration or "").lower()
+    except Exception:
+        genre_lc, insp_lc = "", ""
+    is_dance_4x4 = any(k in genre_lc or k in insp_lc for k in (
+        "psytrance", "psy", "trance", "goa", "progressive trance", "uplifting trance",
+        "house", "deep house", "tech house", "progressive house", "electro house",
+        "techno", "minimal techno", "acid techno",
+        "edm", "dance", "electronic dance",
+        "drum and bass", "dnb", "jungle",
+        "dubstep", "brostep",
+        "hardstyle", "hardcore",
+        "electro", "breaks", "breakbeat",
+        "uk garage", "garage"
+    ))
     # Log effective preferences after auto-derivation
     try:
         print(Fore.CYAN + Style.BRIGHT + "[Lyrics:Prefs] " + Style.NORMAL + Fore.WHITE + f"wpb={target_wpb}, melisma_bias={melisma_bias}, min_word_beats={min_word_beats}, nonsense={'on' if allow_nonsense else 'off'}" + Style.RESET_ALL)
@@ -2648,10 +2666,87 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
             "- For chorus/hook, craft a 3–5 word mantra/title-drop and repeat it 2–3× with micro-variation across lines.\n\n"
         ) if is_chorus else ""
 
-        hook_placement_block = (
-            "HOOK PLACEMENT (chorus only, if hook exists):\n"
-            "- Use the exact wording of the title-drop (no paraphrase) and place it on strong downbeats. Repeat it 2–3 times per chorus. Map the full hook as 1–2 contiguous lines across contiguous onsets; never spell words letter-by-letter.\n\n"
-        ) if is_chorus else ""
+        # Context-Aware Hook Strategy (from Lyrics-First mode)
+        hook_placement_block = ""
+        if is_chorus:
+            # Count how many chorus roles appeared BEFORE this part
+            total_chorus_so_far = 0
+            total_parts = len(plan_items) if plan_items else 25
+            if plan_items and isinstance(plan_items, list):
+                for i, item in enumerate(plan_items):
+                    if i < part_idx:
+                        item_role = str(item.get('role', '')).lower()
+                        if item_role == 'chorus':
+                            total_chorus_so_far += 1
+            
+            # Calculate total chorus length so far (in bars) for context-aware decisions
+            part_length_bars = float(est_bars) if est_bars else 8.0
+            total_chorus_bars_so_far = total_chorus_so_far * part_length_bars
+            
+            # Extract hook text hint if present
+            hook_text_hint = None
+            try:
+                if isinstance(section_description, str):
+                    m1 = re.search(r"\[\s*Plan\s*\].*?hook_canonical\s*=\s*\"([^\"]+)\"", section_description, re.IGNORECASE)
+                    if m1:
+                        hook_text_hint = m1.group(1).strip()
+                if (not hook_text_hint) and isinstance(user_prompt, str):
+                    m2 = re.search(r'"([^"\n]{3,64})"', user_prompt)
+                    if m2:
+                        hook_text_hint = m2.group(1).strip()
+            except Exception:
+                hook_text_hint = None
+            
+            # Context-based hook strategy
+            if total_chorus_so_far <= 1:
+                # First chorus: Establish hook
+                hook_placement_block = (
+                    "HOOK PLACEMENT (establishing):\n"
+                    "- Use the HOOK to establish the main theme. You may repeat it 1-2 times within this part.\n"
+                    "- Keep hook words unbroken; avoid syllable splitting inside hook.\n"
+                    "- Map the full hook as contiguous lines across contiguous onsets.\n\n"
+                )
+            elif total_chorus_bars_so_far >= (part_length_bars * 4):  # Already had significant hook exposure
+                # Significant hook exposure accumulated - consider variation
+                hook_placement_block = (
+                    "HOOK PLACEMENT (variation opportunity):\n"
+                    "- You've already established the hook. Consider creating VARIATION:\n"
+                    "  • OPTION 1: Use hook once, then NEW phrases\n"
+                    "  • OPTION 2: Vary hook wording (synonyms, rephrasing, different perspective)\n"
+                    "  • OPTION 3: Use hook fragments mixed with new content\n"
+                    "  • OPTION 4: Create completely NEW phrases that fit the theme\n"
+                    + (f"  • If hook is '{hook_text_hint}', you might use fragments or create variations\n" if hook_text_hint else "")
+                    + "💡 PRINCIPLE: Variation maintains listener interest. But if the hook still serves the musical moment, you may use it.\n\n"
+                )
+            elif part_idx >= int(total_parts * 0.8):  # Final section of song
+                # Finale: Hook can return for closure
+                hook_placement_block = (
+                    "HOOK PLACEMENT (finale):\n"
+                    "- You MAY bring back the HOOK for closure, or continue with variations.\n"
+                    "- Follow what serves the musical resolution.\n"
+                    "- If using hook, keep words unbroken when possible.\n\n"
+                )
+            else:
+                # Middle section: STRICT variation required
+                hook_placement_block = (
+                    "HOOK PLACEMENT (middle section - STRICT):\n"
+                    "- 🚨 DO NOT use the exact hook line!\n"
+                    "  • OPTION 1: Create completely NEW phrases that fit the theme (PREFERRED)\n"
+                    "  • OPTION 2: Use hook fragments (1-2 words max, not the full line)\n"
+                    "  • OPTION 3: Vary hook wording (synonyms, rephrasing, different perspective)\n"
+                    "  • OPTION 4: Omit hook entirely and use new content\n"
+                    + (f"  • Hook to avoid: '{hook_text_hint}'\n" if hook_text_hint else "")
+                    + "⚠️ CRITICAL: Repetition of the exact hook here would be musically boring.\n\n"
+                )
+        
+        # Dance/4x4 Genre Block (from Lyrics-First mode)
+        dance_lyric_block = (
+            "GENRE LYRIC STYLE (4x4/Dance):\n"
+            "- Prefer modular, non-linear phrasing over long narrative arcs across the whole song.\n"
+            "- Chorus/title-drop should recur with consistent wording; verses use vivid images, slogans, or short fragments.\n"
+            "- Allow chant/mantra moments; keep lines short and hook-centric; avoid story continuity across sections.\n"
+            "- Pre-chorus: tighten phrasing, lift energy, hint the hook without fully stating it.\n\n"
+        ) if is_dance_4x4 else ""
 
         pop_repetition_block = (
             "POP REPETITION POLICY (tightened):\n"
@@ -2740,6 +2835,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
         active_blocks = []
         if style_block: active_blocks.append("STYLE")
         if news_block: active_blocks.append("NEWS")
+        if dance_lyric_block: active_blocks.append("DANCE_4X4")
         if hook_signature_block: active_blocks.append("HOOK_SIGNATURE")
         if hook_placement_block: active_blocks.append("HOOK_PLACEMENT")
         if pop_repetition_block: active_blocks.append("POP_REPETITION")
@@ -2761,7 +2857,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
             pass
     except Exception:
         # On any error in gating logic, fall back silently to no-op blocks
-        style_block = news_block = hook_signature_block = hook_placement_block = pop_repetition_block = ""
+        style_block = news_block = dance_lyric_block = hook_signature_block = hook_placement_block = pop_repetition_block = ""
         mapping_repetition_block = line_integrity_block = chant_variance_block = diction_block = dramaturgy_block = prechorus_hook_block = ""
         hook_canonical_detection_block = hook_contiguity_repair_block = content_narrative_block = writing_policy_hook_line = ""
         sustain_hint_block = ""
@@ -2862,7 +2958,21 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     else:
         prompt_parts.append("- vowels: Hold open vowels on long notes; no semantics; pure sustain.\n")
     prompt_parts.append("\nPLAN FOR THIS PART:\n")
-    # (optional plan hint intentionally disabled)
+    # Extract plan_hint from plan_items if available
+    plan_hint_text = ""
+    try:
+        if plan_items and isinstance(plan_items, list) and 0 <= part_idx < len(plan_items):
+            plan_item = plan_items[part_idx]
+            if isinstance(plan_item, dict):
+                hint = plan_item.get('plan_hint', '')
+                if hint and isinstance(hint, str):
+                    plan_hint_text = f"Constraints: {hint}\n"
+    except Exception:
+        pass
+    if plan_hint_text:
+        prompt_parts.append(plan_hint_text)
+    else:
+        prompt_parts.append("No specific constraints for this part.\n")
     prompt_parts.append("\nMELODY NOTES (full, order: {i,start,dur,pitch,stress):\n".replace("(", "(").replace(")", ")") + json.dumps(full_notes) + "\n\n")
     if vocab_ctx.get('context_instruments'):
         prompt_parts.append("OTHER TRACKS (full notes for this part):\n" + json.dumps(vocab_ctx.get('context_instruments')) + "\n\n")
@@ -2882,6 +2992,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append(style_block)
     prompt_parts.append(hook_signature_block)
     prompt_parts.append("[soft|global] PHRASE ARCHITECTURE:\n- Meter-aware phrasing: group phrases according to the time signature (e.g., 4+4 in 4/4; 3+3 in 3/4; 2+2+3 in 7/8). Cadence end-lines on downbeats; use micro-pauses only before transitions.\n\n")
+    prompt_parts.append(dance_lyric_block)
     prompt_parts.append(news_block)
     prompt_parts.append(hook_placement_block)
     prompt_parts.append(prechorus_hook_block)
@@ -2921,7 +3032,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
     prompt_parts.append("  • Create singable, meaningful words that flow naturally when performed\n")
     prompt_parts.append("  • Choose words that SynthV can articulate beautifully and clearly\n")
     prompt_parts.append("  • Select words that carry emotional weight and serve the musical moment\n")
-    prompt_parts.append("  • Prefer words with open vowels (ah, oh, oo, ee, ay, ai) for sustained notes\n")
+    prompt_parts.append("  • Prefer WORDS CONTAINING open vowels (like 'flow', 'know', 'go', 'shine', 'time') for sustained notes - NOT placeholder syllables like 'Ah' or 'Ooh'\n")
     prompt_parts.append("  • Use complete words rather than fragments or single letters\n")
     prompt_parts.append("  • Extend words with melisma ('-') when it serves the musical expression\n")
     prompt_parts.append("  • Aim for professional quality that would work in a commercial release\n")
@@ -3621,7 +3732,17 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
             genre_lc = str(genre or "").lower(); insp_lc = str(inspiration or "").lower()
         except Exception:
             genre_lc, insp_lc = "", ""
-        is_dance_4x4 = any(k in genre_lc or k in insp_lc for k in ("psytrance","psy","trance","house","techno","edm","dance","infected mushroom"))
+        is_dance_4x4 = any(k in genre_lc or k in insp_lc for k in (
+            "psytrance", "psy", "trance", "goa", "progressive trance", "uplifting trance",
+            "house", "deep house", "tech house", "progressive house", "electro house",
+            "techno", "minimal techno", "acid techno",
+            "edm", "dance", "electronic dance",
+            "drum and bass", "dnb", "jungle",
+            "dubstep", "brostep",
+            "hardstyle", "hardcore",
+            "electro", "breaks", "breakbeat",
+            "uk garage", "garage"
+        ))
         # Role flags for selective gating
         rl = str(section_role or '').lower()
         is_chorus = (rl == 'chorus') or (isinstance(section_label, str) and 'drop' in section_label.lower())
@@ -5618,6 +5739,11 @@ def _propose_lyric_note_adjustments(config: Dict, genre: str, inspiration: str, 
         base_rules = [
             "Only contiguous indices in merge_spans (i<=j).",
             "Prefer merging micro-notes within the SAME word (token=='' means continuation).",
+            "**MUSICAL PRESERVATION (CRITICAL):** When adapting notes, PRESERVE the musical character and melodic contour of the original track. The adapted version must remain recognizable as a variation of the source material.",
+            "**MERGE STRATEGY:** Merge very short notes (≤1/8 beat) into longer, singable phrases while keeping the overall melodic shape (rising/falling patterns, peak notes, rhythmic accents).",
+            "**SPLIT STRATEGY:** Split very long notes (>4.0 beats for most words, >6.0 beats for sustained vowels) into multiple notes to allow multi-syllable words or phrase breaks. Keep the same pitch, divide duration proportionally (e.g., 8-beat note → two 4-beat notes). Format: split={note_index: [duration1, duration2, ...]}",
+            "**OVERLAP HANDLING (CRITICAL):** If notes overlap (note[k].start < note[k-1].start + note[k-1].duration), you MUST fix this by either: (1) Shorten note[k-1].duration so it ends exactly at note[k].start, OR (2) Delay note[k].start to begin after note[k-1] ends. NEVER leave overlapping notes - this breaks the vocal track.",
+            "**RHYTHM PRESERVATION:** Maintain the rhythmic feel and groove of the original. If the source has syncopation or specific rhythmic patterns, reflect that in the adapted version.",
             (f"shift[k] in beats within ±{shift_bound} (timing adjustments allowed; preserve order; clamp to avoid overlap)." if mode in ('expressive','freeform') else "Do NOT change start times; preserve bar structure."),
             (f"repitch[k] in semitones within ±{min(4, int(repitch_bound))} (prefer nearest scale tones; avoid leaps). Prioritize repitch only on '-' continuation notes; avoid repitch on first content syllables." if mode in ('expressive','freeform') else "Avoid repitch; keep pitch unless merging equal-pitch spans."),
             f"extend[k] is small duration delta in beats within ±{extend_bound} (clamped by next start, never overlapping).",
@@ -5627,6 +5753,7 @@ def _propose_lyric_note_adjustments(config: Dict, genre: str, inspiration: str, 
             "Preserve the count of content tokens (non-continuations); do not collapse two different syllables/words into one note.",
             "Do not insert rests; preserve continuous vocal flow unless at phrase ends.",
             "Merges only if all pitches in span are equal AND each note is very short (≈≤1/16 beat); never merge on stressed onsets.",
+            "**SPLIT USE CASES:** Split long sustained notes to create: (1) Multi-syllable words on long notes (e.g., 'beau-ti-ful' needs 3 notes), (2) Multiple words in a phrase (e.g., 'feel the flow' needs 3 notes), (3) Melisma patterns (one word split across multiple pitch changes - though this is better done via repitch on continuation notes).",
             "Align content words to strong beats or drum accents when helpful; sustain vowels on longer notes.",
             "Phrase ends on rests or bar ends when feasible; avoid consonant clusters on very short notes.",
             "Respect key/scale and natural vocal range; avoid extreme micro-fragments.",
@@ -5672,7 +5799,7 @@ def _propose_lyric_note_adjustments(config: Dict, genre: str, inspiration: str, 
             + (f"Section: {section_label}. {section_description}\n" if section_label else "")
             + ("Context tracks (name, role, density, accentsWithinBar): " + json.dumps(ctx_summary) + "\n" if ctx_summary else "")
             + "Notes (order, full for this part): {i,start,dur,pitch,stress,token}.\n" + json.dumps(preview) + "\n\n"
-            + "Output STRICT JSON only:\n{\n  \"merge_spans\": [[int,int],...],\n  \"extend\": { \"int\": number },\n  \"shift\": { \"int\": number },\n  \"repitch\": { \"int\": number }\n}\n\n"
+            + "Output STRICT JSON only:\n{\n  \"merge_spans\": [[int,int],...],\n  \"extend\": { \"int\": number },\n  \"shift\": { \"int\": number },\n  \"repitch\": { \"int\": number },\n  \"split\": { \"int\": [number,number,...] }\n}\n\n"
             + ("Rules:" + rules_text + "\n")
             + ("Hook (context): hook_canonical=\"" + hook_can + "\", token_ranges=" + json.dumps(hook_ranges) + "\n" if section_role == 'chorus' and hook_can else "")
             + ("Phrase windows (context): " + json.dumps(phrase_windows) + "\n" if isinstance(phrase_windows, list) else "")
@@ -5695,6 +5822,7 @@ def _propose_lyric_note_adjustments(config: Dict, genre: str, inspiration: str, 
             extends = obj.get("extend", {})
             shifts = obj.get("shift", {})
             repitches = obj.get("repitch", {})
+            splits = obj.get("split", {})
             if not isinstance(merges, list) or not isinstance(extends, dict):
                 return {}
             # basic validation
@@ -5744,7 +5872,25 @@ def _propose_lyric_note_adjustments(config: Dict, genre: str, inspiration: str, 
                             continue
                 except Exception:
                     continue
-            return {"merge_spans": valid_merges, "extend": valid_extends, "shift": valid_shifts, "repitch": valid_repitches}
+            # Validate splits
+            valid_splits = {}
+            for k, v in (splits or {}).items():
+                try:
+                    ki = int(k)
+                    if not (0 <= ki < len(notes)):
+                        continue
+                    if not isinstance(v, list) or len(v) < 2:
+                        continue
+                    # Ensure all durations are positive numbers
+                    durations = []
+                    for d in v:
+                        if isinstance(d, (int, float)) and d > 0:
+                            durations.append(float(d))
+                    if len(durations) >= 2:
+                        valid_splits[str(ki)] = durations
+                except Exception:
+                    continue
+            return {"merge_spans": valid_merges, "extend": valid_extends, "shift": valid_shifts, "repitch": valid_repitches, "split": valid_splits}
         return {}
     except Exception:
         return {}
@@ -5878,6 +6024,7 @@ def _apply_note_adjustments_conservative(notes: List[Dict], tokens: List[str], p
         extends = plan.get("extend") or {}
         shifts = plan.get("shift") or {}
         repitches = plan.get("repitch") or {}
+        splits = plan.get("split") or {}
         # Work on indexed copies
         idx_order = list(range(len(notes)))
         # Normalize notes sorted by start
@@ -5885,6 +6032,58 @@ def _apply_note_adjustments_conservative(notes: List[Dict], tokens: List[str], p
         reorder = {old_i: new_i for new_i, (old_i, _) in enumerate(notes_sorted)}
         notes_arr = [n for _, n in notes_sorted]
         tokens_arr = [tokens[i] if i < len(tokens) else "" for i, _ in notes_sorted]
+        
+        # STEP 1: Apply splits FIRST (creates new notes, so do before merges/extends)
+        # Format: split = {note_index: [dur1, dur2, dur3, ...]}
+        if splits:
+            splits_sorted = sorted([(int(k), v) for k, v in splits.items()], reverse=True)  # Process from end to start to preserve indices
+            for idx, durations in splits_sorted:
+                try:
+                    idx = reorder.get(idx, idx)  # Map to sorted position
+                    if not (0 <= idx < len(notes_arr)):
+                        continue
+                    if not isinstance(durations, list) or len(durations) < 2:
+                        continue
+                    # Validate durations sum doesn't exceed original + small tolerance
+                    orig_note = notes_arr[idx]
+                    orig_dur = float(orig_note.get('duration_beats', 0.0))
+                    sum_dur = sum(float(d) for d in durations)
+                    if sum_dur > orig_dur * 1.5:  # Allow 50% overshoot for musical flexibility
+                        # Normalize durations to fit original duration
+                        scale = orig_dur / sum_dur
+                        durations = [d * scale for d in durations]
+                    
+                    # Create split notes
+                    orig_start = float(orig_note.get('start_beat', 0.0))
+                    orig_pitch = int(orig_note.get('pitch', 60))
+                    orig_token = tokens_arr[idx] if idx < len(tokens_arr) else ""
+                    
+                    split_notes = []
+                    split_tokens = []
+                    current_start = orig_start
+                    
+                    for i, dur in enumerate(durations):
+                        new_note = dict(orig_note)
+                        new_note['start_beat'] = current_start
+                        new_note['duration_beats'] = max(MIN_NOTE_BEATS, float(dur))
+                        new_note['pitch'] = orig_pitch
+                        split_notes.append(new_note)
+                        
+                        # First split keeps original token, rest get continuation '-'
+                        split_tokens.append(orig_token if i == 0 else '-')
+                        current_start += float(dur)
+                    
+                    # Replace original note with split notes
+                    notes_arr = notes_arr[:idx] + split_notes + notes_arr[idx+1:]
+                    tokens_arr = tokens_arr[:idx] + split_tokens + tokens_arr[idx+1:]
+                    
+                    # Update reorder map for subsequent operations (indices shift)
+                    shift_amount = len(split_notes) - 1
+                    reorder = {k: (v + shift_amount if v > idx else v) for k, v in reorder.items()}
+                    
+                except Exception as e:
+                    # Skip this split on error
+                    continue
 
         # Apply merges from longest spans first to avoid index churn
         mspans_sorted = sorted([[reorder.get(i,i), reorder.get(j,j)] for i,j in mspans], key=lambda x: (x[1]-x[0]), reverse=True)
@@ -6051,6 +6250,36 @@ def _apply_note_adjustments_conservative(notes: List[Dict], tokens: List[str], p
                 cleaned_notes.append(n)
                 cleaned_tokens.append(tokens_arr[i] if i < len(tokens_arr) else '')
 
+        # FINAL STEP: Overlap detection and auto-fix
+        # Check for overlaps (note[k].start < note[k-1].end) and fix by shortening previous note
+        overlap_count = 0
+        for i in range(1, len(cleaned_notes)):
+            try:
+                prev_note = cleaned_notes[i-1]
+                curr_note = cleaned_notes[i]
+                
+                prev_start = float(prev_note.get('start_beat', 0.0))
+                prev_dur = float(prev_note.get('duration_beats', 0.0))
+                prev_end = prev_start + prev_dur
+                
+                curr_start = float(curr_note.get('start_beat', 0.0))
+                
+                # Overlap detected
+                if curr_start < prev_end - 1e-6:
+                    # Fix: Shorten previous note to end exactly at current start
+                    new_prev_dur = max(MIN_NOTE_BEATS, curr_start - prev_start)
+                    cleaned_notes[i-1]['duration_beats'] = new_prev_dur
+                    overlap_count += 1
+            except Exception:
+                continue
+        
+        if overlap_count > 0:
+            try:
+                from colorama import Style
+                print(Style.DIM + f"[Notes-Adapt] Fixed {overlap_count} overlapping notes" + Style.RESET_ALL)
+            except Exception:
+                pass
+        
         return cleaned_notes, cleaned_tokens
     except Exception:
         return notes, tokens
@@ -14396,7 +14625,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         tokens = _generate_lyrics_words_with_spans(
                             cfg or config, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes,
                             section_label=label, section_description=desc, context_tracks_basic=context_basic,
-                            user_prompt=user_guidance, history_context=history_text
+                            user_prompt=user_guidance, history_context=history_text, plan_items=plan_items, part_idx=part_idx
                         )  # Save progress after tokens for this section have been generated
                         try:
                             target_tr['lyrics'] = tokens
@@ -14444,20 +14673,32 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         meta = LYRICS_PART_META.get(adapt_key) or {}
                         pd = meta.get('placement_difficulty')
                         vision = meta.get('note_adaptation_vision')
-                        # Add safety check to prevent infinite loops
-                        if isinstance(pd, (int, float)) and pd >= float((cfg or config).get('lyrics_adaptation_threshold', 0.35)) and pd < 0.8:
+                        # AKTIVIERT: Note-Adaptation für schwierige Parts
+                        # Threshold erweitert bis 0.95 (vorher 0.8) um mehr Parts zu helfen
+                        if isinstance(pd, (int, float)) and pd >= float((cfg or config).get('lyrics_adaptation_threshold', 0.35)) and pd <= 0.95:
                             print(Style.DIM + f"[Notes-Adapt] Activating adaptive optimization for '{label}' (difficulty={pd:.2f})" + Style.RESET_ALL)
                             # Temporarily relax adjustment mode for this part
                             local_cfg = {**(cfg or config)}
-                            local_cfg['note_adjustment_mode'] = 'expressive'
+                            # Bei sehr hoher difficulty (>=0.7): aggressivere Anpassungen erlauben
+                            local_cfg['note_adjustment_mode'] = 'freeform' if pd >= 0.7 else 'expressive'
                             if vision:
                                 print(Style.DIM + f"[Notes-Adapt] vision: {vision[:200]}" + ("..." if len(vision or '')>200 else "") + Style.RESET_ALL)
-                            # Disabled conservative merging/adjustments to preserve 1:1 mapping during debugging
-                            # plan = _propose_lyric_note_adjustments(local_cfg, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes, tokens, label, desc, context_tracks=[t for j,t in enumerate(trks) if j != track_idx_effective])
-                            # adjusted_notes, adjusted_tokens = _apply_note_adjustments_conservative(notes, tokens, plan)
-                            # notes = adjusted_notes; tokens = adjusted_tokens
-                        elif isinstance(pd, (int, float)) and pd >= 0.8:
-                            print(Style.DIM + f"[Notes-Adapt] Difficulty too high ({pd:.2f}), skipping adaptive optimization to prevent infinite loop" + Style.RESET_ALL)
+                            # REAKTIVIERT: Note-Adaptation um "la la la" Fallbacks zu vermeiden
+                            try:
+                                plan = _propose_lyric_note_adjustments(local_cfg, genre, inspiration, get_instrument_name(target_tr), bpm, ts, notes, tokens, label, desc, context_tracks=[t for j,t in enumerate(trks) if j != track_idx_effective])
+                                if plan and (plan.get('merge_spans') or plan.get('extend') or plan.get('shift') or plan.get('split')):
+                                    print(Style.DIM + f"[Notes-Adapt] Applying adjustments: {len(plan.get('merge_spans', []))} merges, {len(plan.get('extend', {}))} extends, {len(plan.get('split', {}))} splits" + Style.RESET_ALL)
+                                    adjusted_notes, adjusted_tokens = _apply_note_adjustments_conservative(notes, tokens, plan)
+                                    # Nur anwenden wenn gültig und musikalische Verwandtschaft erhalten
+                                    if len(adjusted_notes) > 0 and len(adjusted_tokens) == len(adjusted_notes):
+                                        notes = adjusted_notes
+                                        tokens = adjusted_tokens
+                                    else:
+                                        print(Style.DIM + f"[Notes-Adapt] Adjustments invalid, keeping original notes" + Style.RESET_ALL)
+                            except Exception as e:
+                                print(Style.DIM + f"[Notes-Adapt] Error during adaptation: {e}, keeping original" + Style.RESET_ALL)
+                        elif isinstance(pd, (int, float)) and pd > 0.95:
+                            print(Style.DIM + f"[Notes-Adapt] Difficulty extremely high ({pd:.2f}), skipping to avoid excessive changes" + Style.RESET_ALL)
                         # If NEW track and still hard to place -> constrained re-generation of notes, then re-run words
                         if new_vocal_track_mode and isinstance(pd, (int, float)) and pd >= 0.6:
                             try:
@@ -14532,14 +14773,15 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                 # ======================================================================
                 # == FINAL EXPORT (NACHDEM ALLE PARTS GENERIERT SIND)
                 # ======================================================================
-                if new_vocal_track_mode:
-                    print("\n--- Creating UST and MIDI exports for new vocal track ---")
+                # Export für BEIDE Modi: new_vocal_track und existing_track
+                if new_vocal_track_mode or not new_vocal_track_mode:  # Immer exportieren
+                    print(f"\n--- Creating UST and MIDI exports for {('new' if new_vocal_track_mode else 'existing')} vocal track ---")
                     
                     final_notes = []
                     final_lyrics = []
                     theme_len_beats = float(theme_len_bars * ts.get('beats_per_bar', 4))
 
-                    # Build virtual "themes" structure with the new vocal track data
+                    # Build virtual "themes" structure with the vocal track data
                     # Extract vocal track from each theme in out_themes
                     vocal_themes_for_export = []
                     syllables_list = []
@@ -14550,10 +14792,16 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         
                         # Find the vocal track in this theme's tracks
                         vocal_track_data = None
-                        for track in theme_tracks:
-                            if track.get('__final_vocal__') or track.get('instrument_name') == 'Vocal':
-                                vocal_track_data = track
-                                break
+                        if new_vocal_track_mode:
+                            # Für neue Tracks: Suche nach __final_vocal__ Flag
+                            for track in theme_tracks:
+                                if track.get('__final_vocal__') or track.get('instrument_name') == 'Vocal':
+                                    vocal_track_data = track
+                                    break
+                        else:
+                            # Für existing tracks: Verwende track_idx
+                            if 0 <= track_idx < len(theme_tracks):
+                                vocal_track_data = theme_tracks[track_idx]
                         
                         # DEBUG: Check note positions
                         DEBUG_EXPORT_MAIN = os.environ.get('DEBUG_EXPORT', 'false').lower() == 'true'
