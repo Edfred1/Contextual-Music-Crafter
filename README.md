@@ -268,12 +268,12 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 ### 🎤 Lyrics and Vocal Melody – quick guide
 
 - Entry point
-  - In the `song_generator.py` menu, select “Generate Lyrics for a Track (from final artifact)”. This option appears once a final artifact exists.
-  - No final artifact yet? You can create one from your own multi‑track MIDI: run `music_analyzer.py`, analyze your file, this will produce the required `final_run_*.json`, after which the lyrics option will be available.
+  - In the `song_generator.py` menu, select “Generate Lyrics for a Track (Artifact/Progress)”. This option appears once a final artifact or a resumable progress file exists.
+  - No artifact yet? Create one by generating a song, or analyze an existing multi‑track MIDI with `music_analyzer.py` and then run a generation/optimization so that an artifact/progress file is produced.
 
 - Branches
-  - Existing track (word‑first): pick a listed track to generate lyrics for its existing melody.
-  - Generate NEW Vocal Track (notes + lyrics + UST): choose the extra option shown after the track list to create a new vocal line across all parts.
+  - Existing track (lyrics for existing melody): Pick a listed track; only lyrics are generated for its existing melody.
+  - Generate NEW Vocal Track (notes + lyrics + UST): Choose the extra option shown after the track list to create a new vocal line across all parts (lyrics‑first, then fitting notes), incl. UST & Emvoice exports.
 
 - Generate a NEW vocal track
   - Check the console “[Plan Summary]”: Hook Canonical, Chorus Lines, Imagery/Verbs, etc. If the hook isn’t right, adjust the quoted hook and retry.
