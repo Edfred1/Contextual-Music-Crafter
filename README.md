@@ -9,6 +9,7 @@ Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music gener
 
 The entire creative direction of the music is guided through an interactive setup process, making it accessible to both developers and musicians.
 
+<a id="recent-highlights"></a>
 ## 🆕 Recent Highlights
 
 - **Music Analyzer**: Analyze your multi‑track MIDI into a compact, LLM‑friendly plan/artifact with integrated actions (optimize selected tracks, add a context‑aware track, or generate a NEW MIDI from the analyzed descriptions). See [Music Analyzer (optional)](#music-analyzer-optional).
@@ -33,6 +34,7 @@ The entire creative direction of the music is guided through an interactive setu
 - [Further advanced notes (addendum)](#further-advanced-notes-addendum)
 - [Roadmap (Ideas)](#️-roadmap-ideas)
 
+<a id="toolkit-overview"></a>
 ## 🧰 Toolkit overview
 
 - **music_crafter.py**: Interactive planner (co‑producer). Creates/updates `config.yaml` and `song_settings.json`, then launches the generator.
@@ -41,6 +43,7 @@ The entire creative direction of the music is guided through an interactive setu
 - **artifact_builder.py**: Utility to rebuild `.mid` from final artifacts or progress JSONs without re‑running generation.
 - **MIDI merger/** (folder): Standalone tool to merge multiple MIDI files into one multi-track project. See [MIDI merger README](MIDI%20merger/README_midi_merger.md).
 
+<a id="features"></a>
 ## ✨ Features
 
 -   **Go Beyond Loops:** Generate complete songs with multiple, distinct sections (intro, verse, chorus) to tell a musical story.
@@ -58,6 +61,7 @@ The entire creative direction of the music is guided through an interactive setu
 
 ---
 
+<a id="installation--setup"></a>
 ## 🚀 Installation & Setup
 
 ### Step 1: Download & Install Prerequisites
@@ -140,6 +144,7 @@ pip install -r requirements.txt
     -   `fx`: Sound effects, risers, impacts, etc.
     -   `complementary`: A general-purpose role.
 
+<a id="how-to-use"></a>
 ## 🎹 How to Use
 
 CMC provides a suite of tools for different creative needs, from low-cost loop creation to full-scale song composition. **We strongly recommend starting with the 'Core Generators'** to understand the process and conserve your API tokens before moving to the more advanced tools.
@@ -193,6 +198,7 @@ python song_generator.py
 >
 > **💡 A Note on Quality:** While the process can be resource-intensive, the results from this two-step workflow can be strikingly good. The detailed plan created by `music_crafter.py` gives `song_generator.py` the context it needs to produce surprisingly cohesive and creative pieces.
 
+<a id="creative-workflows--ideas"></a>
 ## 🎨 Creative Workflows & Ideas
 
 CMC works best as a creativity amplifier: a sketchbook, exploration engine, and co‑producer. The ideas below reference existing sections to avoid repetition, while giving you practical routes to try.
@@ -238,6 +244,7 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 - **On publishing and monetization (friendly note)**
   - CMC is most fun as a creativity tool—sketching, learning, and exploring musical ideas. If you choose to release or sell what you make, that’s your call. Please be mindful of originality, platform policies, and any third‑party material.
 
+<a id="advanced-usage-and-notes"></a>
 ## ⚙️ Advanced usage and notes
 
 - **API keys & rotation**: The `api_key` field supports either a single string or a list of keys. When a 429/quota error occurs, the system rotates to the next key automatically. 
@@ -265,6 +272,7 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 
 - **Why the context sometimes shows “Using 4/6 previous themes”**: The generator fits context under an internal character budget (`MAX_CONTEXT_CHARS`). In dynamic mode (`context_window_size: -1`) it includes as many previous parts as fit that budget, so the fraction (e.g., 4/6) is expected and will change if you or future versions adjust this character limit. Set `context_window_size` to a positive number to force a fixed number of previous parts, or to `0` to disable history entirely.
 
+<a id="lyrics-and-vocal-melody--quick-guide"></a>
 ### 🎤 Lyrics and Vocal Melody – quick guide
 
 - Entry point
@@ -297,6 +305,7 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 - Exports
   - Outputs UST plus two Emvoice TXT files; optional single‑track vocal `.mid`.
 
+<a id="general-notes-resume--exports"></a>
 ### General notes (resume & exports)
 
 - **Resuming long runs**: The song generator saves progress and supports resuming via its interactive menu. You can also resume directly with:
@@ -314,6 +323,7 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 
 - **Dependencies**: See `requirements.txt` (google-generativeai, midiutil, PyYAML, colorama, ruamel.yaml, mido). Standard library modules are used for everything else.
 
+<a id="music-analyzer-optional"></a>
 ## 🧠 Music Analyzer (optional)
 
 `music_analyzer.py` helps analyze existing MIDI files and derive a clean, consistent plan that you can apply to CMC.
@@ -334,6 +344,7 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 - When to use:
   - Use it when you want to use an existing multi‑track MIDI as a starting point, and produce artifacts that the generator or artifact builder can pick up.
 
+<a id="artifact-builder-optional"></a>
 ## 🧱 Artifact Builder (optional)
 
 `artifact_builder.py` can rebuild `.mid` files from existing final artifacts or progress files without re‑running a full generation.
@@ -345,6 +356,7 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
   - Quickly render a `.mid` from a saved artifact (e.g., after manual JSON tweaks).
   - Rebuild a partial song from a progress snapshot.
 
+<a id="further-advanced-notes-addendum"></a>
 ## 📌 Further advanced notes (addendum)
 
 - Additional hotkeys (Windows, during waits):
@@ -359,6 +371,7 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 - Config reload behavior:
   - `song_generator.py` reloads `config.yaml` before: Generate Again, Generate New, Optimize, and Optimize Existing Song. Changes to automation settings (pitch bend, sustain pedal/CC64, CC automation) and `use_call_and_response` take effect immediately.
 
+<a id="roadmap-ideas"></a>
 ## 🗺️ Roadmap (Ideas)
 
 These are potential features being considered for future development. They are ideas, not commitments:
