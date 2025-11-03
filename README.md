@@ -13,7 +13,7 @@ The entire creative direction of the music is guided through an interactive setu
 
 - **Music Analyzer**: Analyze your multi‑track MIDI into a compact, LLM‑friendly plan/artifact with integrated actions (optimize selected tracks, add a context‑aware track, or generate a NEW MIDI from the analyzed descriptions). See [Music Analyzer (optional)](#music-analyzer-optional).
 - **Lyrics & Vocal pipeline**: Generate lyrics for an existing melody or create a NEW vocal line (notes + lyrics + UST). Exports Synthesizer V UST and Emvoice TXT. See [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide).
-- **Coming soon**: MIDI merge utilities (combine multiple `.mid` files into one project) and UST→MIDI extraction tools to bring vocal lines back into MIDI for further editing.
+- **MIDI Utilities**: A standalone [MIDI Merger tool](MIDI%20merger/README_midi_merger.md) is included to combine multiple `.mid` files into one multi-track project (see `MIDI merger/` folder).
 
 ## Table of Contents
 
@@ -23,26 +23,23 @@ The entire creative direction of the music is guided through an interactive setu
 - [Installation & Setup](#installation--setup)
 - [How to Use](#how-to-use)
   - [0. (Optional) Analyze an existing MIDI first](#0-optional-analyze-an-existing-midi-first)
-  - [1. Optional Legacy Tools (single parts & quick edits)](#1-optional-legacy-tools-single-parts--quick-edits)
-  - [2. Full Song Generation: The Creative Duo](#2-full-song-generation-the-creative-duo)
+  - [1. Full Song Generation: The Creative Duo](#1-full-song-generation-the-creative-duo)
 - [Creative Workflows & Ideas](#creative-workflows--ideas)
-- [Note on legacy scripts](#note-on-legacy-scripts)
 - [Advanced usage and notes](#advanced-usage-and-notes)
 - [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide)
 - [General notes (resume & exports)](#general-notes-resume--exports)
 - [Music Analyzer (optional)](#music-analyzer-optional)
 - [Artifact Builder (optional)](#artifact-builder-optional)
 - [Further advanced notes (addendum)](#further-advanced-notes-addendum)
+- [Roadmap (Ideas)](#️-roadmap-ideas)
 
 ## 🧰 Toolkit overview
 
 - **music_crafter.py**: Interactive planner (co‑producer). Creates/updates `config.yaml` and `song_settings.json`, then launches the generator.
 - **song_generator.py**: Core engine that builds, optimizes, and resumes full songs from the plan. Includes the lyric generator. Exports SynthV‑ready UST, Emvoice TXT, and (optionally) a single‑track MIDI for vocals.
-- **music_analyzer.py**: Optional pre‑step to analyze existing MIDI and derive a compact, LLM‑friendly plan.
+- **music_analyzer.py**: MIDI analysis tool that can analyze existing files, optimize selected tracks, add new context-aware tracks, and generate new MIDI from analyzed descriptions.
 - **artifact_builder.py**: Utility to rebuild `.mid` from final artifacts or progress JSONs without re‑running generation.
-- **part_generator.py**: Legacy single‑part generator (quick loops).
-- **part_extender.py**: Legacy tool to append new parts to an existing MIDI.
-- **part_variator.py**: Legacy tool to create variations of selected tracks in a MIDI.
+- **MIDI merger/** (folder): Standalone tool to merge multiple MIDI files into one multi-track project. See [MIDI merger README](MIDI%20merger/README_midi_merger.md).
 
 ## ✨ Features
 
@@ -151,17 +148,7 @@ CMC provides a suite of tools for different creative needs, from low-cost loop c
 
 If you want to start from an existing MIDI structure, run a quick analysis first and derive a compact plan you can feed into the generator. After analysis, you can directly optimize a subset of tracks or add a new context‑aware track across all parts from within the analyzer. See the section "Music Analyzer (optional)" below for details.
 
-### 1. Optional Legacy Tools (single parts & quick edits)
-
-If you prefer low-cost experiments or quick edits, you can use the original scripts controlled by `config.yaml`:
-
-- `part_generator.py`: generate a single, complete musical part from scratch
-- `part_extender.py`: add new parts to an existing MIDI file
-- `part_variator.py`: create variations of selected tracks in a MIDI file
-
-Each script reads your `config.yaml` and writes a new `.mid`. For most users, we recommend the full song workflow below.
-
-### 2. Full Song Generation: The Creative Duo
+### 1. Full Song Generation: The Creative Duo
 
 For creating complete, multi-part songs, CMC uses two powerful scripts that work hand-in-hand: `music_crafter.py` (the planner) and `song_generator.py` (the builder). The builder also covers SynthV‑ready lyric generation (see the Lyric quick guide below).
 
@@ -251,14 +238,6 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 - **On publishing and monetization (friendly note)**
   - CMC is most fun as a creativity tool—sketching, learning, and exploring musical ideas. If you choose to release or sell what you make, that’s your call. Please be mindful of originality, platform policies, and any third‑party material.
 
-## 📌 Note on legacy scripts
-
-The original standalone scripts `part_generator.py`, `part_extender.py`, and `part_variator.py` remain in this repository and continue to work with the latest changes (including the new API key logic and the extended `config.yaml`).
-
-- Going forward, these capabilities will be gradually integrated into the two main programs: `music_crafter.py` (planning/setup) and `song_generator.py` (generation), and expanded there.
-- Until the integration is complete, you can keep using the three scripts as usual. Deprecation notices and migration guidance will be provided ahead of any breaking changes.
-- Recommendation: For new workflows, prefer `music_crafter.py` and `song_generator.py` to benefit from advanced features (e.g., key rotation, resume support, automation options).
-
 ## ⚙️ Advanced usage and notes
 
 - **API keys & rotation**: The `api_key` field supports either a single string or a list of keys. When a 429/quota error occurs, the system rotates to the next key automatically. 
@@ -330,9 +309,7 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 - **MIDI channel policy**: Drums/percussion use MIDI Channel 10 (index 9). Melodic instruments are assigned sequentially across remaining channels, skipping 10.
 
 - **Output filenames**:
-  - `part_generator.py`: dynamic names like `<Genre>_<Key>_<Bars>bars_<BPM>bpm_<Timestamp>.mid`.
-  - `part_extender.py`: `<OriginalName>_ext_<N>.mid`.
-  - `part_variator.py`: `<OriginalName>_var_<N>.mid`.
+  - Generated songs: dynamic names based on genre, key, tempo and timestamp (e.g., `Progressive_Psytrance_F#minor_140bpm_20250101-120000.mid`).
   - Lyric exports: `lyrics_<TrackName>_<Timestamp>.ust`, `..._emvoice.txt`, `..._emvoice_by_part.txt`. You can optionally export a single‑track MIDI for the new vocal.
 
 - **Dependencies**: See `requirements.txt` (google-generativeai, midiutil, PyYAML, colorama, ruamel.yaml, mido). Standard library modules are used for everything else.
@@ -381,3 +358,13 @@ The original standalone scripts `part_generator.py`, `part_extender.py`, and `pa
 
 - Config reload behavior:
   - `song_generator.py` reloads `config.yaml` before: Generate Again, Generate New, Optimize, and Optimize Existing Song. Changes to automation settings (pitch bend, sustain pedal/CC64, CC automation) and `use_call_and_response` take effect immediately.
+
+## 🗺️ Roadmap (Ideas)
+
+These are potential features being considered for future development. They are ideas, not commitments:
+
+- **MIDITool**: Unified interface to simplify workflow across all tools (analysis, generation, optimization in one place).
+- **Variable Section Lengths**: Music Crafter support for different bar lengths per section instead of fixed-length parts (e.g., 4-bar intro, 16-bar verse, 2-bar riser, 8-bar drop, 12-bar breakdown—each tailored to the musical flow).
+- **Template System**: Save and reuse your favorite instrument/genre setups for faster project starts.
+
+**Ideas and suggestions welcome!** If you have feature requests or workflow improvements in mind, feel free to open an issue or discussion on GitHub.
