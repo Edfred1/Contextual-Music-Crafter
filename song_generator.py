@@ -11378,9 +11378,14 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
             pass
         midi_file = MIDIFile(num_instrument_tracks + 1, removeDuplicates=True, deinterleave=False)
         
+        # Convert beat_value to MIDI denominator format (exponent)
+        # MIDI denominator is a power of 2: 0=1, 1=2, 2=4, 3=8, 4=16
+        time_signature_beat_value = config.get("time_signature", {}).get("beat_value", 4)
+        midi_denominator = {1: 0, 2: 1, 4: 2, 8: 3, 16: 4}.get(time_signature_beat_value, 2)  # Default to 2 (=4/4)
+        
         tempo_track = 0
         midi_file.addTempo(track=tempo_track, time=0, tempo=bpm)
-        midi_file.addTimeSignature(track=tempo_track, time=0, numerator=time_signature_beats, denominator=4, clocks_per_tick=24)
+        midi_file.addTimeSignature(track=tempo_track, time=0, numerator=time_signature_beats, denominator=midi_denominator, clocks_per_tick=24)
 
         # --- MPE export parameters ---
         mpe_cfg = config.get('mpe', {}) if isinstance(config.get('mpe'), dict) else {}
@@ -12510,13 +12515,14 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
         if artifacts:
             menu_options[str(next_option)] = ('optimize_artifact', "Optimize Existing Song (from artifacts)")
             next_option += 1
-            # New: Lyrics from final artifact
-            menu_options[str(next_option)] = ('lyrics_from_artifact', "Generate Lyrics for a Track (from final artifact)")
+        
+        # Lyrics option: available if we have either final artifacts OR progress files
+        progress_files = find_progress_files(script_dir)
+        if artifacts or progress_files:
+            menu_options[str(next_option)] = ('lyrics_from_artifact', "Generate Lyrics for a Track (Artifact/Progress)")
             next_option += 1
         menu_options[str(next_option)] = ('advanced_opt', "Advanced Optimization Options")
         next_option += 1
-
-        progress_files = find_progress_files(script_dir)
         if progress_files:
             menu_options[str(next_option)] = ('resume', "Resume In-Progress Job")
             next_option += 1
@@ -15669,8 +15675,8 @@ def save_progress(data: Dict, script_dir: str, run_timestamp: str) -> str:
     progress_path = os.path.join(script_dir, progress_filename)
     try:
         progress_type = data.get('type', 'unknown')
-        with open(progress_path, 'w') as f:
-            json.dump(data, f, indent=2)
+        with open(progress_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
         print(Fore.GREEN + f"Progress ({progress_type}) for run {run_timestamp} saved to {os.path.basename(progress_path)}" + Style.RESET_ALL)
         return progress_path
     except Exception as e:
@@ -15680,7 +15686,7 @@ def save_progress(data: Dict, script_dir: str, run_timestamp: str) -> str:
 def load_progress(progress_path: str) -> Dict:
     """Loads progress from a JSON file."""
     try:
-        with open(progress_path, 'r') as f: data = json.load(f)
+        with open(progress_path, 'r', encoding='utf-8') as f: data = json.load(f)
         print(Fore.GREEN + f"Progress loaded from: {os.path.basename(progress_path)}" + Style.RESET_ALL)
         return data
     except Exception as e:
@@ -15690,7 +15696,7 @@ def load_progress(progress_path: str) -> Dict:
 def _load_progress_silent(progress_path: str) -> Dict:
     """Loads progress JSON without printing (used for scanning)."""
     try:
-        with open(progress_path, 'r') as f:
+        with open(progress_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception:
         return None
@@ -15707,8 +15713,8 @@ def save_final_artifact(config: Dict, generated_themes: List[Dict], length_bars:
             'themes': generated_themes
         }
         path = os.path.join(script_dir, f"final_run_{run_timestamp}.json")
-        with open(path, 'w') as f:
-            json.dump(artifact, f, indent=2)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(artifact, f, indent=2, ensure_ascii=False)
         print(Fore.GREEN + f"Final artifact saved to: {os.path.basename(path)}" + Style.RESET_ALL)
         return path
     except Exception as e:
@@ -15717,7 +15723,7 @@ def save_final_artifact(config: Dict, generated_themes: List[Dict], length_bars:
 
 def load_final_artifact(path: str) -> Dict:
     try:
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
         print(Fore.RED + f"Failed to load artifact: {e}" + Style.RESET_ALL)

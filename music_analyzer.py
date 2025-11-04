@@ -411,63 +411,57 @@ def _analyze_key_from_pitches(notes: List[Dict]) -> Tuple[str, str]:
     # Normalize to percentages
     pc_percentages = [count / total_notes for count in pitch_class_counts]
     
-    # Scale patterns based on song_generator.py scale_intervals
-    scale_patterns = {
-        # Major scales
-        "C major": [0, 2, 4, 5, 7, 9, 11], "G major": [7, 9, 11, 0, 2, 4, 6], "D major": [2, 4, 6, 7, 9, 11, 1],
-        "A major": [9, 11, 1, 2, 4, 6, 8], "E major": [4, 6, 8, 9, 11, 1, 3], "B major": [11, 1, 3, 4, 6, 8, 10],
-        "F# major": [6, 8, 10, 11, 1, 3, 5], "C# major": [1, 3, 5, 6, 8, 10, 0], "F major": [5, 7, 9, 10, 0, 2, 4],
-        "Bb major": [10, 0, 2, 3, 5, 7, 9], "Eb major": [3, 5, 7, 8, 10, 0, 2], "Ab major": [8, 10, 0, 1, 3, 5, 7],
-        "Db major": [1, 3, 5, 6, 8, 10, 0], "Gb major": [6, 8, 10, 11, 1, 3, 5],
-        
-        # Minor scales (natural minor)
-        "A minor": [0, 2, 3, 5, 7, 8, 10], "E minor": [7, 9, 10, 0, 2, 4, 5], "B minor": [2, 4, 5, 7, 9, 10, 0],
-        "F# minor": [9, 11, 0, 2, 4, 5, 7], "C# minor": [4, 6, 7, 9, 11, 0, 2], "G# minor": [11, 1, 2, 4, 6, 7, 9],
-        "D# minor": [6, 8, 9, 11, 1, 2, 4], "A# minor": [1, 3, 4, 6, 8, 9, 11], "D minor": [5, 7, 8, 10, 0, 1, 3],
-        "G minor": [10, 0, 1, 3, 5, 6, 8], "C minor": [3, 5, 6, 8, 10, 11, 1], "F minor": [8, 10, 11, 1, 3, 4, 6],
-        "Bb minor": [1, 3, 4, 6, 8, 9, 11], "Eb minor": [6, 8, 9, 11, 1, 2, 4],
-        
-        # Harmonic minor
-        "A harmonic minor": [0, 2, 3, 5, 7, 8, 11], "E harmonic minor": [7, 9, 10, 0, 2, 4, 6],
-        "B harmonic minor": [2, 4, 5, 7, 9, 10, 1], "F# harmonic minor": [9, 11, 0, 2, 4, 5, 8],
-        "C# harmonic minor": [4, 6, 7, 9, 11, 0, 3], "G# harmonic minor": [11, 1, 2, 4, 6, 7, 10],
-        "D# harmonic minor": [6, 8, 9, 11, 1, 2, 5], "A# harmonic minor": [1, 3, 4, 6, 8, 9, 0],
-        "D harmonic minor": [5, 7, 8, 10, 0, 1, 4], "G harmonic minor": [10, 0, 1, 3, 5, 6, 9],
-        "C harmonic minor": [3, 5, 6, 8, 10, 11, 2], "F harmonic minor": [8, 10, 11, 1, 3, 4, 7],
-        "Bb harmonic minor": [1, 3, 4, 6, 8, 9, 0], "Eb harmonic minor": [6, 8, 9, 11, 1, 2, 5],
-        
-        # Dorian mode
-        "D dorian": [0, 2, 3, 5, 7, 9, 10], "A dorian": [7, 9, 10, 0, 2, 4, 5], "E dorian": [2, 4, 5, 7, 9, 10, 0],
-        "B dorian": [9, 11, 0, 2, 4, 5, 7], "F# dorian": [4, 6, 7, 9, 11, 0, 2], "C# dorian": [11, 1, 2, 4, 6, 7, 9],
-        "G# dorian": [6, 8, 9, 11, 1, 2, 4], "D# dorian": [1, 3, 4, 6, 8, 9, 11], "A# dorian": [8, 10, 11, 1, 3, 4, 6],
-        "G dorian": [5, 7, 8, 10, 0, 1, 3], "C dorian": [10, 0, 1, 3, 5, 6, 8], "F dorian": [3, 5, 6, 8, 10, 11, 1],
-        "Bb dorian": [8, 10, 11, 1, 3, 4, 6], "Eb dorian": [1, 3, 4, 6, 8, 9, 11],
-        
-        # Blues scales
-        "C blues": [0, 3, 5, 6, 7, 10], "G blues": [7, 10, 0, 1, 2, 5], "D blues": [2, 5, 7, 8, 9, 0],
-        "A blues": [9, 0, 2, 3, 4, 7], "E blues": [4, 7, 9, 10, 11, 2], "B blues": [11, 2, 4, 5, 6, 9],
-        "F# blues": [6, 9, 11, 0, 1, 4], "C# blues": [1, 4, 6, 7, 8, 11], "F blues": [5, 8, 10, 11, 0, 3],
-        "Bb blues": [10, 1, 3, 4, 5, 8], "Eb blues": [3, 6, 8, 9, 10, 1], "Ab blues": [8, 11, 1, 2, 3, 6],
-        "Db blues": [1, 4, 6, 7, 8, 11], "Gb blues": [6, 9, 11, 0, 1, 4]
+    # Scale intervals (same as song_generator.py) - intervals from root in semitones
+    scale_intervals = {
+        "major": [0, 2, 4, 5, 7, 9, 11],
+        "ionian": [0, 2, 4, 5, 7, 9, 11],
+        "minor": [0, 2, 3, 5, 7, 8, 10],
+        "natural minor": [0, 2, 3, 5, 7, 8, 10],
+        "aeolian": [0, 2, 3, 5, 7, 8, 10],
+        "harmonic minor": [0, 2, 3, 5, 7, 8, 11],
+        "melodic minor": [0, 2, 3, 5, 7, 9, 11],
+        "dorian": [0, 2, 3, 5, 7, 9, 10],
+        "phrygian": [0, 1, 3, 5, 7, 8, 10],
+        "lydian": [0, 2, 4, 6, 7, 9, 11],
+        "mixolydian": [0, 2, 4, 5, 7, 9, 10],
+        "locrian": [0, 1, 3, 5, 6, 8, 10],
+        "major pentatonic": [0, 2, 4, 7, 9],
+        "minor pentatonic": [0, 3, 5, 7, 10],
+        "chromatic": list(range(12)),
+        "whole tone": [0, 2, 4, 6, 8, 10],
+        "diminished": [0, 1, 3, 4, 6, 7, 9, 10],
+        "augmented": [0, 3, 4, 7, 8, 11],
+        "byzantine": [0, 1, 4, 5, 7, 8, 11],
+        "hungarian minor": [0, 2, 3, 6, 7, 8, 11],
+        "persian": [0, 1, 4, 5, 6, 8, 11],
+        "arabic": [0, 2, 3, 6, 7, 8, 11],
+        "jewish": [0, 1, 4, 5, 7, 8, 10],
+        "ahava raba": [0, 1, 4, 5, 7, 8, 10],
+        "blues": [0, 3, 5, 6, 7, 10],
+        "major blues": [0, 2, 3, 4, 7, 9]
     }
+    
+    # Root note names (all 12 chromatic notes)
+    root_pc_map = {0: "C", 1: "C#", 2: "D", 3: "D#", 4: "E", 5: "F", 
+                   6: "F#", 7: "G", 8: "G#", 9: "A", 10: "A#", 11: "B"}
     
     best_score = 0
     best_key = "C"
     best_scale = "major"
     
-    # Test all scale patterns
-    for scale_name, pattern in scale_patterns.items():
-        score = sum(pc_percentages[pc] for pc in pattern)
-        if score > best_score:
-            best_score = score
-            # Parse scale name to extract root note and scale type
-            parts = scale_name.split()
-            if len(parts) >= 2:
-                best_key = parts[0]
-                best_scale = " ".join(parts[1:])
-            else:
-                best_key = "C"
-                best_scale = "major"
+    # Test all combinations of root notes and scale types
+    for scale_type, intervals in scale_intervals.items():
+        for root_pc in range(12):
+            # Calculate pitch classes for this root+scale combination
+            scale_pcs = sorted([(root_pc + interval) % 12 for interval in intervals])
+            
+            # Score: sum of percentages for pitch classes in this scale
+            score = sum(pc_percentages[pc] for pc in scale_pcs)
+            
+            if score > best_score:
+                best_score = score
+                best_key = root_pc_map[root_pc]
+                best_scale = scale_type
     
     return best_key, best_scale
 
@@ -512,19 +506,25 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict, str
         if msg.is_meta and msg.type == "time_signature":
             time_signature["beats_per_bar"] = msg.numerator
             # MIDI denominator is a power of 2: 0=1, 1=2, 2=4, 3=8, 4=16
+            # Standard MIDI format uses exponent: 0=1, 1=2, 2=4, 3=8, 4=16
             # BUT: Some buggy MIDI files store the direct value (4, 8, 16) instead of the exponent (2, 3, 4)
             # Detect and handle both cases
             if msg.denominator <= 4:
                 # Likely a correct exponent (0-4 → 1, 2, 4, 8, 16)
                 time_signature["beat_value"] = 2 ** msg.denominator
+            elif msg.denominator in [1, 2, 4, 8, 16]:
+                # Likely already the direct value (non-standard but common)
+                # This happens when MIDI files store 16 instead of exponent 4
+                time_signature["beat_value"] = msg.denominator
             else:
-                # Likely already the direct value (buggy MIDI)
-                # Accept common values: 1, 2, 4, 8, 16
-                if msg.denominator in [1, 2, 4, 8, 16]:
-                    time_signature["beat_value"] = msg.denominator
-                else:
-                    # Unknown/invalid - default to 4
-                    time_signature["beat_value"] = 4
+                # Unknown/invalid - default to 4
+                time_signature["beat_value"] = 4
+            
+            # Special case: Normalize 4/16 to 4/4 (common bug from old song_generator versions)
+            # 4/16 is very unusual and likely a mistake - old song_generator had a bug where it
+            # stored beat_value=16 incorrectly. Most users don't intentionally use 4/16.
+            if time_signature["beats_per_bar"] == 4 and time_signature["beat_value"] == 16:
+                time_signature["beat_value"] = 4
         if msg.is_meta and msg.type == "key_signature":
             # MIDI key signature: 0=C, 1=G, 2=D, etc. (sharps) or -1=F, -2=Bb, etc. (flats)
             # mode: 0=major, 1=minor
@@ -581,14 +581,26 @@ def analyze_midi_file(file_path: str) -> Tuple[List[Dict], float, int, Dict, str
     if root_note == "C" and scale_type == "major":
         all_notes = []
         for track in tracks:
-            # CRITICAL FIX: Exclude drums/percussion from scale analysis!
+            # CRITICAL FIX: Exclude drums/percussion and FX from scale analysis!
             # Drums use MIDI pitches for different drum sounds, not musical pitches
+            # FX tracks contain sound effects/samples that don't contribute to harmonic key
+            # Note: "texture" and "atmosphere" may contain harmonic content, so we include them
             role = track.get("role", "").lower()
-            is_drums = (role in ["drums", "percussion", "perc", "drum"] or 
+            track_name = track.get("instrument_name", "").lower()
+            
+            # Check if it's drums by role or channel
+            is_drums = (role in ["drums", "percussion", "perc", "drum", "kick_and_snare"] or 
                        track.get("is_drum", False) or
                        track.get("channel") == 9)  # MIDI channel 10 (index 9) is drums
             
-            if not is_drums:
+            # Check if it's FX by role OR by track name (for early detection before role assignment)
+            is_fx = (role == "fx" or 
+                    any(keyword in track_name for keyword in ["snare roll", "snare_roll", "accelerating", "fx", "effect", "noise", "sweep"]))
+            
+            # Also exclude tracks that sound like percussion in the name
+            is_named_percussion = any(keyword in track_name for keyword in ["snare", "kick", "hi-hat", "hihat", "cymbal", "perc", "drum"])
+            
+            if not is_drums and not is_fx and not is_named_percussion:
                 all_notes.extend(track.get("notes", []))
         
         analyzed_root, analyzed_scale = _analyze_key_from_pitches(all_notes)
@@ -1729,6 +1741,50 @@ def main():
         for t in merged_tracks
     ]
     assigned = interactive_role_review(assigned, allowed_roles)
+
+    # Re-analyze key with correct role assignments (FX tracks may have been included incorrectly)
+    # Update merged_tracks with reviewed roles
+    name_to_role_reviewed = {a.get("instrument_name"): a.get("role", "complementary") for a in assigned}
+    for t in merged_tracks:
+        reviewed_role = name_to_role_reviewed.get(t.get("instrument_name"), t.get("role", "context"))
+        t["role"] = reviewed_role
+    
+    # Re-analyze key from pitch content with correct roles
+    # This is important because initial analysis happens before roles are assigned
+    all_notes_corrected = []
+    excluded_tracks = []
+    for track in merged_tracks:
+        role = track.get("role", "").lower()
+        track_name = track.get("instrument_name", "")
+        is_drums = (role in ["drums", "percussion", "perc", "drum", "kick_and_snare"] or 
+                   track.get("is_drum", False) or
+                   track.get("channel") == 9)
+        is_fx = (role == "fx")
+        
+        if not is_drums and not is_fx:
+            all_notes_corrected.extend(track.get("notes", []))
+        else:
+            excluded_tracks.append(f"{track_name} ({role})")
+    
+    if all_notes_corrected:
+        corrected_root, corrected_scale = _analyze_key_from_pitches(all_notes_corrected)
+        # Always show re-analysis result, even if it's the same
+        old_key = f"{root_note} {scale_type}"
+        new_key = f"{corrected_root} {corrected_scale}"
+        
+        if excluded_tracks:
+            print(Fore.CYAN + f"Re-analyzing key with correct role assignments (excluding: {', '.join(excluded_tracks[:3])}{'...' if len(excluded_tracks) > 3 else ''})" + Style.RESET_ALL)
+        
+        # Always update if we got a different result (and it's not just default C major)
+        if (corrected_root != root_note or corrected_scale != scale_type):
+            if not (corrected_root == "C" and corrected_scale == "major"):
+                print(Fore.GREEN + f"Corrected key detection: {old_key} → {new_key}" + Style.RESET_ALL)
+                root_note = corrected_root
+                scale_type = corrected_scale
+            else:
+                print(Fore.YELLOW + f"Re-analysis returned default C major (keeping {old_key})" + Style.RESET_ALL)
+        else:
+            print(Fore.CYAN + f"Re-analysis confirmed key: {new_key}" + Style.RESET_ALL)
 
     # Build instruments list proposal for config
     instruments_cfg = [
