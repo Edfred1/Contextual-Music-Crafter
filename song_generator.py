@@ -13113,6 +13113,7 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     if not new_vocal_track_mode:
                         # Get the selected track name - we'll use name-based lookup, not index
                         selected_track_name = get_instrument_name(base_tracks[track_choice - 1])
+                        print(Style.DIM + f"[DEBUG] User selected choice {track_choice}: '{selected_track_name}' (from base_tracks[{track_choice - 1}])" + Style.RESET_ALL)
                         # Verify track exists in at least one theme
                         track_found = False
                         for theme in themes:
@@ -13168,7 +13169,9 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     if new_vocal_track_mode:
                         print(Fore.CYAN + f"Generating notes+lyrics for NEW track 'Vocal' across {len(out_themes)} part(s)..." + Style.RESET_ALL)
                     else:
-                        print(Fore.CYAN + f"Generating lyrics (word-first) for track '{get_instrument_name(base_tracks[track_idx])}' across {len(out_themes)} part(s)..." + Style.RESET_ALL)
+                        # Use the selected track name, not track_idx (which is from themes, not base_tracks)
+                        track_name_display = selected_track_name_for_lookup if selected_track_name_for_lookup else f"Track {track_idx}"
+                        print(Fore.CYAN + f"Generating lyrics (word-first) for track '{track_name_display}' across {len(out_themes)} part(s)..." + Style.RESET_ALL)
                 except Exception:
                     pass
                 # Prompt (optional) - use saved data if resuming
