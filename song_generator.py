@@ -686,7 +686,7 @@ def _normalize_section_role(label: str | None) -> str:
     except Exception:
         return 'unknown'
 
-def _summarize_vocal_parts(themes: List[Dict], track_index: int, ts: Dict) -> List[Dict]:
+def _summarize_vocal_parts(themes: List[Dict], track_index: int, ts: Dict, track_name: str | None = None) -> List[Dict]:
     """
     Build compact per-part summaries for the target vocal track:
     { idx, label, num_notes, notes_density, avg_dur, max_dur, sustain_ratio, silent }
@@ -699,7 +699,16 @@ def _summarize_vocal_parts(themes: List[Dict], track_index: int, ts: Dict) -> Li
     for part_idx, th in enumerate(themes or []):
         label = th.get('label', f'Part_{part_idx+1}') if isinstance(th, dict) else f'Part_{part_idx+1}'
         trks = th.get('tracks', []) if isinstance(th, dict) else []
-        notes = sorted((trks[track_index].get('notes', []) if (0 <= track_index < len(trks)) else []), key=lambda n: float(n.get('start_beat', 0.0)))
+        # Find track by name if provided (more reliable than index), otherwise use index
+        track_notes = []
+        if track_name:
+            for tr in trks:
+                if get_instrument_name(tr) == track_name:
+                    track_notes = tr.get('notes', [])
+                    break
+        elif 0 <= track_index < len(trks):
+            track_notes = trks[track_index].get('notes', [])
+        notes = sorted(track_notes, key=lambda n: float(n.get('start_beat', 0.0)))
         if not notes:
             summaries.append({"idx": part_idx, "label": label, "num_notes": 0, "notes_density": 0.0, "avg_dur": 0.0, "max_dur": 0.0, "sustain_ratio": 0.0, "silent": True})
             continue
@@ -13102,17 +13111,41 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         print(Fore.YELLOW + "Invalid selection." + Style.RESET_ALL); continue
                     new_vocal_track_mode = (track_choice == extra_opt)
                     if not new_vocal_track_mode:
-                        # Find the track index in the first theme by name
+                        # Get the selected track name - we'll use name-based lookup, not index
                         selected_track_name = get_instrument_name(base_tracks[track_choice - 1])
+                        # Verify track exists in at least one theme
+                        track_found = False
+                        for theme in themes:
+                            for tr in theme.get('tracks', []):
+                                if get_instrument_name(tr) == selected_track_name:
+                                    track_found = True
+                                    break
+                            if track_found:
+                                break
+                        if not track_found:
+                            print(Fore.YELLOW + f"Track '{selected_track_name}' not found in any theme." + Style.RESET_ALL); continue
+                        # Find track index in first theme that contains it (for compatibility with existing code)
+                        # But note: track_idx may vary between themes - functions should use name-based lookup
                         track_idx = -1
                         for i, tr in enumerate(themes[0].get('tracks', [])):
                             if get_instrument_name(tr) == selected_track_name:
                                 track_idx = i
                                 break
+                        # If not in first theme, find in first theme that contains it
                         if track_idx == -1:
-                            print(Fore.YELLOW + f"Track '{selected_track_name}' not found in first theme." + Style.RESET_ALL); continue
+                            for theme in themes:
+                                for i, tr in enumerate(theme.get('tracks', [])):
+                                    if get_instrument_name(tr) == selected_track_name:
+                                        track_idx = i
+                                        break
+                                if track_idx != -1:
+                                    break
+                        # Store track name for functions that need it (in outer scope)
+                        selected_track_name_for_lookup = selected_track_name
+                    else:
+                        # Ensure variable exists even if new_vocal_track_mode
+                        selected_track_name_for_lookup = None
 
-                # Prepare constants
                 genre = cfg.get('genre', 'Unknown')
                 inspiration = cfg.get('inspiration', '')
                 bpm = cfg.get('bpm', 120)
@@ -13210,7 +13243,13 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                     if new_vocal_track_mode:
                         summaries = _summarize_parts_aggregate(out_themes, ts, exclude_track_index=None)
                     else:
-                        summaries = _summarize_vocal_parts(out_themes, track_idx, ts)
+                        # Use track name for reliable lookup (index may vary between themes)
+                        # selected_track_name_for_lookup should be defined in the outer scope above
+                        try:
+                            track_name_for_summary = selected_track_name_for_lookup
+                        except NameError:
+                            track_name_for_summary = None
+                        summaries = _summarize_vocal_parts(out_themes, track_idx, ts, track_name=track_name_for_summary)
                 except Exception:
                     summaries = []
                 # Diagnostics for planning input
@@ -14459,10 +14498,24 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                         except Exception:
                             pass
                     else:
-                        if not (0 <= track_idx < len(trks)):
+                        # Use existing track - find by name (more reliable than index)
+                        target_tr = None
+                        track_idx_effective = None
+                        try:
+                            track_name_lookup = selected_track_name_for_lookup
+                            for i, tr in enumerate(trks):
+                                if get_instrument_name(tr) == track_name_lookup:
+                                    target_tr = tr
+                                    track_idx_effective = i
+                                    break
+                        except NameError:
+                            pass
+                        # Fallback to index if name not found
+                        if target_tr is None and 0 <= track_idx < len(trks):
+                            target_tr = trks[track_idx]
+                            track_idx_effective = track_idx
+                        if target_tr is None:
                             continue
-                        target_tr = trks[track_idx]
-                        track_idx_effective = track_idx
                     # If planned role is explicit silence, skip LLM/logging for this part immediately (no notes/lyrics for vocal)
                     try:
                         planned_role_now = str((plan_by_idx.get(part_idx) or {}).get('role','')).lower()
@@ -14805,8 +14858,17 @@ def interactive_main_menu(config, previous_settings, script_dir, initial_themes=
                                     vocal_track_data = track
                                     break
                         else:
-                            # Für existing tracks: Verwende track_idx
-                            if 0 <= track_idx < len(theme_tracks):
+                            # Für existing tracks: Finde Track by name (reliabler als Index)
+                            try:
+                                track_name_lookup = selected_track_name_for_lookup
+                                for track in theme_tracks:
+                                    if get_instrument_name(track) == track_name_lookup:
+                                        vocal_track_data = track
+                                        break
+                            except NameError:
+                                pass
+                            # Fallback to index if name not found
+                            if vocal_track_data is None and 0 <= track_idx < len(theme_tracks):
                                 vocal_track_data = theme_tracks[track_idx]
                         
                         # DEBUG: Check note positions
