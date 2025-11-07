@@ -691,11 +691,29 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
                     tail = rel_notes[-MAX_NOTES_IN_CONTEXT//2:]
                     rel_notes = head + tail
                 
-                original_parts_data.append({
+                # Extract automations from track
+                track_automations = track_data.get("track_automations", {})
+                note_automations = []
+                for note in rel_notes:
+                    if "automations" in note:
+                        note_automations.append({
+                            "note_index": len([n for n in rel_notes if n.get("start_beat", 0) <= note.get("start_beat", 0)]),
+                            "automations": note.get("automations", {})
+                        })
+                
+                part_data = {
                     "part_label": theme.get("label", f"Part_{part_idx+1}"),
                     "part_index": part_idx,
                     "notes": rel_notes[:MAX_NOTES_IN_CONTEXT],
-                })
+                }
+                
+                # Add automations if present
+                if track_automations:
+                    part_data["track_automations"] = track_automations
+                if note_automations:
+                    part_data["note_automations"] = note_automations[:20]  # Limit to 20 examples
+                
+                original_parts_data.append(part_data)
     
     # Build transition context (previous and next parts)
     transition_context = []
@@ -746,6 +764,40 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
             "Use appropriate velocities: ghost notes < 45, accents ≥ 100.\n\n"
         )
     
+    # Check if original track has automations
+    has_automations = False
+    automation_instructions = ""
+    for part_data in original_parts_data:
+        if "track_automations" in part_data or "note_automations" in part_data:
+            has_automations = True
+            break
+    
+    if has_automations:
+        automation_instructions = (
+            "\n**--- AUTOMATION SUPPORT ---**\n"
+            "The original track uses MIDI automations (pitch bend, CC curves). You may include automations in your variation:\n"
+            "1. **Note-based automations:** Add an `\"automations\"` object inside a note:\n"
+            "   ```json\n"
+            "   {\"pitch\": 60, \"start_beat\": 0.0, \"duration_beats\": 1.0, \"velocity\": 100,\n"
+            "    \"automations\": {\n"
+            "      \"pitch_bend\": [{\"type\": \"curve\", \"start_beat\": 0.0, \"end_beat\": 0.5, \"start_value\": 0, \"end_value\": 4096, \"bias\": 1.0}],\n"
+            "      \"cc\": [{\"type\": \"curve\", \"cc\": 74, \"start_beat\": 0.0, \"end_beat\": 1.0, \"start_value\": 60, \"end_value\": 127, \"bias\": 1.0}]\n"
+            "    }\n"
+            "   }\n"
+            "   ```\n"
+            "2. **Track-based automations:** Add a `\"track_automations\"` object at the part level:\n"
+            "   ```json\n"
+            "   {\"part_index\": 0, \"track_automations\": {\n"
+            "     \"pitch_bend\": [{\"type\": \"curve\", \"start_beat\": 0.0, \"end_beat\": 8.0, \"start_value\": 0, \"end_value\": -4096, \"bias\": 1.0}],\n"
+            "     \"cc\": [{\"type\": \"curve\", \"cc\": 74, \"start_beat\": 0.0, \"end_beat\": 8.0, \"start_value\": 0, \"end_value\": 127, \"bias\": 1.0}]\n"
+            "   }}\n"
+            "   ```\n"
+            "**Pitch Bend Range:** -8192 to 8191 (0 = no bend)\n"
+            "**CC Range:** 0 to 127\n"
+            "**Important:** Return to neutral values (pitch bend → 0) at the end of curves unless musically intentional.\n"
+            "Automations are optional - only include them if they enhance the variation musically.\n\n"
+        )
+    
     # Compress JSON for prompt (use compact format)
     original_parts_json = json.dumps(original_parts_data, separators=(',', ':'))
     context_summary_json = json.dumps(context_summary[:10], separators=(',', ':'))
@@ -767,6 +819,7 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
         f"**Instrument:** {get_instrument_name(original_track)} (MIDI Program: {original_track.get('program_num', 0)})\n"
         f"{role_instructions}\n\n"
         f"{drum_map_instructions}"
+        f"{automation_instructions}"
         f"**--- VARIATION TYPE ---**\n"
         f"**Technique:** {variation_type}\n"
         f"Apply this variation technique while maintaining musical coherence and the original's character.\n\n"
@@ -796,12 +849,15 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
         f'      "part_index": 0,\n'
         f'      "notes": [\n'
         f'        {{"pitch": 60, "start_beat": 0.0, "duration_beats": 1.0, "velocity": 100}}\n'
-        f'      ]\n'
+        f'      ],\n'
+        f'      "track_automations": {{"pitch_bend": [], "cc": []}}\n'
         f'    }}\n'
         f'  ]\n'
         f'}}\n'
         f"```\n\n"
         f"Each note must have: pitch (0-127), start_beat (float, relative to part start), duration_beats (float), velocity (1-127).\n"
+        f"Notes may optionally include an \"automations\" object with pitch_bend and/or cc arrays.\n"
+        f"Parts may optionally include a \"track_automations\" object with pitch_bend and/or cc arrays.\n"
         f"**IMPORTANT:** Return ONLY the JSON object, no markdown, no explanations, no prose. Start with '{{' and end with '}}'."
     )
     
@@ -834,6 +890,9 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
                 "role": role,
                 "notes": [],
             }
+            
+            # Collect track automations from all parts
+            track_automations_combined = {"pitch_bend": [], "cc": []}
             
             parts = result.get("parts", [])
             if not isinstance(parts, list):
@@ -874,15 +933,48 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
                         # Validate timing is within part bounds
                         part_end_beats = part_start_beats + (bars_per_section * beats_per_bar)
                         if abs_start < part_end_beats:  # Only add if within part
-                            variation_track["notes"].append({
+                            note_obj = {
                                 "pitch": pitch,
                                 "start_beat": abs_start,
                                 "duration_beats": duration,
                                 "velocity": velocity,
-                            })
+                            }
+                            
+                            # Extract automations from note if present
+                            if "automations" in note and isinstance(note.get("automations"), dict):
+                                note_obj["automations"] = note["automations"]
+                            
+                            variation_track["notes"].append(note_obj)
                     except (ValueError, TypeError) as ve:
                         # Skip invalid notes but continue processing
                         continue
+                
+                # Extract track automations from part
+                if "track_automations" in part_data and isinstance(part_data["track_automations"], dict):
+                    part_start_beats = part_idx * bars_per_section * beats_per_bar
+                    ta = part_data["track_automations"]
+                    
+                    # Process pitch bend automations
+                    if "pitch_bend" in ta and isinstance(ta["pitch_bend"], list):
+                        for pb in ta["pitch_bend"]:
+                            if isinstance(pb, dict) and pb.get("type") == "curve":
+                                pb_copy = dict(pb)
+                                pb_copy["start_beat"] = part_start_beats + float(pb.get("start_beat", 0))
+                                pb_copy["end_beat"] = part_start_beats + float(pb.get("end_beat", 0))
+                                track_automations_combined["pitch_bend"].append(pb_copy)
+                    
+                    # Process CC automations
+                    if "cc" in ta and isinstance(ta["cc"], list):
+                        for cc in ta["cc"]:
+                            if isinstance(cc, dict) and cc.get("type") == "curve":
+                                cc_copy = dict(cc)
+                                cc_copy["start_beat"] = part_start_beats + float(cc.get("start_beat", 0))
+                                cc_copy["end_beat"] = part_start_beats + float(cc.get("end_beat", 0))
+                                track_automations_combined["cc"].append(cc_copy)
+            
+            # Add track automations if any were found
+            if track_automations_combined["pitch_bend"] or track_automations_combined["cc"]:
+                variation_track["track_automations"] = track_automations_combined
             
             if variation_track["notes"]:
                 return variation_track
@@ -1082,6 +1174,9 @@ def main():
         "notes": [],
     }
     
+    # Collect track automations from original track (for selected parts only)
+    track_automations_original = {"pitch_bend": [], "cc": []}
+    
     # Collect original notes from selected parts only
     for part_idx in selected_parts:
         if part_idx < len(themes):
@@ -1091,6 +1186,40 @@ def main():
                 notes = track_data.get("notes", [])
                 # Ensure absolute timing
                 part_start_beats = part_idx * bars_per_section * beats_per_bar
+                
+                # Collect track automations from this part (once per part, not per note)
+                if "track_automations" in track_data:
+                    ta = track_data["track_automations"]
+                    if "pitch_bend" in ta and isinstance(ta["pitch_bend"], list):
+                        for pb in ta["pitch_bend"]:
+                            if isinstance(pb, dict) and pb.get("type") == "curve":
+                                pb_copy = dict(pb)
+                                # Convert to absolute timing
+                                pb_start = float(pb.get("start_beat", 0))
+                                pb_end = float(pb.get("end_beat", 0))
+                                # Check if already absolute
+                                if pb_start < part_start_beats - 0.1:
+                                    pb_start = pb_start + part_start_beats
+                                    pb_end = pb_end + part_start_beats
+                                pb_copy["start_beat"] = pb_start
+                                pb_copy["end_beat"] = pb_end
+                                track_automations_original["pitch_bend"].append(pb_copy)
+                    if "cc" in ta and isinstance(ta["cc"], list):
+                        for cc in ta["cc"]:
+                            if isinstance(cc, dict) and cc.get("type") == "curve":
+                                cc_copy = dict(cc)
+                                # Convert to absolute timing
+                                cc_start = float(cc.get("start_beat", 0))
+                                cc_end = float(cc.get("end_beat", 0))
+                                # Check if already absolute
+                                if cc_start < part_start_beats - 0.1:
+                                    cc_start = cc_start + part_start_beats
+                                    cc_end = cc_end + part_start_beats
+                                cc_copy["start_beat"] = cc_start
+                                cc_copy["end_beat"] = cc_end
+                                track_automations_original["cc"].append(cc_copy)
+                
+                # Process notes
                 for note in notes:
                     try:
                         start = float(note.get("start_beat", 0))
@@ -1099,17 +1228,27 @@ def main():
                             start = start + part_start_beats
                         # Only add notes within the part boundaries
                         if part_start_beats <= start < part_start_beats + (bars_per_section * beats_per_bar):
-                            original_export_track["notes"].append({
+                            note_obj = {
                                 "pitch": int(note.get("pitch", 60)),
                                 "start_beat": start,
                                 "duration_beats": float(note.get("duration_beats", 1.0)),
                                 "velocity": int(note.get("velocity", 100)),
-                            })
+                            }
+                            
+                            # Preserve note automations if present
+                            if "automations" in note and isinstance(note.get("automations"), dict):
+                                note_obj["automations"] = note["automations"]
+                            
+                            original_export_track["notes"].append(note_obj)
                     except:
                         continue
     
     # Build final song data - only include tracks with notes
     all_tracks = []
+    # Add track automations if any were found
+    if track_automations_original["pitch_bend"] or track_automations_original["cc"]:
+        original_export_track["track_automations"] = track_automations_original
+    
     if original_export_track["notes"]:
         all_tracks.append(original_export_track)
     all_tracks.extend(variations)
