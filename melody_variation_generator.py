@@ -22,7 +22,7 @@ try:
         _all_keys_daily_exhausted, _schedule_hourly_probe_if_needed,
         _seconds_until_hourly_probe, initialize_api_keys, get_instrument_name,
         create_midi_from_json, merge_themes_to_song_data, load_final_artifact,
-        find_final_artifacts, get_scale_notes
+        find_final_artifacts, get_scale_notes, _compact_notes_json, _extract_token_limit_from_error
     )
     import google.generativeai as genai
     # Reference to song_generator's globals for API key management
@@ -151,6 +151,24 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
             return out_text, tokens
         except Exception as e:
             err = str(e).lower()
+            full_error = str(e)
+            
+            # Check for token limit errors specifically (input token count exceeded)
+            is_token_limit_error = (
+                "input_token" in err or
+                "input token" in err or
+                ("quota" in err and "token" in err and "limit" in err)
+            )
+            
+            # Token limit errors should be handled by the caller (they need to reduce context)
+            # NOTE: Token limits are PER MINUTE (125,000 tokens/minute for free tier)
+            if is_token_limit_error:
+                token_limit = _extract_token_limit_from_error(full_error)
+                if token_limit is not None:
+                    print(Fore.YELLOW + f"Token limit exceeded: {token_limit:,} tokens/minute. This should be handled by the caller to reduce context." + Style.RESET_ALL)
+                    # Return a special error that the caller can catch
+                    raise ValueError(f"TOKEN_LIMIT_EXCEEDED:{token_limit}")
+            
             if '429' in err or 'quota' in err or 'rate limit' in err:
                 # Use song_generator's globals directly
                 qtype = _classify_quota_error(err)
@@ -559,7 +577,7 @@ def generate_variation_types(config: Dict, track: Dict, role: str, context_track
     bpm = config.get("bpm", 120)
     inspiration = config.get("inspiration", "")
     
-    # Get notes from selected parts (compressed: head + tail for large lists)
+    # Get notes from selected parts (all notes, no compression)
     selected_notes = []
     for part_idx in selected_parts:
         if part_idx < len(themes):
@@ -567,12 +585,7 @@ def generate_variation_types(config: Dict, track: Dict, role: str, context_track
             track_data = get_track_from_theme(theme, get_instrument_name(track))
             if track_data:
                 notes = track_data.get("notes", [])
-                if len(notes) > MAX_NOTES_IN_CONTEXT:
-                    head = notes[:MAX_NOTES_IN_CONTEXT//2]
-                    tail = notes[-MAX_NOTES_IN_CONTEXT//2:]
-                    selected_notes.extend(head + tail)
-                else:
-                    selected_notes.extend(notes)
+                selected_notes.extend(notes)
     
     # Build role-specific examples
     role_examples = {
@@ -587,9 +600,8 @@ def generate_variation_types(config: Dict, track: Dict, role: str, context_track
     
     examples = role_examples.get(role.lower(), ["Variation 1", "Variation 2", "Variation 3"])
     
-    # Compress notes for prompt (use compact JSON)
-    notes_sample = selected_notes[:MAX_NOTES_IN_CONTEXT] if len(selected_notes) > MAX_NOTES_IN_CONTEXT else selected_notes
-    notes_json = json.dumps(notes_sample, separators=(',', ':'))
+    # Include all notes in compact format to save tokens
+    notes_json = _compact_notes_json(selected_notes)
     
     prompt = (
         f"You are a music expert. Analyze this track and suggest {len(selected_parts)}-{len(selected_parts)+3} creative variation types.\n\n"
@@ -648,7 +660,7 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
     except:
         scale_notes = "C, D, E, F, G, A, B"
     
-    # Build context: all tracks from selected parts (compressed)
+    # Build context: all tracks from selected parts (all notes, no compression)
     context_summary = []
     for part_idx in selected_parts:
         if part_idx < len(themes):
@@ -657,19 +669,15 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
                 track_name = get_instrument_name(track)
                 if track_name != get_instrument_name(original_track):
                     notes = track.get("notes", [])
-                    # Compress: head + tail for large note lists
-                    if len(notes) > MAX_NOTES_IN_CONTEXT:
-                        head = notes[:MAX_NOTES_IN_CONTEXT//2]
-                        tail = notes[-MAX_NOTES_IN_CONTEXT//2:]
-                        notes = head + tail
+                    # Include all notes without compression
                     context_summary.append({
                         "part": theme.get("label", f"Part_{part_idx+1}"),
                         "instrument": track_name,
                         "role": track.get("role", "complementary"),
-                        "notes_sample": notes[:MAX_NOTES_IN_CONTEXT],
+                        "notes_sample": notes,
                     })
     
-    # Build original track data for selected parts (compressed)
+    # Build original track data for selected parts (all notes, no compression)
     original_parts_data = []
     for part_idx in selected_parts:
         if part_idx < len(themes):
@@ -685,11 +693,7 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
                     rel_note["start_beat"] = float(note.get("start_beat", 0)) - part_start_beats
                     rel_notes.append(rel_note)
                 
-                # Compress if too many notes
-                if len(rel_notes) > MAX_NOTES_IN_CONTEXT:
-                    head = rel_notes[:MAX_NOTES_IN_CONTEXT//2]
-                    tail = rel_notes[-MAX_NOTES_IN_CONTEXT//2:]
-                    rel_notes = head + tail
+                # Include all notes without compression
                 
                 # Extract automations from track
                 track_automations = track_data.get("track_automations", {})
@@ -704,7 +708,7 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
                 part_data = {
                     "part_label": theme.get("label", f"Part_{part_idx+1}"),
                     "part_index": part_idx,
-                    "notes": rel_notes[:MAX_NOTES_IN_CONTEXT],
+                    "notes": rel_notes,
                 }
                 
                 # Add automations if present
@@ -798,9 +802,25 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
             "Automations are optional - only include them if they enhance the variation musically.\n\n"
         )
     
-    # Compress JSON for prompt (use compact format)
-    original_parts_json = json.dumps(original_parts_data, separators=(',', ':'))
-    context_summary_json = json.dumps(context_summary[:10], separators=(',', ':'))
+    # Serialize JSON for prompt (compact format, all notes included)
+    # Convert notes in original_parts_data to compact format
+    compact_original_parts = []
+    for part in original_parts_data:
+        compact_part = dict(part)
+        if 'notes' in compact_part:
+            compact_part['notes'] = json.loads(_compact_notes_json(compact_part['notes']))
+        compact_original_parts.append(compact_part)
+    original_parts_json = json.dumps(compact_original_parts, separators=(',', ':'))
+    
+    # Convert notes in context_summary to compact format
+    compact_context_summary = []
+    for ctx in context_summary[:10]:
+        compact_ctx = dict(ctx)
+        if 'notes_sample' in compact_ctx:
+            compact_ctx['notes_sample'] = json.loads(_compact_notes_json(compact_ctx['notes_sample']))
+        compact_context_summary.append(compact_ctx)
+    context_summary_json = json.dumps(compact_context_summary, separators=(',', ':'))
+    
     transition_context_json = json.dumps(transition_context, separators=(',', ':'))
     
     inspiration_text = config.get("inspiration", "")
@@ -824,8 +844,10 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
         f"**Technique:** {variation_type}\n"
         f"Apply this variation technique while maintaining musical coherence and the original's character.\n\n"
         f"**--- ORIGINAL TRACK (Selected Parts) ---**\n"
+        f"**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n"
         f"```json\n{original_parts_json}\n```\n\n"
         f"**--- CONTEXT TRACKS (Other instruments in selected parts) ---**\n"
+        f"**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n"
         f"```json\n{context_summary_json}\n```\n\n"
         f"**--- TRANSITION CONTEXT (for smooth flow between parts) ---**\n"
         f"```json\n{transition_context_json}\n```\n\n"
@@ -861,14 +883,116 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
         f"**IMPORTANT:** Return ONLY the JSON object, no markdown, no explanations, no prose. Start with '{{' and end with '}}'."
     )
     
+    # Store original data for potential reduction
+    original_context_summary = context_summary[:]
+    original_original_parts_data = original_parts_data[:]
+    
     for attempt in range(MAX_RETRIES):
-        text, tokens = _call_llm_with_retry(prompt, config, expects_json=True)
-        if not text:
-            if attempt < MAX_RETRIES - 1:
-                print(Fore.YELLOW + f"Retry {attempt + 1}/{MAX_RETRIES}..." + Style.RESET_ALL)
-                time.sleep(2)
-                continue
-            return None
+        try:
+            text, tokens = _call_llm_with_retry(prompt, config, expects_json=True)
+            if not text:
+                if attempt < MAX_RETRIES - 1:
+                    print(Fore.YELLOW + f"Retry {attempt + 1}/{MAX_RETRIES}..." + Style.RESET_ALL)
+                    time.sleep(2)
+                    continue
+                return None
+        except ValueError as e:
+            error_str = str(e)
+            # Check if it's a token limit error
+            if error_str.startswith("TOKEN_LIMIT_EXCEEDED:"):
+                token_limit = int(error_str.split(":")[1])
+                print(Fore.YELLOW + f"Token limit exceeded: {token_limit:,} tokens/minute. Reducing context and retrying..." + Style.RESET_ALL)
+                # Reduce context by limiting parts
+                if len(original_context_summary) > 1:
+                    # Reduce to half the parts
+                    reduced_count = max(1, len(original_context_summary) // 2)
+                    context_summary = original_context_summary[-reduced_count:]
+                    # Also reduce original_parts_data to match
+                    if len(original_original_parts_data) > reduced_count:
+                        original_parts_data = original_original_parts_data[-reduced_count:]
+                    # Recreate compact JSON
+                    compact_original_parts = []
+                    for part in original_parts_data:
+                        compact_part = dict(part)
+                        if 'notes' in compact_part:
+                            compact_part['notes'] = json.loads(_compact_notes_json(compact_part['notes']))
+                        compact_original_parts.append(compact_part)
+                    original_parts_json = json.dumps(compact_original_parts, separators=(',', ':'))
+                    
+                    compact_context_summary = []
+                    for ctx in context_summary:
+                        compact_ctx = dict(ctx)
+                        if 'notes_sample' in compact_ctx:
+                            compact_ctx['notes_sample'] = json.loads(_compact_notes_json(compact_ctx['notes_sample']))
+                        compact_context_summary.append(compact_ctx)
+                    context_summary_json = json.dumps(compact_context_summary, separators=(',', ':'))
+                    
+                    # Recreate prompt with reduced context (reuse the prompt template from above)
+                    prompt = (
+                        f"You are an expert music producer. Create a variation of this track using the '{variation_type}' technique.\n\n"
+                        f"**--- MUSICAL CONTEXT ---**\n"
+                        f"**Genre:** {genre}\n"
+                        f"**Key/Scale:** {key_scale} (Available notes: {scale_notes})\n"
+                        f"**Tempo:** {bpm} BPM\n"
+                        f"**Time Signature:** {ts.get('beats_per_bar', 4)}/{ts.get('beat_value', 4)}\n"
+                        f"**Section Length:** {bars_per_section} bars per part ({bars_per_section * beats_per_bar} beats)\n"
+                        f"{f'**Inspiration:** {inspiration_text}' if inspiration_text else ''}\n\n"
+                        f"**--- TRACK INFORMATION ---**\n"
+                        f"**Track Role:** {role}\n"
+                        f"**Instrument:** {get_instrument_name(original_track)} (MIDI Program: {original_track.get('program_num', 0)})\n"
+                        f"{role_instructions}\n\n"
+                        f"{drum_map_instructions}"
+                        f"{automation_instructions}"
+                        f"**--- VARIATION TYPE ---**\n"
+                        f"**Technique:** {variation_type}\n"
+                        f"Apply this variation technique while maintaining musical coherence and the original's character.\n\n"
+                        f"**--- ORIGINAL TRACK (Selected Parts) ---**\n"
+                        f"**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n"
+                        f"```json\n{original_parts_json}\n```\n\n"
+                        f"**--- CONTEXT TRACKS (Other instruments in selected parts) ---**\n"
+                        f"**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n"
+                        f"```json\n{context_summary_json}\n```\n\n"
+                        f"**--- TRANSITION CONTEXT (for smooth flow between parts) ---**\n"
+                        f"```json\n{transition_context_json}\n```\n\n"
+                        f"**--- CRITICAL REQUIREMENTS ---**\n"
+                        f"1. Create variations ONLY for the selected parts (indices: {selected_parts})\n"
+                        f"2. Maintain smooth transitions between parts - the last note of one part should flow naturally into the first note of the next\n"
+                        f"3. Respect the original musical intent while applying the '{variation_type}' technique\n"
+                        f"4. Stay in key/scale: {scale_notes}\n"
+                        f"5. Match the rhythm and energy of the context tracks\n"
+                        f"6. If the original had a hard cut between parts, you may preserve it; otherwise create smooth transitions\n"
+                        f"7. Use relative timing within each part (start_beat 0..{bars_per_section * beats_per_bar})\n"
+                        f"8. {polyphony_rule}\n"
+                        f"9. **Motif Coherence:** Preserve the main musical motifs while transforming them through the variation technique (inversion, octave shift, rhythm augmentation, etc.)\n\n"
+                        f"**--- OUTPUT FORMAT: JSON ---**\n"
+                        f"Return a JSON object with this structure:\n"
+                        f"```json\n"
+                        f"{{\n"
+                        f'  "variation_name": "{variation_type}",\n'
+                        f'  "parts": [\n'
+                        f'    {{\n'
+                        f'      "part_index": 0,\n'
+                        f'      "notes": [\n'
+                        f'        {{"pitch": 60, "start_beat": 0.0, "duration_beats": 1.0, "velocity": 100}}\n'
+                        f'      ],\n'
+                        f'      "track_automations": {{"pitch_bend": [], "cc": []}}\n'
+                        f'    }}\n'
+                        f'  ]\n'
+                        f'}}\n'
+                        f"```\n\n"
+                        f"Each note must have: pitch (0-127), start_beat (float, relative to part start), duration_beats (float), velocity (1-127).\n"
+                        f"Notes may optionally include an \"automations\" object with pitch_bend and/or cc arrays.\n"
+                        f"Parts may optionally include a \"track_automations\" object with pitch_bend and/or cc arrays.\n"
+                        f"**IMPORTANT:** Return ONLY the JSON object, no markdown, no explanations, no prose. Start with '{{' and end with '}}'."
+                    )
+                    print(Fore.CYAN + f"Reduced context from {len(original_context_summary)} to {len(context_summary)} parts to fit within {token_limit:,} token limit." + Style.RESET_ALL)
+                    continue
+                else:
+                    print(Fore.RED + f"Unable to reduce context further. Token limit {token_limit:,} is too restrictive." + Style.RESET_ALL)
+                    return None
+            else:
+                # Re-raise if it's not a token limit error
+                raise
         
         try:
             # Extract JSON from response
@@ -917,6 +1041,28 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
                         continue
                     
                     try:
+                        # Convert compact format to full format if needed
+                        # Resume files always use full format, but LLM responses may use compact format
+                        has_compact = ('s' in note or 'd' in note or 'p' in note or 'v' in note)
+                        has_full = ('start_beat' in note or 'duration_beats' in note or 'pitch' in note or 'velocity' in note)
+                        
+                        if has_compact and not has_full:
+                            # Convert from compact to full format
+                            full_note = {}
+                            if 's' in note:
+                                full_note['start_beat'] = note['s']
+                            if 'd' in note:
+                                full_note['duration_beats'] = note['d']
+                            if 'p' in note:
+                                full_note['pitch'] = note['p']
+                            if 'v' in note:
+                                full_note['velocity'] = note['v']
+                            # Preserve other fields (automations, etc.)
+                            for key in note:
+                                if key not in ['s', 'd', 'p', 'v']:
+                                    full_note[key] = note[key]
+                            note = full_note
+                        
                         # Validate and clamp values
                         pitch = int(note.get("pitch", 60))
                         pitch = max(0, min(127, pitch))  # Clamp to valid MIDI range
