@@ -82,14 +82,73 @@ LAST_PER_HOUR_SEEN_TS: float = 0.0
 NEXT_HOURLY_PROBE_TS: float = 0.0
 
 # --- Helper: classify 429 quota messages (best-effort) ---
+def _extract_retry_after_seconds(err_text: str) -> float | None:
+    """Extract retry time in seconds from error message.
+    Handles various formats:
+    - 'Please retry in 29.004234757s' (seconds)
+    - 'Please retry in 25.109' (assumed seconds if < 100, otherwise hours)
+    - 'Please retry in 1.5 hours'
+    - 'Please retry in 30 minutes'
+    """
+    try:
+        import re
+        # Look for "Please retry in X [unit]" or "retry in X [unit]"
+        # Try to match with explicit unit first
+        patterns = [
+            r'(?:please\s+)?retry\s+in\s+([\d.]+)\s*(s|sec|second|seconds)',
+            r'(?:please\s+)?retry\s+in\s+([\d.]+)\s*(m|min|minute|minutes)',
+            r'(?:please\s+)?retry\s+in\s+([\d.]+)\s*(h|hr|hour|hours)',
+            r'(?:please\s+)?retry\s+in\s+([\d.]+)\s*(d|day|days)',
+            r'(?:please\s+)?retry\s+in\s+([\d.]+)',  # No unit - try to infer
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, err_text.lower())
+            if match:
+                value = float(match.group(1))
+                unit = match.group(2) if len(match.groups()) > 1 else None
+                
+                if unit:
+                    # Explicit unit found
+                    if unit.startswith('s'):
+                        return value  # Already in seconds
+                    elif unit.startswith('m'):
+                        return value * 60  # Convert minutes to seconds
+                    elif unit.startswith('h'):
+                        return value * 3600  # Convert hours to seconds
+                    elif unit.startswith('d'):
+                        return value * 86400  # Convert days to seconds
+                else:
+                    # No unit - try to infer from value
+                    # If value < 100, assume seconds (common for per-minute limits)
+                    # If value >= 100, assume hours (common for daily limits)
+                    if value < 100:
+                        return value  # Assume seconds
+                    else:
+                        return value * 3600  # Assume hours, convert to seconds
+    except Exception:
+        pass
+    return None
+
 def _classify_quota_error(err_text: str) -> str:
     """Heuristic classification of quota type from error text.
-    Priority: per-day > per-hour > per-minute > rate-limit > user/project/unknown
+    Priority: token-limit (per-minute) > per-day > per-hour > per-minute > rate-limit > user/project/unknown
+    
+    IMPORTANT: Input token limits (125,000 tokens) are PER MINUTE, not per day!
     """
     try:
         t = (err_text or "").lower()
         # Normalize separators
         t = t.replace("-", " ")
+        
+        # Check for input token limit errors FIRST - these are per-minute limits
+        if ("input_token" in t or "input token" in t) and ("quota" in t or "limit" in t):
+            # Token limits are per-minute (125,000 tokens per minute for free tier)
+            return "per-minute"
+        
+        # Check for "exceeded your current quota" - this is typically a daily quota
+        if "exceeded your current quota" in t or "exceeded your quota" in t:
+            return "per-day"
         # Prefer explicit daily/hourly/minute windows first
         if any(k in t for k in ["per day", "daily", "per 24 hours", "per 24hrs", "per 24 hr", "per 1 day", "per day per user"]):
             return "per-day"
@@ -116,12 +175,16 @@ def _classify_quota_error(err_text: str) -> str:
 # --- Per-key cooldown management (per-minute quota) ---
 KEY_COOLDOWN_UNTIL = {}  # index->unix_timestamp until which key is cooling down
 KEY_QUOTA_TYPE: Dict[int, str] = {}  # index -> last quota class seen
+INVALID_KEYS: set = set()  # Set of key indices that are permanently invalid (from testing)
 KEY_ROTATION_STRIDE = 1  # try all keys sequentially without skipping
-PER_MINUTE_COOLDOWN_SECONDS = 60
+PER_MINUTE_COOLDOWN_SECONDS = 60  # RPM limits use sliding window - wait full minute to ensure oldest request falls out
 PER_HOUR_COOLDOWN_SECONDS = 3600
 PER_DAY_COOLDOWN_SECONDS = 86400
 
 def _is_key_available(idx: int) -> bool:
+    # Don't use keys that are marked as permanently invalid
+    if idx in INVALID_KEYS:
+        return False
     until = KEY_COOLDOWN_UNTIL.get(idx, 0)
     return time.time() >= until
 
@@ -134,9 +197,10 @@ def _set_key_cooldown(idx: int, seconds: float, *, force: bool = False) -> None:
 
 def _reset_all_cooldowns() -> None:
     """Reset all API key cooldowns - useful for fresh API keys."""
-    global KEY_COOLDOWN_UNTIL, KEY_QUOTA_TYPE
+    global KEY_COOLDOWN_UNTIL, KEY_QUOTA_TYPE, INVALID_KEYS
     KEY_COOLDOWN_UNTIL.clear()
     KEY_QUOTA_TYPE.clear()
+    INVALID_KEYS.clear()  # Clear invalid keys on reset
     print(Fore.GREEN + "All API key cooldowns reset." + Style.RESET_ALL)
 
 def _next_available_key(start_idx: int | None = None) -> int | None:
@@ -299,7 +363,23 @@ def get_user_input(prompt, default=None):
     response = input(f"{Fore.GREEN}{prompt}{Style.RESET_ALL} ").strip()
     return response or default
 
-def initialize_api_keys(config):
+def test_api_key(key: str, model_name: str = "gemini-2.5-pro") -> Tuple[bool, str]:
+    """Test if an API key is valid by making a simple test request."""
+    try:
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel(model_name=model_name)
+        # Make a minimal test request
+        response = model.generate_content("Say 'OK'", safety_settings=[
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ])
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
+def initialize_api_keys(config, test_keys: bool = False):
     """Loads API keys from config and prepares them for rotation."""
     global API_KEYS, CURRENT_KEY_INDEX
     
@@ -317,6 +397,34 @@ def initialize_api_keys(config):
         return False
     
     print(Fore.CYAN + f"Found {len(API_KEYS)} API key(s). Starting with key #1.")
+    
+    # Optional: Test keys if requested
+    if test_keys:
+        global INVALID_KEYS
+        model_name = config.get("model_name", "gemini-2.5-pro")
+        print(Fore.CYAN + "\nTesting API keys..." + Style.RESET_ALL)
+        valid_keys = []
+        INVALID_KEYS.clear()
+        for i, key in enumerate(API_KEYS):
+            is_valid, error_msg = test_api_key(key, model_name)
+            if is_valid:
+                print(Fore.GREEN + f"  Key #{i+1}: ✓ Valid" + Style.RESET_ALL)
+                valid_keys.append(key)
+            else:
+                print(Fore.RED + f"  Key #{i+1}: ✗ Invalid - {error_msg[:100]}" + Style.RESET_ALL)
+                # Mark this key index as permanently invalid
+                INVALID_KEYS.add(i)
+        
+        if valid_keys:
+            # Only keep valid keys and remap indices
+            API_KEYS = valid_keys
+            CURRENT_KEY_INDEX = 0
+            INVALID_KEYS.clear()  # Clear since we've filtered the list
+            print(Fore.GREEN + f"\n{len(valid_keys)} valid key(s) available." + Style.RESET_ALL)
+        else:
+            print(Fore.RED + "\n✗ No valid API keys found! Please check your keys in config.yaml" + Style.RESET_ALL)
+            return False
+    
     return True
 
 def get_next_api_key():
@@ -343,6 +451,75 @@ CONFIG_FILE = os.path.join(script_dir, "config.yaml")
 # --- END ROBUST PATH ---
 
 MAX_CONTEXT_CHARS = 1000000  # A safe buffer below the 1M token limit for Gemini
+# Free tier input token limit (125,000 tokens PER MINUTE, not per day!)
+FREE_TIER_INPUT_TOKEN_LIMIT = 125000
+# Paid tier input token limit (1,000,000 tokens - Gemini's standard limit)
+PAID_TIER_INPUT_TOKEN_LIMIT = 1000000
+# Estimated characters per token (based on observed ratio)
+CHARS_PER_TOKEN = 2.33
+
+def get_input_token_limit(config: Dict) -> int:
+    """
+    Returns the appropriate input token limit based on the API tier setting in config.
+    - "free" or "free_tier": 125,000 tokens (Free Tier limit)
+    - "paid" or "paid_tier" or any other value: 1,000,000 tokens (Paid Tier limit)
+    """
+    api_tier = config.get("api_tier", "free").lower()
+    if api_tier in ["free", "free_tier"]:
+        return FREE_TIER_INPUT_TOKEN_LIMIT
+    else:
+        return PAID_TIER_INPUT_TOKEN_LIMIT
+
+def _extract_token_limit_from_error(error_message: str) -> int | None:
+    """
+    Extracts the token limit from an API error message.
+    Returns the limit as an integer, or None if not found.
+    
+    Example error message:
+    "Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 125000"
+    """
+    try:
+        # Look for "limit: <number>" pattern
+        import re
+        # Try to find "limit: 125000" or "limit:125000" or "limit=125000"
+        patterns = [
+            r'limit[:\s=]+(\d+)',
+            r'limit[:\s=]+(\d+(?:\.\d+)?)',  # Also handle decimals
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, error_message, re.IGNORECASE)
+            if match:
+                limit = int(float(match.group(1)))
+                return limit
+        return None
+    except Exception:
+        return None
+
+def _compact_notes_json(notes: List[Dict]) -> str:
+    """
+    Serialize notes in compact JSON format to save tokens.
+    Uses short field names: s=start_beat, d=duration_beats, p=pitch, v=velocity
+    This reduces token usage by ~40-50% while preserving all note data.
+    """
+    if not isinstance(notes, list):
+        return "[]"
+    compact_notes = []
+    for note in notes:
+        compact_note = {}
+        if 'start_beat' in note:
+            compact_note['s'] = note['start_beat']
+        if 'duration_beats' in note:
+            compact_note['d'] = note['duration_beats']
+        if 'pitch' in note:
+            compact_note['p'] = note['pitch']
+        if 'velocity' in note:
+            compact_note['v'] = note['velocity']
+        # Preserve other fields (automations, etc.) with original names
+        for key in note:
+            if key not in ['start_beat', 'duration_beats', 'pitch', 'velocity']:
+                compact_note[key] = note[key]
+        compact_notes.append(compact_note)
+    return json.dumps(compact_notes, separators=(',', ':'))
 BEATS_PER_BAR = 4
 TICKS_PER_BEAT = 480
 # Limit for generated automation steps per curve to avoid huge MIDI files
@@ -8432,6 +8609,63 @@ def get_dynamic_context(all_past_themes: List[Dict], character_budget: int = MAX
     # If we get here, all themes fit
     return list(reversed(context_themes)), 0
 
+def get_dynamic_context_by_tokens(all_past_themes: List[Dict], base_prompt_text: str, token_limit: int = FREE_TIER_INPUT_TOKEN_LIMIT) -> Tuple[List[Dict], int]:
+    """
+    Selects the most recent themes that fit within a token limit for the context.
+    Removes themes from the beginning until the estimated token count is below the limit.
+    Returns the selected themes and the starting index from the original list.
+    """
+    if not all_past_themes:
+        return [], 0
+    
+    # Estimate tokens for base prompt
+    base_chars = len(base_prompt_text)
+    base_tokens = int(base_chars / CHARS_PER_TOKEN)
+    
+    # Calculate available token budget for themes
+    available_tokens = token_limit - base_tokens
+    
+    if available_tokens <= 0:
+        # Base prompt already exceeds limit, return empty context
+        return [], len(all_past_themes)
+    
+    # Start with all themes and remove from beginning until we fit
+    context_themes = list(all_past_themes)
+    start_index = 0
+    
+    while context_themes:
+        # Estimate tokens for current theme set
+        themes_text = ""
+        for theme in context_themes:
+            try:
+                # Format theme for prompt (same as in create_theme_prompt)
+                theme_name = theme.get("description", f"Theme {chr(65 + start_index + context_themes.index(theme))}")
+                themes_text += f"- **{theme_name}**:\n"
+                for track in theme.get('tracks', []):
+                    notes_as_str = _compact_notes_json(track.get('notes', []))
+                    themes_text += f"  - **{track.get('instrument_name', 'Unknown')}** (Role: {track.get('role', 'complementary')}):\n  ```json\n  {notes_as_str}\n  ```\n"
+            except Exception:
+                continue
+        
+        themes_chars = len(themes_text)
+        themes_tokens = int(themes_chars / CHARS_PER_TOKEN)
+        total_estimated_tokens = base_tokens + themes_tokens
+        
+        if total_estimated_tokens <= token_limit:
+            # We fit within the limit
+            return context_themes, start_index
+        
+        # Remove the oldest theme (first in list)
+        if len(context_themes) > 1:
+            context_themes.pop(0)
+            start_index += 1
+        else:
+            # Even a single theme doesn't fit, return empty
+            return [], len(all_past_themes)
+    
+    # No themes fit
+    return [], len(all_past_themes)
+
 def get_scale_notes(root_note, scale_type="minor"):
     """
     Generates a list of MIDI note numbers for a given root note and scale type.
@@ -8786,23 +9020,12 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     # Context for other tracks *within the current theme*
     context_prompt_part = ""
     if context_tracks:
-        notes_cap = 0
-        try:
-            notes_cap = int(config.get('_notes_context_cap', MAX_NOTES_IN_CONTEXT))
-        except Exception:
-            notes_cap = MAX_NOTES_IN_CONTEXT
         context_prompt_part = "**Inside the current theme, you have already written these parts. Compose a new part that fits with them:**\n"
+        context_prompt_part += "**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n\n"
         for track in context_tracks:
-            # Use a more compact representation for context to save tokens and reduce JSON failures
-            try:
-                notes = track.get('notes', [])
-                if isinstance(notes, list) and len(notes) > max(1, notes_cap):
-                    head = notes[:max(1, notes_cap)//2]
-                    tail = notes[-max(1, notes_cap)//2:]
-                    notes = head + tail
-            except Exception:
-                notes = track.get('notes', [])
-            notes_as_str = json.dumps(notes, separators=(',', ':'))
+            # Include all notes in compact format to save tokens
+            notes = track.get('notes', [])
+            notes_as_str = _compact_notes_json(notes)
             context_prompt_part += f"- **{track['instrument_name']}** (Role: {track['role']}):\n```json\n{notes_as_str}\n```\n"
         context_prompt_part += "\n"
     
@@ -9036,18 +9259,10 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     # ... (The rest of the function for smart context calculation and final prompt assembly remains largely the same)
     
     # --- Part 2: Smart Context Calculation ---
-    # Calculate the size of the prompt without the historical context
-    base_prompt_size = len(
-        boilerplate_instructions + basic_instructions + theme_task_instruction +
-        context_prompt_part + call_and_response_instructions + drum_map_instructions +
-        role_instructions + polyphony_rule + stay_in_key_rule + timing_rule
-    )
-
-    # Determine the remaining character budget for previous themes
-    history_budget = MAX_CONTEXT_CHARS - base_prompt_size
-    
-    # Get only the themes that fit in the remaining budget
-    safe_previous_themes, context_start_index = get_dynamic_context(previous_themes_full_history, character_budget=history_budget)
+    # Use all available themes initially - token limit reduction will be applied reactively
+    # if we get a token limit error from the API
+    safe_previous_themes = previous_themes_full_history
+    context_start_index = 0
 
     # --- Part 3: Assemble the FINAL prompt ---
     previous_themes_prompt_part = ""
@@ -9065,13 +9280,15 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
                 limit_source = f"limited by availability (only {total_previous_themes} previous themes exist, window={cws_cfg})"
             # Case B: window provided enough, but we still used fewer => char limit
             elif used_themes_count < total_previous_themes:
-                limit_source = f"due to character limit (MAX_CONTEXT_CHARS={MAX_CONTEXT_CHARS})"
+                token_limit = get_input_token_limit(config)
+                limit_source = f"due to token limit ({token_limit:,} tokens)"
             # Case C: exactly the window size used
             else:
                 limit_source = f"due to 'context_window_size={cws_cfg}'"
         elif cws_cfg == -1:
             if used_themes_count < total_previous_themes:
-                limit_source = f"due to character limit (MAX_CONTEXT_CHARS={MAX_CONTEXT_CHARS})"
+                token_limit = get_input_token_limit(config)
+                limit_source = f"due to token limit ({token_limit:,} tokens)"
             else:
                 limit_source = "using full available history"
 
@@ -9094,12 +9311,13 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
 
     if safe_previous_themes:
         previous_themes_prompt_part = "**You have already composed the following themes. Use them as the primary context for what comes next:**\n"
+        previous_themes_prompt_part += "**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n\n"
         for i, theme in enumerate(safe_previous_themes):
             theme_name = theme.get("description", f"Theme {chr(65 + i)}")
             previous_themes_prompt_part += f"- **{theme_name}**:\n"
-            # Include the full note data for each track in the theme.
+            # Include all notes in compact format to save tokens
             for track in theme['tracks']:
-                notes_as_str = json.dumps(track['notes'], separators=(',', ':'))
+                notes_as_str = _compact_notes_json(track.get('notes', []))
                 previous_themes_prompt_part += f"  - **{track['instrument_name']}** (Role: {track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
         previous_themes_prompt_part += "\n"
 
@@ -9541,6 +9759,38 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     if not isinstance(sustain_events, list):
                         raise TypeError("The 'sustain_pedal' field is not a valid list.")
 
+                    # --- Convert compact format to full format if needed ---
+                    # The LLM may return notes in compact format (s, d, p, v) or full format
+                    # Resume files always use full format, but LLM responses may use compact format
+                    normalized_notes = []
+                    for note in notes_list:
+                        if not isinstance(note, dict):
+                            continue
+                        # Check if it's in compact format: has compact keys AND missing full keys
+                        has_compact = ('s' in note or 'd' in note or 'p' in note or 'v' in note)
+                        has_full = ('start_beat' in note or 'duration_beats' in note or 'pitch' in note or 'velocity' in note)
+                        
+                        if has_compact and not has_full:
+                            # Convert from compact to full format
+                            full_note = {}
+                            if 's' in note:
+                                full_note['start_beat'] = note['s']
+                            if 'd' in note:
+                                full_note['duration_beats'] = note['d']
+                            if 'p' in note:
+                                full_note['pitch'] = note['p']
+                            if 'v' in note:
+                                full_note['velocity'] = note['v']
+                            # Preserve other fields (automations, etc.)
+                            for key in note:
+                                if key not in ['s', 'd', 'p', 'v']:
+                                    full_note[key] = note[key]
+                            normalized_notes.append(full_note)
+                        else:
+                            # Already in full format (or mixed - prefer full format)
+                            normalized_notes.append(note)
+                    notes_list = normalized_notes
+
                     # --- Data Validation ---
                     required_keys = {"pitch", "start_beat", "duration_beats", "velocity"}
                     validated_notes = [
@@ -9601,9 +9851,57 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
 
             except Exception as e:
                 error_message = str(e).lower()
-                if "429" in error_message and "quota" in error_message:
+                full_error = str(e)
+                
+                # Check for token limit errors specifically (input token count exceeded)
+                is_token_limit_error = (
+                    "input_token" in error_message or
+                    "input token" in error_message or
+                    ("quota" in error_message and "token" in error_message and "limit" in error_message)
+                )
+                
+                # If it's a token limit error, extract the limit and reduce context
+                # NOTE: Token limits are PER MINUTE (125,000 tokens/minute for free tier)
+                if is_token_limit_error:
+                    token_limit = _extract_token_limit_from_error(full_error)
+                    if token_limit is not None:
+                        print(Fore.YELLOW + f"Token limit exceeded: {token_limit:,} tokens/minute. Reducing context and retrying..." + Style.RESET_ALL)
+                        # Reduce themes by half and recreate prompt
+                        if isinstance(previous_themes_full_history, list) and len(previous_themes_full_history) > 1:
+                            reduced_themes = previous_themes_full_history[-max(1, len(previous_themes_full_history)//2):]
+                            # Recreate prompt with reduced context
+                            prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, reduced_themes, current_theme_index)
+                            effective_prompt = prompt
+                            if full_failure_count >= 4:
+                                effective_prompt = re.sub(r"\*\*\-\-\- Advanced MIDI Automation[\s\S]*?\n\n", "", effective_prompt)
+                            effective_prompt += "\nOutput: Return a single JSON object with a 'notes' key only; no prose.\n"
+                            print(Fore.CYAN + f"Reduced context from {len(previous_themes_full_history)} to {len(reduced_themes)} themes to fit within {token_limit:,} token limit." + Style.RESET_ALL)
+                            # Update previous_themes_full_history for next iteration
+                            previous_themes_full_history = reduced_themes
+                            # Retry with reduced context (don't increment attempt_count)
+                            continue
+                        else:
+                            print(Fore.RED + f"Unable to reduce context further. Token limit {token_limit:,} is too restrictive." + Style.RESET_ALL)
+                            # Fall through to normal error handling
+                
+                # Check for quota/rate limit errors - be more lenient with detection
+                is_quota_error = (
+                    "429" in error_message or 
+                    "quota" in error_message or 
+                    "rate limit" in error_message or 
+                    "rate-limit" in error_message or
+                    "resource exhausted" in error_message or
+                    ("exceeded" in error_message and ("limit" in error_message or "quota" in error_message))
+                )
+                if is_quota_error:
                     qtype = _classify_quota_error(error_message)
                     print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: API quota exceeded for key #{CURRENT_KEY_INDEX + 1} ({qtype})." + Style.RESET_ALL)
+                    print(Fore.YELLOW + f"  Full error: {full_error[:400]}" + Style.RESET_ALL)
+                    # Additional info based on quota type
+                    if qtype == "per-day":
+                        print(Fore.CYAN + f"  Note: Daily quota exhausted. Will probe hourly to check for reset." + Style.RESET_ALL)
+                    elif qtype == "per-minute":
+                        print(Fore.CYAN + f"  Note: Per-minute limit exceeded (RPM or token limit). Waiting 65s (sliding 60s window + buffer)." + Style.RESET_ALL)
                     # Track last seen quota classes
                     KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
                     if qtype == "per-day":
@@ -9611,17 +9909,42 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     elif qtype == "per-hour":
                         globals()['LAST_PER_HOUR_SEEN_TS'] = time.time()
                     # Apply cooldown based on detected window
-                    # For daily quotas: retry hourly to probe reset windows
+                    # For daily quotas: use retry time from API if available, but cap at 24 hours
+                    # (API sometimes reports incorrect retry times, so we don't trust values > 24h)
                     if qtype == "per-day":
-                        # Probe hourly instead of locking 24h
-                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS, force=True)
+                        # Try to extract retry time from error message
+                        retry_after_seconds = _extract_retry_after_seconds(full_error)
+                        if retry_after_seconds is not None:
+                            # Convert to hours for display
+                            retry_after_hours = retry_after_seconds / 3600.0
+                            if retry_after_hours <= 24.0:
+                                # Use the exact retry time from the API if it's reasonable (<= 24h)
+                                retry_seconds = int(retry_after_seconds) + 300  # Add 5min buffer
+                                _set_key_cooldown(CURRENT_KEY_INDEX, retry_seconds, force=True)
+                                if retry_after_hours >= 1.0:
+                                    print(Fore.CYAN + f"  Note: Daily quota exhausted. API says retry in {retry_after_hours:.2f} hours. Waiting {retry_seconds//3600:.1f}h {retry_seconds%3600//60:.0f}m." + Style.RESET_ALL)
+                                else:
+                                    print(Fore.CYAN + f"  Note: Daily quota exhausted. API says retry in {retry_after_seconds:.1f} seconds. Waiting {retry_seconds//60:.0f}m {retry_seconds%60:.0f}s." + Style.RESET_ALL)
+                            else:
+                                # If retry time is > 24h, use hourly probe
+                                # (API sometimes reports incorrect retry times, so we probe hourly instead)
+                                _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS, force=True)
+                                print(Fore.CYAN + f"  Note: Daily quota exhausted. API says retry in {retry_after_hours:.2f} hours, but this seems incorrect (>24h). Will probe hourly instead." + Style.RESET_ALL)
+                        else:
+                            # If retry time is not available, use hourly probe
+                            _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS, force=True)
+                            print(Fore.CYAN + f"  Note: Daily quota exhausted. Will probe hourly to check for reset." + Style.RESET_ALL)
                     elif qtype == "per-hour":
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
-                    if qtype == "per-day":
-                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS, force=True)
-                    elif qtype == "per-hour":
+                    elif qtype == "rate-limit":
+                        # Rate-limit often indicates daily quota, especially when multiple keys fail
+                        # Use hourly cooldown to probe for reset
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
-                    else:  # per-minute, rate-limit, unknown
+                    elif qtype == "per-minute":
+                        # RPM limits use sliding window - wait full 60s + small buffer to ensure oldest request falls out
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS + 5)
+                    else:  # unknown
+                        # For unknown quota types, use conservative 60s cooldown
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS)
                     
                     if len(API_KEYS) > 1 and not keys_have_rotated_fully:
@@ -10028,21 +10351,12 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     # --- Context from tracks WITHIN the CURRENT theme ---
     inner_context_prompt_part = ""
     if inner_context_tracks:
-        try:
-            notes_cap = int(config.get('_notes_context_cap', MAX_NOTES_IN_CONTEXT))
-        except Exception:
-            notes_cap = MAX_NOTES_IN_CONTEXT
         inner_context_prompt_part = "**Context from the Current Song Section:**\nWithin this section, you have already optimized these parts. Make your new part fit perfectly with them.\n"
+        inner_context_prompt_part += "**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n\n"
         for track in inner_context_tracks:
-            try:
-                notes = track.get('notes', [])
-                if isinstance(notes, list) and len(notes) > max(1, notes_cap):
-                    head = notes[:max(1, notes_cap)//2]
-                    tail = notes[-max(1, notes_cap)//2:]
-                    notes = head + tail
-            except Exception:
-                notes = track.get('notes', [])
-            notes_as_str = json.dumps(notes, separators=(',', ':'))
+            # Include all notes in compact format to save tokens
+            notes = track.get('notes', [])
+            notes_as_str = _compact_notes_json(notes)
             inner_context_prompt_part += f"- **{get_instrument_name(track)}** (Role: {track['role']}):\n```json\n{notes_as_str}\n```\n"
         inner_context_prompt_part += "\n"
 
@@ -10145,12 +10459,6 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     role_instructions = get_role_instructions_for_optimization(role, config)
 
     # --- Smart Context Calculation ---
-    base_prompt_size = len(
-        basic_instructions + inner_context_prompt_part + original_part_prompt +
-        optimization_instruction + optimization_goal_prompt + role_instructions +
-        drum_map_instructions + polyphony_rule + stay_in_key_rule
-    )
-    
     # Respect fixed context window size if configured (>0)
     historical_source = historical_themes_context
     cws = config.get("context_window_size", -1)
@@ -10159,8 +10467,10 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     elif isinstance(cws, int) and cws == 0:
         historical_source = []
 
-    history_budget = MAX_CONTEXT_CHARS - base_prompt_size
-    safe_context_themes, context_start_index = get_dynamic_context(historical_source, character_budget=history_budget)
+    # Use all available themes initially - token limit reduction will be applied reactively
+    # if we get a token limit error from the API
+    safe_context_themes = historical_source
+    context_start_index = 0
     
     # --- Context Info Printout ---
     total_previous_themes = len(historical_source)
@@ -10172,12 +10482,14 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
              if total_previous_themes < cws:
                  limit_source = f"limited by availability (only {total_previous_themes} previous themes exist, window={cws})"
              elif used_themes_count < total_previous_themes:
-                 limit_source = f"due to character limit (MAX_CONTEXT_CHARS={MAX_CONTEXT_CHARS})"
+                 token_limit = get_input_token_limit(config)
+                 limit_source = f"due to token limit ({token_limit:,} tokens)"
              else:
                  limit_source = f"due to 'context_window_size={config['context_window_size']}'"
         elif cws == -1:
              if used_themes_count < total_previous_themes:
-                 limit_source = f"due to character limit (MAX_CONTEXT_CHARS={MAX_CONTEXT_CHARS})"
+                 token_limit = get_input_token_limit(config)
+                 limit_source = f"due to token limit ({token_limit:,} tokens)"
              else:
                  limit_source = "using full available history"
         
@@ -10198,6 +10510,7 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
     theme_length_beats = length * config["time_signature"]["beats_per_bar"]
     if safe_context_themes:
         previous_themes_prompt_part = "**Context from Previous Song Sections:**\nThe song begins with the following part(s). Their timings are relative to the start of their own section. Use them as a reference for your optimization.\n"
+        previous_themes_prompt_part += "**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n\n"
         for i, theme in enumerate(safe_context_themes):
             theme_name = theme.get("description", f"Theme {chr(65 + context_start_index + i)}")
             # Calculate the absolute time offset for this specific context theme
@@ -10218,7 +10531,7 @@ def create_optimization_prompt(config: Dict, length: int, track_to_optimize: Dic
                     new_note['start_beat'] = max(0, round(sb - time_offset_beats, 4))
                     normalized_notes.append(new_note)
 
-                notes_as_str = json.dumps(normalized_notes, separators=(',', ':'))
+                notes_as_str = _compact_notes_json(normalized_notes)
                 previous_themes_prompt_part += f"  - **{track.get('instrument_name', 'Unknown Instrument')}** (Role: {track.get('role', 'complementary')}):\n  ```json\n  {notes_as_str}\n  ```\n"
         previous_themes_prompt_part += "\n"
 
@@ -10451,6 +10764,40 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                 # Harmonize intentional silence handling with generation path
                 try:
                     notes_list = parsed_data.get("notes", [])
+                    
+                    # Convert compact format to full format if needed
+                    # Resume files always use full format, but LLM responses may use compact format
+                    if isinstance(notes_list, list):
+                        normalized_notes = []
+                        for note in notes_list:
+                            if not isinstance(note, dict):
+                                continue
+                            # Check if it's in compact format: has compact keys AND missing full keys
+                            has_compact = ('s' in note or 'd' in note or 'p' in note or 'v' in note)
+                            has_full = ('start_beat' in note or 'duration_beats' in note or 'pitch' in note or 'velocity' in note)
+                            
+                            if has_compact and not has_full:
+                                # Convert from compact to full format
+                                full_note = {}
+                                if 's' in note:
+                                    full_note['start_beat'] = note['s']
+                                if 'd' in note:
+                                    full_note['duration_beats'] = note['d']
+                                if 'p' in note:
+                                    full_note['pitch'] = note['p']
+                                if 'v' in note:
+                                    full_note['velocity'] = note['v']
+                                # Preserve other fields (automations, etc.)
+                                for key in note:
+                                    if key not in ['s', 'd', 'p', 'v']:
+                                        full_note[key] = note[key]
+                                normalized_notes.append(full_note)
+                            else:
+                                # Already in full format (or mixed - prefer full format)
+                                normalized_notes.append(note)
+                        parsed_data["notes"] = normalized_notes
+                        notes_list = normalized_notes
+                    
                     if isinstance(notes_list, list) and len(notes_list) == 1:
                         n0 = notes_list[0]
                         if isinstance(n0, dict) and n0.get("pitch") == 0 and n0.get("start_beat") == 0 and n0.get("duration_beats") == 0 and n0.get("velocity") == 0:
@@ -10465,7 +10812,49 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
 
             except Exception as e:
                 error_message = str(e).lower()
-                if "429" in error_message and "quota" in error_message:
+                full_error = str(e)
+                
+                # Check for token limit errors specifically (input token count exceeded)
+                is_token_limit_error = (
+                    "input_token" in error_message or
+                    "input token" in error_message or
+                    ("quota" in error_message and "token" in error_message and "limit" in error_message)
+                )
+                
+                # If it's a token limit error, extract the limit and reduce context
+                # NOTE: Token limits are PER MINUTE (125,000 tokens/minute for free tier)
+                if is_token_limit_error:
+                    token_limit = _extract_token_limit_from_error(full_error)
+                    if token_limit is not None:
+                        print(Fore.YELLOW + f"Token limit exceeded: {token_limit:,} tokens/minute. Reducing context and retrying..." + Style.RESET_ALL)
+                        # Reduce themes by half and recreate prompt
+                        if isinstance(historical_themes_context, list) and len(historical_themes_context) > 1:
+                            reduced_themes = historical_themes_context[-max(1, len(historical_themes_context)//2):]
+                            # Recreate prompt with reduced context
+                            prompt = create_optimization_prompt(config, length, track_to_optimize, role, theme_label, theme_detailed_description, reduced_themes, inner_context_tracks, current_theme_index, user_optimization_prompt)
+                            effective_prompt = prompt
+                            if attempt >= 4:
+                                effective_prompt = re.sub(r"\*\*\-\-\- Advanced MIDI Automation[\s\S]*?\n\n", "", effective_prompt)
+                            effective_prompt += "\nOutput: Return a single JSON object with a 'notes' key only; no prose.\n"
+                            print(Fore.CYAN + f"Reduced context from {len(historical_themes_context)} to {len(reduced_themes)} themes to fit within {token_limit:,} token limit." + Style.RESET_ALL)
+                            # Update historical_themes_context for next iteration
+                            historical_themes_context = reduced_themes
+                            # Retry with reduced context (don't increment attempt)
+                            continue
+                        else:
+                            print(Fore.RED + f"Unable to reduce context further. Token limit {token_limit:,} is too restrictive." + Style.RESET_ALL)
+                            # Fall through to normal error handling
+                
+                # Check for quota/rate limit errors - be more lenient with detection
+                is_quota_error = (
+                    "429" in error_message or 
+                    "quota" in error_message or 
+                    "rate limit" in error_message or 
+                    "rate-limit" in error_message or
+                    "resource exhausted" in error_message or
+                    ("exceeded" in error_message and ("limit" in error_message or "quota" in error_message))
+                )
+                if is_quota_error:
                     qtype = _classify_quota_error(error_message)
                     print(Fore.YELLOW + f"Warning: API quota exceeded for key #{CURRENT_KEY_INDEX + 1} ({qtype})." + Style.RESET_ALL)
                     KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
@@ -10478,7 +10867,11 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
                     elif qtype == "per-hour":
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
+                    elif qtype == "per-minute":
+                        # RPM limits use sliding window - wait full 60s + small buffer
+                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS + 5)
                     else:
+                        # For unknown quota types, use conservative 60s cooldown
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS)
                     
                     if len(API_KEYS) > 1:
@@ -10626,15 +11019,11 @@ def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: 
     inner_context_prompt_part = ""
     if inner_context_tracks:
         inner_context_prompt_part = "**Context from the Current Song Section:**\nWithin this section, other tracks already exist. Make your automation musically fit them.\n"
+        inner_context_prompt_part += "**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n\n"
         for track in inner_context_tracks:
-            try:
-                notes = track.get('notes', [])
-                if isinstance(notes, list) and len(notes) > MAX_NOTES_IN_CONTEXT:
-                    head = notes[:MAX_NOTES_IN_CONTEXT//2]; tail = notes[-MAX_NOTES_IN_CONTEXT//2:]
-                    notes = head + tail
-            except Exception:
-                notes = track.get('notes', [])
-            inner_context_prompt_part += f"- **{get_instrument_name(track)}** (Role: {track.get('role','complementary')}):\n```json\n{json.dumps(notes, separators=(',', ':'))}\n```\n"
+            # Include all notes in compact format to save tokens
+            notes = track.get('notes', [])
+            inner_context_prompt_part += f"- **{get_instrument_name(track)}** (Role: {track.get('role','complementary')}):\n```json\n{_compact_notes_json(notes)}\n```\n"
         inner_context_prompt_part += "\n"
 
     # Historical themes (relative times)
@@ -10642,6 +11031,7 @@ def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: 
     history_prompt = ""
     if historical_themes_context:
         history_prompt = "**Context from Previous Sections (relative to each section start):**\n"
+        history_prompt += "**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n\n"
         for i, theme in enumerate(historical_themes_context[-3:]):  # cap to last 3 for brevity
             history_prompt += f"- **{theme.get('description', f'Theme {i+1}')}:**\n"
             for track in theme.get('tracks', []):
@@ -10653,7 +11043,7 @@ def create_automation_prompt(config: Dict, length: int, base_track: Dict, role: 
                         normalized.append(new_note)
                     except Exception:
                         continue
-                history_prompt += f"  - **{get_instrument_name(track)}**:```json\n{json.dumps(normalized[:MAX_NOTES_IN_CONTEXT], separators=(',', ':'))}\n```\n"
+                history_prompt += f"  - **{get_instrument_name(track)}**:```json\n{_compact_notes_json(normalized)}\n```\n"
         history_prompt += "\n"
 
     # Automation flags
@@ -11211,12 +11601,17 @@ def generate_single_track_data(config: Dict, length_bars: int, instrument_name: 
                 if '429' in err_text or 'quota' in err_text.lower() or 'rate limit' in err_text.lower():
                     error_message = err_text
                     qtype = _classify_quota_error(error_message)
-                    cooldown = PER_MINUTE_COOLDOWN_SECONDS
-                    if qtype in ('per-hour', 'rate-limit'):
+                    if qtype == 'per-minute':
+                        # RPM limits use sliding window - wait full 60s + small buffer
+                        cooldown = PER_MINUTE_COOLDOWN_SECONDS + 5
+                    elif qtype in ('per-hour', 'rate-limit'):
                         cooldown = PER_HOUR_COOLDOWN_SECONDS
                     elif qtype == 'per-day':
                         # Probe hourly instead of 24h lock
                         cooldown = PER_HOUR_COOLDOWN_SECONDS
+                    else:
+                        # For unknown quota types, use conservative 60s cooldown
+                        cooldown = PER_MINUTE_COOLDOWN_SECONDS
                     _set_key_cooldown(CURRENT_KEY_INDEX, cooldown, force=(qtype=='per-day'))
                     KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
                     if qtype == 'per-day':
@@ -12319,17 +12714,27 @@ def handle_resume(resume_file_path, script_dir):
 
         print()
         # FIX: Re-initialize API keys with the (potentially) updated config from the current file
-        if initialize_api_keys(config):
+        # Note: test_keys=False to avoid wasting API quota on test requests
+        if initialize_api_keys(config, test_keys=False):
+            # CRITICAL: Reset all cooldowns when resuming with potentially new keys
+            _reset_all_cooldowns()
+            globals()['NEXT_HOURLY_PROBE_TS'] = 0.0
             genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
-            print(Fore.CYAN + f"Resume mode re-initialized with API key #{CURRENT_KEY_INDEX + 1}.")
+            print(Fore.CYAN + f"Resume mode re-initialized with API key #{CURRENT_KEY_INDEX + 1}." + Style.RESET_ALL)
+            print(Fore.GREEN + "All API key cooldowns reset for fresh start." + Style.RESET_ALL)
         else:
             print(Fore.RED + "Could not initialize API keys from config during resume. API calls will likely fail.")
+            print(Fore.YELLOW + "Tip: Your keys may be invalid, blocked, or have incorrect permissions." + Style.RESET_ALL)
 
     except Exception as e:
         print(Fore.YELLOW + f"Warning: Could not reload current settings. Using all settings from progress file. Reason: {e}" + Style.RESET_ALL)
         # Fallback: Try to initialize keys from the config stored in the progress file
         if initialize_api_keys(config):
+            # CRITICAL: Reset all cooldowns when resuming with potentially new keys
+            _reset_all_cooldowns()
+            globals()['NEXT_HOURLY_PROBE_TS'] = 0.0
             genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+            print(Fore.GREEN + "All API key cooldowns reset for fresh start." + Style.RESET_ALL)
         else:
             print(Fore.RED + "CRITICAL: Could not initialize API keys from progress file either. Aborting.")
             return None, None, None, None
