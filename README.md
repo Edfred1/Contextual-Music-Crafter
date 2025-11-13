@@ -379,5 +379,6 @@ These are potential features being considered for future development. They are i
 - **MIDITool**: Unified interface to simplify workflow across all tools (analysis, generation, optimization in one place).
 - **Variable Section Lengths**: Music Crafter support for different bar lengths per section instead of fixed-length parts (e.g., 4-bar intro, 16-bar verse, 2-bar riser, 8-bar drop, 12-bar breakdown—each tailored to the musical flow).
 - **Template System**: Save and reuse your favorite instrument/genre setups for faster project starts.
+- **SynthV Format Support**: Support for SynthV's native file format to enable automation of voice expression parameters (instead of only UTAU format), allowing more advanced vocal synthesis control.
 
 **Ideas and suggestions welcome!** If you have feature requests or workflow improvements in mind, feel free to open an issue or discussion on GitHub.
