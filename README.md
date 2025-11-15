@@ -30,6 +30,7 @@ The entire creative direction of the music is guided through an interactive setu
 - [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide)
 - [General notes (resume & exports)](#general-notes-resume--exports)
 - [Music Analyzer (optional)](#music-analyzer-optional)
+- [Melody Variation Generator (optional)](#melody-variation-generator-optional)
 - [Artifact Builder (optional)](#artifact-builder-optional)
 - [Further advanced notes (addendum)](#further-advanced-notes-addendum)
 - [Roadmap (Ideas)](#️-roadmap-ideas)
@@ -40,6 +41,7 @@ The entire creative direction of the music is guided through an interactive setu
 - **music_crafter.py**: Interactive planner (co‑producer). Creates/updates `config.yaml` and `song_settings.json`, then launches the generator.
 - **song_generator.py**: Core engine that builds, optimizes, and resumes full songs from the plan. Includes the lyric generator. Exports SynthV‑ready UST, Emvoice TXT, and (optionally) a single‑track MIDI for vocals.
 - **music_analyzer.py**: MIDI analysis tool that can analyze existing files, optimize selected tracks, add new context-aware tracks, and generate new MIDI from analyzed descriptions.
+- **melody_variation_generator.py**: Generates AI‑powered variations of a selected track from MIDI files or Final JSON artifacts. Creates multiple creative variations (e.g., syncopation, octaves, fills) while maintaining musical coherence.
 - **artifact_builder.py**: Utility to rebuild `.mid` from final artifacts or progress JSONs without re‑running generation.
 - **MIDI merger/** (folder): Standalone tool to merge multiple MIDI files into one multi-track project. See [MIDI merger README](MIDI%20merger/README_midi_merger.md).
 
@@ -217,7 +219,12 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 
 - **Iterative variation cycles on your own material**
   - Load the artifact produced by the analyzer in the song engine and do short optimize → listen → tweak rounds.
-  - Keep changes small per round to maintain “family resemblance” while discovering related variations. See also [Advanced usage and notes](#advanced-usage-and-notes) for model/cost tips.
+  - Keep changes small per round to maintain "family resemblance" while discovering related variations. See also [Advanced usage and notes](#advanced-usage-and-notes) for model/cost tips.
+
+- **Generate track variations with AI**
+  - Use the [Melody Variation Generator](#melody-variation-generator-optional) to create multiple creative variations of any track from your MIDI or Final JSON.
+  - Select specific parts to vary, let AI suggest variation types (syncopation, octaves, fills, etc.), and export original + variations in one MIDI file.
+  - Perfect for exploring different takes on a melody, bassline, or drum pattern while maintaining musical coherence.
 
 - **AI reinterpretation from analyzer summaries**
   - Analyze your multi‑track MIDI to produce compact section/track descriptions.
@@ -343,6 +350,47 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
     - Full optimization of the ORIGINAL imported MIDI.
 - When to use:
   - Use it when you want to use an existing multi‑track MIDI as a starting point, and produce artifacts that the generator or artifact builder can pick up.
+
+<a id="melody-variation-generator-optional"></a>
+## 🎵 Melody Variation Generator (optional)
+
+`melody_variation_generator.py` generates AI‑powered variations of a selected track from MIDI files or Final JSON artifacts, creating multiple creative takes while maintaining musical coherence.
+
+- What it does:
+  - Accepts input from MIDI files (`.mid`, `.midi`) or Final JSON artifacts (`final_run_*.json`).
+  - Analyzes which parts contain notes for the selected track, showing detailed metrics (note count, density, pitch range, velocity, duration).
+  - Lets you select specific parts to vary (or use all parts with notes).
+  - Uses AI to suggest creative variation types tailored to the track's role (e.g., "Syncopation", "Octaves", "Triplets", "Ghost Notes", "Fills").
+  - Generates multiple variations (1-10) using different techniques while respecting:
+    - The original musical intent and motifs
+    - Key/scale constraints
+    - Context from other tracks in the same parts
+    - Smooth transitions between parts
+    - Role-specific polyphony rules (monophonic, expressive monophonic, or polyphonic)
+  - Exports a MIDI file containing the original track (for selected parts) plus all generated variations as separate tracks.
+  - Supports MIDI automations (pitch bend, CC curves) if present in the original track.
+
+- How it works:
+  1. Select input: Choose a MIDI file or Final JSON artifact.
+  2. Select track: Pick the track you want to vary from the available tracks.
+  3. Analyze parts: Review which parts contain notes (with detailed metrics) and select which parts to vary.
+  4. Generate variation types: AI suggests creative variation techniques based on the track's role and musical context.
+  5. Generate variations: AI creates multiple variations, processing parts in chunks to manage token limits.
+  6. Export: Saves a MIDI file with the original track and all variations.
+
+- When to use:
+  - Explore different takes on a melody, bassline, or drum pattern.
+  - Generate alternative versions for A/B testing or layering.
+  - Create variations that maintain musical coherence while adding creative interest.
+  - Experiment with different techniques (syncopation, octaves, fills, etc.) on existing material.
+
+- Usage:
+  ```bash
+  python melody_variation_generator.py
+  ```
+
+- Output:
+  - MIDI file named `Variations_<TrackName>_<Timestamp>.mid` containing the original track (selected parts only) and all generated variations as separate tracks.
 
 <a id="artifact-builder-optional"></a>
 ## 🧱 Artifact Builder (optional)
