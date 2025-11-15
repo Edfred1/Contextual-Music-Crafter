@@ -32,7 +32,7 @@ Output tracks:
   - Track 3: "Ambient Pad"
 ```
 
-**Tip:** Use meaningful filenames for better organization!
+**Tip:** Use meaningful filenames for better context!
 
 ## Requirements
 
@@ -41,3 +41,4 @@ Output tracks:
 ---
 
 **Note:** Files are processed by creation date (oldest first). The first file's tempo and time signature are used for the merged output.
+
