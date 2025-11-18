@@ -36,6 +36,7 @@ REDUCE_CONTEXT_THIS_STEP = False  # If True, halve historical context for the cu
 REDUCE_CONTEXT_HALVES = 0        # Number of times to halve context for the current step
 LAST_CONTEXT_COUNT = 0           # Last known number of context themes (for hotkey preview)
 PLANNED_CONTEXT_COUNT = 0        # Planned context size after pending halvings (preview)
+EMPTY_TRACK_RETRY_COUNT: Dict[str, int] = {}  # Track name -> retry count for empty tracks
 
 # Lyrics per-part meta (optional side-channel from words generation)
 LYRICS_PART_META: Dict[str, Dict] = {}
@@ -132,9 +133,10 @@ def _extract_retry_after_seconds(err_text: str) -> float | None:
 
 def _classify_quota_error(err_text: str) -> str:
     """Heuristic classification of quota type from error text.
-    Priority: token-limit (per-minute) > per-day > per-hour > per-minute > rate-limit > user/project/unknown
+    Priority: token-limit (per-minute) > retry-time-based > per-day > per-hour > per-minute > rate-limit > user/project/unknown
     
     IMPORTANT: Input token limits (125,000 tokens) are PER MINUTE, not per day!
+    IMPORTANT: If retry time is very short (< 60s), it's likely per-minute, not per-day!
     """
     try:
         t = (err_text or "").lower()
@@ -146,8 +148,28 @@ def _classify_quota_error(err_text: str) -> str:
             # Token limits are per-minute (125,000 tokens per minute for free tier)
             return "per-minute"
         
-        # Check for "exceeded your current quota" - this is typically a daily quota
+        # --- IMPROVEMENT: Check retry time FIRST before classifying ---
+        # If retry time is very short (< 60s), it's almost certainly per-minute, not per-day
+        retry_after_seconds = _extract_retry_after_seconds(err_text)
+        if retry_after_seconds is not None:
+            if retry_after_seconds < 60:
+                # Very short retry time (< 1 minute) = per-minute limit
+                return "per-minute"
+            elif retry_after_seconds < 3600:
+                # Medium retry time (1 min - 1 hour) = per-hour limit
+                return "per-hour"
+            elif retry_after_seconds >= 3600:
+                # Long retry time (>= 1 hour) = per-day limit
+                return "per-day"
+        
+        # Check for "exceeded your current quota" - BUT verify with retry time if available
+        # If no retry time found, this might still be per-minute (e.g., RPM limits)
         if "exceeded your current quota" in t or "exceeded your quota" in t:
+            # Check for specific metrics that indicate per-minute limits
+            if "free_tier_requests" in t and "limit: 2" in t:
+                # Free tier has very low RPM limits (often 2 RPM) - this is per-minute!
+                return "per-minute"
+            # Default to per-day if no other indicators
             return "per-day"
         # Prefer explicit daily/hourly/minute windows first
         if any(k in t for k in ["per day", "daily", "per 24 hours", "per 24hrs", "per 24 hr", "per 1 day", "per day per user"]):
@@ -9369,7 +9391,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
     Generates musical data for a single instrument track using the generative AI model, adapted for themes.
     Returns a tuple of (track_data, token_count).
     """
-    global CURRENT_KEY_INDEX, SESSION_MODEL_OVERRIDE
+    global CURRENT_KEY_INDEX, SESSION_MODEL_OVERRIDE, EMPTY_TRACK_RETRY_COUNT
     prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history, current_theme_index)
     # Local model override for this step (interactive switch on repeated failures)
     local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
@@ -9809,7 +9831,46 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                             continue
                         validated_sustain.append(event)
 
-                    print(Fore.GREEN + f"Successfully generated part for {instrument_name}." + Style.RESET_ALL)
+                    # --- Check if track is empty (no valid notes) and retry if needed ---
+                    valid_notes = [n for n in validated_notes if isinstance(n, dict) and 
+                                  n.get("pitch", -1) >= 0 and n.get("pitch", 128) <= 127 and
+                                  float(n.get("duration_beats", 0)) > 0 and
+                                  int(n.get("velocity", 0)) > 0]
+                    
+                    # If track is empty and it's not an intentional silence signal, retry
+                    if len(valid_notes) == 0:
+                        # Check if this was an intentional silence (already handled above with special signal)
+                        # If we get here, it means the track is empty but NOT intentionally silent
+                        global EMPTY_TRACK_RETRY_COUNT
+                        empty_retry_count = EMPTY_TRACK_RETRY_COUNT.get(instrument_name, 0)
+                        max_empty_retries = 3  # Retry up to 3 times for empty tracks
+                        
+                        if empty_retry_count < max_empty_retries:
+                            empty_retry_count += 1
+                            EMPTY_TRACK_RETRY_COUNT[instrument_name] = empty_retry_count
+                            
+                            print(Fore.YELLOW + f"Track '{instrument_name}' is empty (no valid notes). Retrying ({empty_retry_count}/{max_empty_retries})..." + Style.RESET_ALL)
+                            print(Fore.CYAN + "The AI should generate actual musical content. If silence is intended, use the silence signal: [{{\"pitch\": 0, \"start_beat\": 0, \"duration_beats\": 0, \"velocity\": 0}}]" + Style.RESET_ALL)
+                            
+                            # Continue to retry (don't return yet)
+                            attempt_count += 1
+                            base = 3
+                            wait_time = base * (2 ** max(0, attempt_count - 1))
+                            jitter = random.uniform(0, 1.5)
+                            wait_time = min(30, wait_time + jitter)
+                            print(Fore.YELLOW + f"Waiting {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
+                            _wait_with_optional_switch(wait_time)
+                            continue
+                        else:
+                            # After max retries, accept empty track but warn
+                            print(Fore.YELLOW + f"Track '{instrument_name}' is still empty after {max_empty_retries} retries. Accepting empty track (may indicate generation issues)." + Style.RESET_ALL)
+                            # Reset counter for next time
+                            EMPTY_TRACK_RETRY_COUNT[instrument_name] = 0
+                    
+                    # Reset empty retry counter on success
+                    EMPTY_TRACK_RETRY_COUNT[instrument_name] = 0
+                    
+                    print(Fore.GREEN + f"Successfully generated part for {instrument_name} ({len(valid_notes)} valid notes)." + Style.RESET_ALL)
                     return ({
                         "instrument_name": instrument_name,
                         "program_num": program_num,
@@ -9894,26 +9955,60 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     ("exceeded" in error_message and ("limit" in error_message or "quota" in error_message))
                 )
                 if is_quota_error:
+                    # --- IMPROVEMENT: Extract retry time FIRST, then classify based on it ---
+                    retry_after_seconds = None
+                    if hasattr(e, 'retry_after'):
+                        try:
+                            retry_after_seconds = float(e.retry_after)
+                        except (ValueError, TypeError):
+                            pass
+                    elif hasattr(e, 'error_details') and isinstance(e.error_details, dict):
+                        retry_after_seconds = e.error_details.get('retry_after')
+                        if retry_after_seconds:
+                            try:
+                                retry_after_seconds = float(retry_after_seconds)
+                            except (ValueError, TypeError):
+                                retry_after_seconds = None
+                    
+                    # If not found in exception, try to extract from error text
+                    if retry_after_seconds is None:
+                        retry_after_seconds = _extract_retry_after_seconds(full_error)
+                    
+                    # Classify based on error text (which now also checks retry time)
                     qtype = _classify_quota_error(error_message)
+                    
+                    # --- IMPROVEMENT: Re-classify based on retry time if classification seems wrong ---
+                    if retry_after_seconds is not None:
+                        if retry_after_seconds < 60 and qtype == "per-day":
+                            # Retry time is very short but classified as per-day - this is wrong!
+                            print(Fore.YELLOW + f"  WARNING: Retry time is {retry_after_seconds:.1f}s but classified as per-day. Re-classifying as per-minute." + Style.RESET_ALL)
+                            qtype = "per-minute"
+                        elif retry_after_seconds >= 3600 and qtype == "per-minute":
+                            # Retry time is long but classified as per-minute - might be wrong
+                            print(Fore.YELLOW + f"  WARNING: Retry time is {retry_after_seconds/3600:.1f}h but classified as per-minute. Re-classifying as per-day." + Style.RESET_ALL)
+                            qtype = "per-day"
+                    
                     print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: API quota exceeded for key #{CURRENT_KEY_INDEX + 1} ({qtype})." + Style.RESET_ALL)
                     print(Fore.YELLOW + f"  Full error: {full_error[:400]}" + Style.RESET_ALL)
+                    if retry_after_seconds is not None:
+                        print(Fore.CYAN + f"  Retry time from API: {retry_after_seconds:.1f} seconds ({retry_after_seconds/60:.1f} minutes)" + Style.RESET_ALL)
                     # Additional info based on quota type
                     if qtype == "per-day":
                         print(Fore.CYAN + f"  Note: Daily quota exhausted. Will probe hourly to check for reset." + Style.RESET_ALL)
                     elif qtype == "per-minute":
                         print(Fore.CYAN + f"  Note: Per-minute limit exceeded (RPM or token limit). Waiting 65s (sliding 60s window + buffer)." + Style.RESET_ALL)
+                    elif qtype == "per-hour":
+                        print(Fore.CYAN + f"  Note: Per-hour limit exceeded. Waiting 1 hour." + Style.RESET_ALL)
                     # Track last seen quota classes
                     KEY_QUOTA_TYPE[CURRENT_KEY_INDEX] = qtype
                     if qtype == "per-day":
                         globals()['LAST_PER_DAY_SEEN_TS'] = time.time()
                     elif qtype == "per-hour":
                         globals()['LAST_PER_HOUR_SEEN_TS'] = time.time()
+                    
                     # Apply cooldown based on detected window
-                    # For daily quotas: use retry time from API if available, but cap at 24 hours
-                    # (API sometimes reports incorrect retry times, so we don't trust values > 24h)
+                    # retry_after_seconds was already extracted above for classification
                     if qtype == "per-day":
-                        # Try to extract retry time from error message
-                        retry_after_seconds = _extract_retry_after_seconds(full_error)
                         if retry_after_seconds is not None:
                             # Convert to hours for display
                             retry_after_hours = retry_after_seconds / 3600.0
@@ -9935,17 +10030,38 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                             _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS, force=True)
                             print(Fore.CYAN + f"  Note: Daily quota exhausted. Will probe hourly to check for reset." + Style.RESET_ALL)
                     elif qtype == "per-hour":
-                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
+                        if retry_after_seconds is not None and retry_after_seconds < 3600:
+                            # Use API retry time if available and reasonable
+                            _set_key_cooldown(CURRENT_KEY_INDEX, int(retry_after_seconds) + 60, force=True)  # Add 1min buffer
+                            print(Fore.CYAN + f"  Note: Per-hour limit. Using API retry time: {retry_after_seconds:.1f}s + buffer = {int(retry_after_seconds) + 60}s" + Style.RESET_ALL)
+                        else:
+                            _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
                     elif qtype == "rate-limit":
                         # Rate-limit often indicates daily quota, especially when multiple keys fail
                         # Use hourly cooldown to probe for reset
                         _set_key_cooldown(CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
                     elif qtype == "per-minute":
                         # RPM limits use sliding window - wait full 60s + small buffer to ensure oldest request falls out
-                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS + 5)
+                        if retry_after_seconds is not None and retry_after_seconds < 120:
+                            # Use API retry time if available (usually very short for RPM limits)
+                            # Add small buffer to ensure sliding window has passed
+                            wait_seconds = max(65, int(retry_after_seconds) + 5)  # At least 65s, or retry + 5s
+                            _set_key_cooldown(CURRENT_KEY_INDEX, wait_seconds, force=True)
+                            print(Fore.CYAN + f"  Note: Per-minute limit. Using API retry time: {retry_after_seconds:.1f}s + buffer = {wait_seconds}s" + Style.RESET_ALL)
+                        else:
+                            # Default: 65 seconds (60s sliding window + 5s buffer)
+                            _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS + 5)
                     else:  # unknown
-                        # For unknown quota types, use conservative 60s cooldown
-                        _set_key_cooldown(CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS)
+                        # For unknown quota types, use conservative 5-minute cooldown (was 60s)
+                        # This is safer than assuming it's a per-minute limit
+                        if retry_after_seconds is not None:
+                            # If we have a retry time, use it (with buffer)
+                            wait_seconds = max(60, int(retry_after_seconds) + 10)
+                            _set_key_cooldown(CURRENT_KEY_INDEX, wait_seconds, force=True)
+                            print(Fore.YELLOW + f"  Note: Unknown quota type. Using API retry time: {retry_after_seconds:.1f}s + buffer = {wait_seconds}s" + Style.RESET_ALL)
+                        else:
+                            _set_key_cooldown(CURRENT_KEY_INDEX, 300)  # 5 minutes instead of 1 minute
+                            print(Fore.YELLOW + f"  Note: Unknown quota type. Using conservative 5-minute cooldown." + Style.RESET_ALL)
                     
                     if len(API_KEYS) > 1 and not keys_have_rotated_fully:
                         nxt = _next_available_key()
@@ -11811,6 +11927,8 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
             member_start, member_end = 2, 16
 
         next_melodic_channel = 0
+        tracks_written = 0
+        
         for i, track_data in enumerate(song_data["tracks"]):
             track_name = get_instrument_name(track_data)
             program_num = track_data["program_num"]
@@ -11828,6 +11946,7 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
             if channel > 15: channel = 15
             
             midi_file.addTrackName(midi_track_num, 0, track_name)
+            tracks_written += 1
 
             # If this track carries lyrics, emit MIDI Lyric/Text events aligned to notes (word-first uses '-' on continuations)
             try:
@@ -12188,8 +12307,12 @@ def create_midi_from_json(song_data: Dict, config: Dict, output_file: str, time_
 
         with open(output_file, "wb") as f:
             midi_file.writeFile(f)
+        
+        # Print summary
+        total_tracks_in_data = len(song_data.get("tracks", []))
+        print(Fore.GREEN + f"\nMIDI Export Summary: {tracks_written} tracks written successfully (out of {total_tracks_in_data} total)" + Style.RESET_ALL)
             
-        print(Fore.GREEN + f"\nSuccessfully created MIDI file: {output_file}" + Style.RESET_ALL)
+        print(Fore.GREEN + f"Successfully created MIDI file: {output_file}" + Style.RESET_ALL)
         return True
 
     except Exception as e:
@@ -15856,6 +15979,15 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
 
                 if track_data:
                     total_tokens_used += tokens_used
+                    # Check if track has notes
+                    notes_count = len([n for n in track_data.get('notes', []) if isinstance(n, dict) and 
+                                      n.get("pitch", -1) >= 0 and n.get("pitch", 128) <= 127 and
+                                      float(n.get("duration_beats", 0)) > 0 and
+                                      int(n.get("velocity", 0)) > 0])
+                    if notes_count > 0:
+                        print(Fore.GREEN + f"✓ Generated {notes_count} notes for '{instrument_name}'" + Style.RESET_ALL)
+                    else:
+                        print(Fore.YELLOW + f"⚠ Generated track '{instrument_name}' but it has no valid notes (may be intentional silence)" + Style.RESET_ALL)
                     print(Fore.CYAN + f"Cumulative song tokens so far: {total_tokens_used:,}" + Style.RESET_ALL)
                     # Append new track data to the current theme's track list
                     context_tracks_for_current_theme.append(track_data)
@@ -15921,7 +16053,13 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
                 return None, total_tokens_used
             
             # --- After a theme's tracks are all generated, create its MIDI file ---
-            print(Fore.GREEN + f"\n--- Theme '{theme_def['label']}' generated successfully! Saving part file... ---" + Style.RESET_ALL)
+            # Count successful tracks for this theme
+            successful_tracks = len([t for t in current_theme_data.get('tracks', []) if t and t.get('notes')])
+            total_expected_tracks = len(config["instruments"])
+            
+            print(Fore.GREEN + f"\n--- Theme '{theme_def['label']}' generated successfully! ({successful_tracks}/{total_expected_tracks} tracks with notes) ---" + Style.RESET_ALL)
+            if successful_tracks < total_expected_tracks:
+                print(Fore.YELLOW + f"  Note: {total_expected_tracks - successful_tracks} track(s) have no notes (may be intentional silence)" + Style.RESET_ALL)
             
             # Use the original, user-provided label for the filename generation,
             # the sanitization will happen inside generate_filename.
@@ -15967,6 +16105,59 @@ def combine_and_save_final_song(config, generated_themes, script_dir, timestamp)
             length_bars = DEFAULT_LENGTH
 
         final_song_data = merge_themes_to_song_data(generated_themes, config, length_bars)
+
+        # --- VALIDATION: Check track quality before saving ---
+        total_tracks = len(final_song_data.get("tracks", []))
+        tracks_with_notes = []
+        empty_tracks = []
+        
+        for track in final_song_data.get("tracks", []):
+            track_name = get_instrument_name(track)
+            notes = track.get("notes", [])
+            # Count valid notes (with pitch, duration > 0, velocity > 0)
+            valid_notes = [n for n in notes if isinstance(n, dict) and 
+                          n.get("pitch", -1) >= 0 and n.get("pitch", 128) <= 127 and
+                          float(n.get("duration_beats", 0)) > 0 and
+                          int(n.get("velocity", 0)) > 0]
+            
+            if valid_notes:
+                tracks_with_notes.append((track_name, len(valid_notes)))
+            else:
+                empty_tracks.append(track_name)
+        
+        # Print validation summary
+        print(Fore.CYAN + f"\n--- Song Quality Validation ---" + Style.RESET_ALL)
+        print(f"Total tracks: {total_tracks}")
+        print(f"Tracks with notes: {len(tracks_with_notes)}")
+        if empty_tracks:
+            print(Fore.YELLOW + f"Empty tracks (no notes): {len(empty_tracks)}" + Style.RESET_ALL)
+            for empty_name in empty_tracks:
+                print(Fore.YELLOW + f"  - {empty_name}" + Style.RESET_ALL)
+        
+        # Calculate total song length
+        if tracks_with_notes:
+            all_notes = []
+            for track in final_song_data.get("tracks", []):
+                notes = track.get("notes", [])
+                for note in notes:
+                    if isinstance(note, dict) and note.get("pitch", -1) >= 0:
+                        start = float(note.get("start_beat", 0))
+                        dur = float(note.get("duration_beats", 0))
+                        all_notes.append(start + dur)
+            
+            if all_notes:
+                max_end = max(all_notes)
+                total_beats = max_end
+                total_bars = total_beats / config["time_signature"]["beats_per_bar"]
+                total_seconds = (total_beats / config["bpm"]) * 60
+                print(f"\nEstimated song length: {total_bars:.1f} bars ({total_seconds:.1f} seconds / {total_seconds/60:.2f} minutes)")
+        
+        # Warn if too many empty tracks
+        if len(empty_tracks) > total_tracks * 0.5:
+            print(Fore.RED + f"\n⚠️  WARNING: More than 50% of tracks are empty ({len(empty_tracks)}/{total_tracks})!" + Style.RESET_ALL)
+            print(Fore.RED + "This may indicate generation failures. Consider checking your API keys, model settings, or retrying." + Style.RESET_ALL)
+        elif len(empty_tracks) > 0:
+            print(Fore.YELLOW + f"\n⚠️  Note: {len(empty_tracks)} track(s) have no notes. This may be intentional (silent parts) or indicate generation issues." + Style.RESET_ALL)
 
         final_base = build_final_song_basename(config, generated_themes, timestamp)
         final_filename = os.path.join(script_dir, f"{final_base}.mid")
