@@ -2,6 +2,9 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb)
 
+> **⚠️ Important Note:**
+> Google has removed the free tier for the Gemini API. Currently, this affects the **Pro model** (gemini-2.5-pro), which now requires a paid API key. The **Flash model** (gemini-2.5-flash) may still work with free tier access, but please be aware that API pricing and availability may change.
+
 > **Note: Try it in your Browser!**
 > The included [Google Colab Notebook](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb) has been updated to run the full suite of scripts directly in your browser with no local installation required. Please be aware that this Colab integration is considered experimental and has not been as extensively tested as running the scripts on a local machine. For the most stable experience, we recommend a local installation.
 
