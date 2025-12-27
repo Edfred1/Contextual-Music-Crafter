@@ -1258,7 +1258,7 @@ Return only the JSON array, no other text."""
         try:
             if isinstance(config.get("max_output_tokens"), int):
                 _mx = int(config.get("max_output_tokens"))
-                _mx = max(256, min(_mx, 8192))
+                _mx = max(256, _mx)
                 generation_config["max_output_tokens"] = _mx
         except Exception:
             pass
@@ -1564,7 +1564,7 @@ OUTPUT JSON (strict):
         try:
             if isinstance(config.get("max_output_tokens"), int):
                 _mx = int(config.get("max_output_tokens"))
-                _mx = max(256, min(_mx, 8192))
+                _mx = max(256, _mx)
                 generation_config["max_output_tokens"] = _mx
         except Exception:
             pass
@@ -1794,7 +1794,7 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
     generation_config = {"response_mime_type": "application/json", "temperature": _plan_temp}
     try:
         if isinstance(config.get("max_output_tokens"), int):
-            _mx = int(config.get("max_output_tokens")); _mx = max(256, min(_mx, 8192)); generation_config["max_output_tokens"] = _mx
+            _mx = int(config.get("max_output_tokens")); _mx = max(256, _mx); generation_config["max_output_tokens"] = _mx
     except Exception:
         pass
     model = get_unified_model(model_name=model_name, generation_config=generation_config)
@@ -6197,7 +6197,7 @@ def _analyze_user_prompt(config: Dict, genre: str, inspiration: str, user_prompt
         generation_config = {"response_mime_type": "application/json", "temperature": float(config.get("plan_temperature", config.get("lyrics_temperature", config.get("temperature", 0.4))))}
         try:
             if isinstance(config.get("max_output_tokens"), int):
-                _mx = int(config.get("max_output_tokens")); _mx = max(256, min(_mx, 8192)); generation_config["max_output_tokens"] = _mx
+                _mx = int(config.get("max_output_tokens")); _mx = max(256, _mx); generation_config["max_output_tokens"] = _mx
         except Exception:
             pass
         model = get_unified_model(model_name=model_name, generation_config=generation_config)
