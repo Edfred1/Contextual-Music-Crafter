@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import glob
+import ai_client
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 if sys.platform == "win32":
@@ -23,7 +24,10 @@ SONG_GENERATOR_SCRIPT = os.path.join(script_dir, "song_generator.py")
 
 # --- NEW: Global state for API key rotation ---
 API_KEYS = []
+DEEPSEEK_API_KEY = None
+PROVIDER = "gemini"
 CURRENT_KEY_INDEX = 0
+# DeepSeek always uses deepseek-chat (not reasoner) - removed USE_THINKING_MODEL
 
 # --- HELPER FUNCTIONS ---
 
@@ -549,7 +553,10 @@ def validate_instruments(instruments, config_details):
 
 def initialize_api_keys(config):
     """Loads API keys from config and prepares them for rotation."""
-    global API_KEYS, CURRENT_KEY_INDEX
+    global API_KEYS, CURRENT_KEY_INDEX, PROVIDER, DEEPSEEK_API_KEY
+    
+    PROVIDER = config.get("provider", "gemini").lower()
+    DEEPSEEK_API_KEY = config.get("deepseek_api_key")
     
     api_key_config = config.get("api_key")
     if isinstance(api_key_config, list):
@@ -560,6 +567,13 @@ def initialize_api_keys(config):
         API_KEYS = []
 
     CURRENT_KEY_INDEX = 0
+    
+    if PROVIDER == "deepseek":
+        if not DEEPSEEK_API_KEY:
+            print(Fore.RED + "Error: DeepSeek provider selected but no 'deepseek_api_key' found in config.yaml.")
+            return False
+        return True
+
     if not API_KEYS:
         print(Fore.RED + "Error: No valid API key found in 'config.yaml'. Please add your key(s).")
         return False
@@ -616,15 +630,28 @@ def call_generative_model(prompt_text, config):
             started_key_index = CURRENT_KEY_INDEX
             keys_tried = 0
             quota_only_failures = True
-            while keys_tried < max(1, len(API_KEYS)):
+            while keys_tried < max(1, len(API_KEYS) if PROVIDER == "gemini" else 1):
                 try:
-                    model = genai.GenerativeModel(
-                        model_name=config["model_name"],
-                        generation_config=generation_config
+                    # Determine model name
+                    model_name = config["model_name"]
+                    if PROVIDER == "deepseek" and "gemini" in model_name:
+                         model_name = "deepseek-chat"
+
+                    api_key = API_KEYS[CURRENT_KEY_INDEX] if PROVIDER == "gemini" and API_KEYS else None
+                    if PROVIDER == "deepseek":
+                        api_key = DEEPSEEK_API_KEY
+                        
+                    model = ai_client.UnifiedModel(
+                        provider=PROVIDER,
+                        model_name=model_name,
+                        api_key=api_key,
+                        generation_config=generation_config,
+                        use_thinking=False  # DeepSeek always uses deepseek-chat, not reasoner
                     )
+                    
                     response = model.generate_content(
                         prompt_text,
-                        safety_settings=safety_settings,
+                        safety_settings=safety_settings
                     )
 
                     # Safety block check (counts as a functional failure)
@@ -638,15 +665,24 @@ def call_generative_model(prompt_text, config):
                         print(Fore.YELLOW + f"Reason: {reason_name}. Consider rephrasing to be less aggressive/explicit." + Style.RESET_ALL)
                         break  # exit rotation loop; will consume attempt below
 
-                    # Empty/incomplete response (counts as a functional failure)
-                    if not response.candidates or not response.candidates[0].content or not response.candidates[0].content.parts:
+                    # Empty/incomplete response check
+                    # Handle UnifiedResponse (DeepSeek) vs Gemini response
+                    text_content = ""
+                    if hasattr(response, 'text') and response.text:
+                         text_content = response.text
+                    elif hasattr(response, 'candidates') and response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                         text_content = response.candidates[0].content.parts[0].text
+                    
+                    if not text_content:
                         quota_only_failures = False
                         finish_reason_name = "UNKNOWN"
-                        if response.candidates:
+                        # Only check candidates for Gemini response objects
+                        if hasattr(response, 'candidates') and response.candidates:
                             try:
                                 finish_reason_name = response.candidates[0].finish_reason.name
                             except AttributeError:
                                 finish_reason_name = str(response.candidates[0].finish_reason)
+                        
                         print(Fore.RED + f"Error on attempt {attempt_count + 1}: The AI returned an empty/incomplete response." + Style.RESET_ALL)
                         print(Fore.YELLOW + f"Finish Reason: {finish_reason_name}. The script will retry." + Style.RESET_ALL)
                         break  # exit rotation loop; will consume attempt below
@@ -655,7 +691,7 @@ def call_generative_model(prompt_text, config):
                     total_token_count = 0
                     if hasattr(response, 'usage_metadata'):
                         total_token_count = response.usage_metadata.total_token_count
-                    return response.text, total_token_count
+                    return text_content, total_token_count
 
                 except Exception as e:
                     err = str(e).lower()
@@ -998,7 +1034,10 @@ def get_musical_parameters_with_ai(genre, inspiration, config, config_details):
 
 def main():
     print(Fore.MAGENTA + "="*60)
+    try:
     print(Style.BRIGHT + "        🎵 Welcome to the Contextual Music Crafter 🎵")
+    except UnicodeEncodeError:
+        print(Style.BRIGHT + "        Welcome to the Contextual Music Crafter")
     print(Fore.MAGENTA + "="*60 + Style.RESET_ALL)
     
     print(f"\n{Style.BRIGHT}{Fore.CYAN}This is your creative partner for making music.{Style.RESET_ALL}")

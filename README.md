@@ -8,13 +8,14 @@
 > **Note: Try it in your Browser!**
 > The included [Google Colab Notebook](https://colab.research.google.com/github/Edfred1/Contextual-Music-Crafter/blob/main/CMC.ipynb) has been updated to run the full suite of scripts directly in your browser with no local installation required. Please be aware that this Colab integration is considered experimental and has not been as extensively tested as running the scripts on a local machine. For the most stable experience, we recommend a local installation.
 
-Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music generation tool that leverages the power of Google's Gemini to compose multi-track musical pieces. Unlike simple random note generators, CMC builds songs iteratively, instrument by instrument. Each new part is intelligently composed in response to the parts that have already been written, creating cohesive and musically interesting results. CMC also includes a Synthesizer‑ready lyric and vocal‑melody pipeline aimed at Synthesizer V Studio 2 (UST export). UST files may also work in OpenUtau and similar UTAU‑compatible tools. In addition, Emvoice TXT exports are produced for simple copy/paste into Emvoice.
+Contextual Music Crafter (CMC) is an intelligent, context-aware MIDI music generation tool that leverages the power of AI models (Google's Gemini or DeepSeek) to compose multi-track musical pieces. Unlike simple random note generators, CMC builds songs iteratively, instrument by instrument. Each new part is intelligently composed in response to the parts that have already been written, creating cohesive and musically interesting results. CMC also includes a Synthesizer‑ready lyric and vocal‑melody pipeline aimed at Synthesizer V Studio 2 (UST export). UST files may also work in OpenUtau and similar UTAU‑compatible tools. In addition, Emvoice TXT exports are produced for simple copy/paste into Emvoice.
 
 The entire creative direction of the music is guided through an interactive setup process, making it accessible to both developers and musicians.
 
 <a id="recent-highlights"></a>
 ## 🆕 Recent Highlights
 
+- **DeepSeek Support**: CMC now supports DeepSeek as an alternative AI provider with competitive token pricing. See [API Configuration](#step-4-api-key--configuration) for setup and important notes about quality, cost, and testing status.
 - **Music Analyzer**: Analyze your multi‑track MIDI into a compact, LLM‑friendly plan/artifact with integrated actions (optimize selected tracks, add a context‑aware track, or generate a NEW MIDI from the analyzed descriptions). See [Music Analyzer (optional)](#music-analyzer-optional).
 - **Lyrics & Vocal pipeline**: Generate lyrics for an existing melody or create a NEW vocal line (notes + lyrics + UST). Exports Synthesizer V UST and Emvoice TXT. See [Lyrics and Vocal Melody – quick guide](#lyrics-and-vocal-melody--quick-guide).
 - **MIDI Utilities**: A standalone [MIDI Merger tool](MIDI%20merger/README_midi_merger.md) is included to combine multiple `.mid` files into one multi-track project (see `MIDI merger/` folder).
@@ -105,21 +106,46 @@ pip install -r requirements.txt
 ### Step 4: API Key & Configuration
 
 1.  **Open `config.yaml`** in a text editor.
-2.  **Set your API Key:**
+2.  **Choose your AI Provider and set API Key(s):**
+    
+    **Option A: Google Gemini (default)**
     - Get a key from [Google AI Studio](https://aistudio.google.com/app/apikey).
-    - Find the `api_key` field and replace `"YOUR_GOOGLE_AI_API_KEY"` with your actual key.
+    - Set `provider: Gemini` (or `provider: gemini`).
+    - Find the `api_key` field and replace with your actual key(s). You can provide multiple keys for automatic rotation.
     ```yaml
-    # API Configuration
-    api_key: "YOUR_GOOGLE_AI_API_KEY"
+    provider: Gemini
+    api_key:
+      - "YOUR_GOOGLE_AI_API_KEY_1"
+      - "YOUR_GOOGLE_AI_API_KEY_2"  # Optional: multiple keys for rotation
     ```
+    
+    **Option B: DeepSeek (alternative)**
+    - Get a key from [DeepSeek Platform](https://platform.deepseek.com/api_keys).
+    - Set `provider: deepseek`.
+    - Set your `deepseek_api_key` in the config.
+    ```yaml
+    provider: deepseek
+    deepseek_api_key: "sk-YOUR_DEEPSEEK_API_KEY"
+    ```
+    **Important Notes about DeepSeek:**
+    - **Cost**: DeepSeek requires a paid API key (no free tier available). However, DeepSeek offers very competitive token pricing, making it a cost-effective alternative to Gemini.
+    - **Quality**: DeepSeek may not produce the same quality output as Gemini. Results may vary, especially for complex musical arrangements.
+    - **Testing Status**: DeepSeek support is still being tested. Not all features may work as reliably as with Gemini.
+    - **Technical**: DeepSeek always uses `deepseek-chat` model with adaptive chunked generation enabled automatically to handle the 8k output token limit.
     
 3.  **Customize Your Music:**
     Adjust the parameters in `config.yaml` to define your desired musical output.
 
-    -   `api_key`: Your Google AI API Key.
-    -   `model_name`: The specific generative model to use (e.g., "gemini-2.5-flash" or "gemini-2.5-pro").
+    **Core Configuration:**
+    -   `provider`: AI provider to use - `"gemini"` or `"deepseek"`.
+    -   `api_key`: Your Google AI API Key(s) (for Gemini provider). Can be a single string or list for rotation.
+    -   `deepseek_api_key`: Your DeepSeek API Key (for DeepSeek provider).
+    -   `model_name`: The specific generative model to use.
+      - For Gemini: `"gemini-2.5-flash"` (faster/cheaper), `"gemini-2.5-pro"` (highest quality), `"gemini-3-flash-preview"`, etc.
+      - For DeepSeek: Always uses `"deepseek-chat"` (automatically set).
     -   `temperature`: (0.0 to 2.0) Controls creativity. Lower values are more deterministic, higher values are more experimental. Default is 1.0.
     -   `context_window_size`: Defines how many previous musical parts are sent as context for the next generation. `-1` (dynamic) is recommended for quality, `0` disables context, and a positive number (e.g., `4`) sends a fixed amount of recent parts.
+    
     -   `inspiration`: A detailed text prompt describing the style and mood. This is the most important creative input!
     -   `genre`: The primary musical genre.
     -   `bpm`: Tempo in beats per minute.
@@ -257,7 +283,16 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
 <a id="advanced-usage-and-notes"></a>
 ## ⚙️ Advanced usage and notes
 
-- **API keys & rotation**: The `api_key` field supports either a single string or a list of keys. When a 429/quota error occurs, the system rotates to the next key automatically. 
+- **API providers**: CMC supports two AI providers:
+  - **Google Gemini**: Set `provider: gemini` (or `provider: Gemini`). Requires `api_key` from [Google AI Studio](https://aistudio.google.com/app/apikey). Supports multiple keys for automatic rotation. Generally produces higher quality output.
+  - **DeepSeek**: Set `provider: deepseek`. Requires `deepseek_api_key` from [DeepSeek Platform](https://platform.deepseek.com/api_keys). See [API Configuration](#step-4-api-key--configuration) for important notes about cost, quality, and testing status.
+
+- **API keys & rotation**: For Gemini, the `api_key` field supports either a single string or a list of keys. When a 429/quota error occurs, the system rotates to the next key automatically. DeepSeek uses a single key.
+
+- **DeepSeek-specific features** (see [API Configuration](#step-4-api-key--configuration) for setup and important notes):
+  - **Model**: Always uses `deepseek-chat` (not `deepseek-reasoner`, which has issues with meaningful output).
+  - **Adaptive Chunked Generation**: Automatically enabled to handle DeepSeek's 8k output token limit. The system first tries to generate the full track. If the output is truncated, it automatically continues from where it left off, adapting chunk sizes dynamically based on where truncation occurred.
+  - **Context Optimization**: DeepSeek has a 128k token input limit (~200k characters). The system automatically optimizes context to fit within this limit, prioritizing the most recent themes. 
 
 - **YAML comments preservation**: `music_crafter.py` reads/writes `config.yaml` using ruamel.yaml in round-trip mode to preserve comments and quoting. You can safely annotate the config; comments will persist across saves.
 
@@ -276,9 +311,10 @@ CMC works best as a creativity amplifier: a sketchbook, exploration engine, and 
   - `a` = toggle auto‑escalate: when enabled, if you are on flash and a track repeatedly fails (e.g., JSON errors, empty responses, MAX_TOKENS, or transient 5xx/timeout issues), the script automatically switches to pro after 6 failures and restarts the step.
   - The hotkey banner shows whether auto‑escalate is [ON]/[OFF]. Switches take effect as soon as the current request finishes; the step restarts with the new model.
 
-- **Quality tip (Pro vs Flash)**:
-  - If you want strong one‑shot results with fewer retries, run with `gemini-2.5-pro` from the start.
-  - If you prefer lower cost, run `gemini-2.5-flash` plus an optimization pass; enable auto‑escalate so that problematic tracks automatically retry with `pro` when needed. This balances cost and reliability.
+- **Quality tip (Pro vs Flash vs DeepSeek)**:
+  - **Gemini Pro**: Strong one‑shot results with fewer retries. Best quality but higher cost.
+  - **Gemini Flash**: Lower cost option. Run with `gemini-2.5-flash` plus an optimization pass; enable auto‑escalate so that problematic tracks automatically retry with `pro` when needed. This balances cost and reliability.
+  - **DeepSeek**: Cost-effective alternative to Gemini with competitive token pricing. Always uses `deepseek-chat` with adaptive chunked generation automatically enabled to handle complex tracks. **Note:** DeepSeek requires a paid API key and may not produce the same quality output as Gemini. Support is still being tested.
 
 - **Why the context sometimes shows “Using 4/6 previous themes”**: The generator fits context under an internal character budget (`MAX_CONTEXT_CHARS`). In dynamic mode (`context_window_size: -1`) it includes as many previous parts as fit that budget, so the fraction (e.g., 4/6) is expected and will change if you or future versions adjust this character limit. Set `context_window_size` to a positive number to force a fixed number of previous parts, or to `0` to disable history entirely.
 

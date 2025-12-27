@@ -13,8 +13,16 @@
 # -----------------------------------------------------------------------------
 # API Configuration
 # -----------------------------------------------------------------------------
-# You can provide a single key (string) or multiple keys (list) for key rotation.
+# Provider: "gemini" or "deepseek"
+# - "gemini": Uses Google's Gemini API (requires Google AI API key)
+# - "deepseek": Uses DeepSeek API (requires DeepSeek API key)
+provider: gemini
 
+# -----------------------------------------------------------------------------
+# Gemini API Configuration
+# -----------------------------------------------------------------------------
+# Google AI API Key(s) - You can provide a single key (string) or multiple keys (list) for key rotation.
+# Get your key from: https://aistudio.google.com/app/apikey
 api_key:
   - "YOUR_GOOGLE_AI_API_KEY_1"
   #- "YOUR_GOOGLE_AI_API_KEY_2"
@@ -22,8 +30,23 @@ api_key:
   #- "YOUR_GOOGLE_AI_API_KEY_4"
   #- "YOUR_GOOGLE_AI_API_KEY_5"
 
-# Model selection
-# Recommended options: "gemini-2.5-pro" (highest quality), "gemini-2.5-flash" (faster/cheaper)
+# -----------------------------------------------------------------------------
+# DeepSeek API Configuration
+# -----------------------------------------------------------------------------
+# DeepSeek API Key (required if provider: deepseek)
+# Get your key from: https://platform.deepseek.com/api_keys
+# Note: DeepSeek always uses 'deepseek-chat' model with adaptive chunked generation enabled
+# to work around the 8k output token limit. The system automatically handles chunking
+# when the output is truncated, continuing from where it left off.
+deepseek_api_key: "sk-YOUR_DEEPSEEK_API_KEY"
+
+# -----------------------------------------------------------------------------
+# Model Selection
+# -----------------------------------------------------------------------------
+# Model name to use for generation
+# For Gemini: "gemini-2.5-pro" (highest quality), "gemini-2.5-flash" (faster/cheaper), "gemini-3-flash-preview", etc.
+# For DeepSeek: Always uses "deepseek-chat" (automatically set if provider is "deepseek")
+# Note: If provider is "deepseek" and model_name contains "gemini", it will automatically switch to "deepseek-chat"
 model_name: gemini-2.5-pro
 
 # Sampling temperature (0.0 = deterministic, 2.0 = very creative)
@@ -323,5 +346,3 @@ instruments:
 # 126. Helicopter
 # 127. Applause
 # 128. Gunshot
-
-

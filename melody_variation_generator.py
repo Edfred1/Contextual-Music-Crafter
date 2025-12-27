@@ -22,7 +22,8 @@ try:
         _all_keys_daily_exhausted, _schedule_hourly_probe_if_needed,
         _seconds_until_hourly_probe, initialize_api_keys, get_instrument_name,
         create_midi_from_json, merge_themes_to_song_data, load_final_artifact,
-        find_final_artifacts, get_scale_notes, _compact_notes_json, _extract_token_limit_from_error
+        find_final_artifacts, get_scale_notes, _compact_notes_json, _extract_token_limit_from_error,
+        get_unified_model
     )
     import google.generativeai as genai
     # Reference to song_generator's globals for API key management
@@ -74,14 +75,18 @@ def load_config() -> Dict:
 def _extract_text_from_response(response) -> str:
     """Extract text from LLM response, handling various response formats."""
     try:
-        if hasattr(response, 'text'):
-            return response.text or ""
+        # Check text attribute first (common to UnifiedResponse and Gemini)
+        if hasattr(response, 'text') and response.text:
+            return response.text
+            
+        # Check candidates (Gemini specific fallback)
         if hasattr(response, 'candidates') and response.candidates:
             candidate = response.candidates[0]
             if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
                 parts = candidate.content.parts
                 if parts:
                     return getattr(parts[0], 'text', '') or ""
+                    
         return str(response) if response else ""
     except Exception:
         return ""
@@ -139,12 +144,14 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
         attempts += 1
         try:
             # Use song_generator's globals directly
-            if not sg.API_KEYS or sg.CURRENT_KEY_INDEX >= len(sg.API_KEYS):
+            provider = getattr(sg, "PROVIDER", "gemini")
+            if provider == "gemini" and (not sg.API_KEYS or sg.CURRENT_KEY_INDEX >= len(sg.API_KEYS)):
                 print(Fore.RED + "No API keys available." + Style.RESET_ALL)
                 return "", 0
             
-            genai.configure(api_key=sg.API_KEYS[sg.CURRENT_KEY_INDEX])
-            model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+            model = get_unified_model(model_name=model_name, generation_config=generation_config, system_instruction=None)
+            # get_unified_model in song_generator always uses deepseek-chat (not reasoner)
+            
             response = model.generate_content(prompt_text, safety_settings=safety_settings)
             out_text = _extract_text_from_response(response)
             tokens = int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)

@@ -7,6 +7,7 @@ import glob
 from typing import List, Dict, Tuple
 
 import mido
+import ai_client
 from colorama import Fore, Style, init
 
 # Prefer reusing existing helpers from music_crafter when possible
@@ -22,7 +23,10 @@ except Exception:
 
 # --- Analyzer-local API key rotation & hotkeys (aligned with song_generator) ---
 API_KEYS = []
+DEEPSEEK_API_KEY = None
+PROVIDER = "gemini"
 CURRENT_KEY_INDEX = 0
+# DeepSeek always uses deepseek-chat (not reasoner) - removed USE_THINKING_MODEL
 HOTKEY_MONITOR_STARTED = False
 REQUESTED_SWITCH_MODEL = None
 REQUEST_SET_SESSION_DEFAULT = False
@@ -197,62 +201,70 @@ def _load_config_roundtrip() -> Dict:
 
 
 def _initialize_api_keys(config: Dict) -> Tuple[List[str], int]:
-    # Prefer music_crafter's initialization
-    if mc and hasattr(mc, "initialize_api_keys") and hasattr(mc, "API_KEYS") and hasattr(mc, "CURRENT_KEY_INDEX"):
+    global API_KEYS, CURRENT_KEY_INDEX, PROVIDER, DEEPSEEK_API_KEY
+    
+    # Initialize from config first
+    PROVIDER = config.get("provider", "gemini").lower()
+    DEEPSEEK_API_KEY = config.get("deepseek_api_key")
+
+    # Prefer music_crafter's initialization and state
+    if mc and hasattr(mc, "initialize_api_keys"):
         ok = mc.initialize_api_keys(config)
-        if not ok:
-            return [], 0
-        try:
-            if genai:
-                genai.configure(api_key=mc.API_KEYS[mc.CURRENT_KEY_INDEX])
-        except Exception:
-            pass
-        # Mirror into analyzer and song_generator state
-        try:
-            keys_m = list(getattr(mc, "API_KEYS", []))
-            idx_m = int(getattr(mc, "CURRENT_KEY_INDEX", 0))
-            globals()['API_KEYS'] = list(keys_m)
-            globals()['CURRENT_KEY_INDEX'] = idx_m
-            if sg_initialize_api_keys:
-                sg_initialize_api_keys(config)
-        except Exception:
-            pass
-        return list(getattr(mc, "API_KEYS", [])), int(getattr(mc, "CURRENT_KEY_INDEX", 0))
+        if ok:
+            try:
+                if hasattr(mc, "PROVIDER"): PROVIDER = mc.PROVIDER
+                if hasattr(mc, "DEEPSEEK_API_KEY"): DEEPSEEK_API_KEY = mc.DEEPSEEK_API_KEY
+                
+                if hasattr(mc, "API_KEYS"): API_KEYS = list(mc.API_KEYS)
+                if hasattr(mc, "CURRENT_KEY_INDEX"): CURRENT_KEY_INDEX = int(mc.CURRENT_KEY_INDEX)
+                
+                # Sync song_generator if available
+                if sg_initialize_api_keys:
+                    sg_initialize_api_keys(config)
+            except Exception:
+                pass
+            return API_KEYS, CURRENT_KEY_INDEX
 
     # Fallback
     api_key_cfg = config.get("api_key")
-    keys: List[str] = []
     if isinstance(api_key_cfg, list):
         keys = [k for k in api_key_cfg if isinstance(k, str) and k and "YOUR_" not in k]
     elif isinstance(api_key_cfg, str) and "YOUR_" not in api_key_cfg:
         keys = [api_key_cfg]
+    else:
+        keys = []
+        
+    API_KEYS = keys
+    CURRENT_KEY_INDEX = 0
+
+    if PROVIDER == "deepseek":
+         if not DEEPSEEK_API_KEY:
+             return [], 0
+         return [], 0 # Valid for deepseek
+
     if not keys:
         print(Fore.RED + "Error: No valid API key found in 'config.yaml'." + Style.RESET_ALL)
         return [], 0
+        
     if genai:
         try:
             genai.configure(api_key=keys[0])
         except Exception:
             pass
-    # Mirror keys into analyzer and song_generator states for rotation/backoff
+
+    # Mirror into song_generator
     try:
-        globals()['API_KEYS'] = list(keys)
-        globals()['CURRENT_KEY_INDEX'] = 0
         if sg_initialize_api_keys:
-            # Keep song_generator module's state in sync
             sg_initialize_api_keys(config)
     except Exception:
         pass
+
     return keys, 0
 
 
 def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tuple[str, int]:
     # Use analyzer's robust rotation/backoff so attempts are not incremented on 429
 
-    # Minimal fallback
-    if not genai:
-        print(Fore.RED + "google.generativeai not available. Install and configure to use AI features." + Style.RESET_ALL)
-        return "", 0
     try:
         generation_config = {
             "temperature": config.get("temperature", 1.0)
@@ -265,22 +277,50 @@ def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tup
         model_name = config.get("model_name", "gemini-2.5-pro")
         if REQUESTED_SWITCH_MODEL:
             model_name = REQUESTED_SWITCH_MODEL
-        model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+            
+        # Determine deepseek fallback
+        if PROVIDER == "deepseek" and "gemini" in model_name:
+            model_name = "deepseek-chat"
+
+        api_key = API_KEYS[CURRENT_KEY_INDEX] if PROVIDER == "gemini" and API_KEYS else None
+        if PROVIDER == "deepseek":
+            api_key = DEEPSEEK_API_KEY
+            
+        model = ai_client.UnifiedModel(
+            provider=PROVIDER,
+            model_name=model_name,
+            api_key=api_key,
+            generation_config=generation_config,
+            use_thinking=False  # DeepSeek always uses deepseek-chat, not reasoner
+        )
+        
         safety_settings = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
-        json_failure_count = 0
-        quota_rotation_count = 0
+        
+        # ... logic ...
         while True:
             try:
                 _print_hotkey_hint("Analyzer LLM call")
                 response = model.generate_content(prompt_text, safety_settings=safety_settings)
-                out_text = (getattr(response, "text", "") or "")
+                
+                out_text = ""
+                # Handle UnifiedResponse (DeepSeek) vs Gemini response
+                if hasattr(response, 'text') and response.text:
+                    out_text = response.text
+                elif hasattr(response, 'candidates') and response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                    out_text = response.candidates[0].content.parts[0].text
+                    
                 _print_llm_debug("LLM call", prompt_text, out_text, expects_json)
-                return out_text, int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
+                
+                total_tokens = 0
+                if hasattr(response, 'usage_metadata'):
+                     total_tokens = getattr(response.usage_metadata, 'total_token_count', 0) or 0
+                     
+                return out_text, int(total_tokens)
             except Exception as e:
                 err = str(e).lower()
                 # Quota/429 handling with rotation & cooldowns
@@ -302,11 +342,31 @@ def _call_llm(prompt_text: str, config: Dict, expects_json: bool = False) -> Tup
                             model_name = config.get("model_name", "gemini-2.5-pro")
                             if REQUESTED_SWITCH_MODEL:
                                 model_name = REQUESTED_SWITCH_MODEL
-                            model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                                
+                            # Re-create UnifiedModel on rotation
+                            api_key = API_KEYS[idx] if PROVIDER == "gemini" else None # Should mostly be gemini here as deepseek logic above is simpler
+                            model = ai_client.UnifiedModel(
+                                provider=PROVIDER,
+                                model_name=model_name,
+                                api_key=api_key,
+                                generation_config=generation_config,
+                                use_thinking=False  # DeepSeek always uses deepseek-chat, not reasoner
+                            )
+                            
                             response = model.generate_content(prompt_text, safety_settings=safety_settings)
-                            out_text = (getattr(response, "text", "") or "")
+                            
+                            out_text = ""
+                            if hasattr(response, 'text') and response.text:
+                                out_text = response.text
+                            elif hasattr(response, 'candidates') and response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                                out_text = response.candidates[0].content.parts[0].text
+                                
                             _print_llm_debug("LLM call (rotated)", prompt_text, out_text, expects_json)
-                            return out_text, int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
+                            
+                            total_tokens = 0
+                            if hasattr(response, 'usage_metadata'):
+                                 total_tokens = getattr(response.usage_metadata, 'total_token_count', 0) or 0
+                            return out_text, int(total_tokens)
                         except Exception as e2:
                             err2 = str(e2).lower()
                             qt2 = _classify_quota_error(err2)

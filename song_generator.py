@@ -6,7 +6,7 @@ from colorama import Fore, Style, init
 from midiutil import MIDIFile
 import random
 import time
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 import math
 import json
 import sys
@@ -16,10 +16,14 @@ if sys.platform == "win32":
     import msvcrt
 import threading
 from ruamel.yaml import YAML
+import ai_client
 
 # --- NEW: Global state for API key rotation ---
 API_KEYS = []
+DEEPSEEK_API_KEY = None
+PROVIDER = "gemini"
 CURRENT_KEY_INDEX = 0
+# DeepSeek always uses deepseek-chat (not reasoner) - removed USE_THINKING_MODEL
 SESSION_MODEL_OVERRIDE = None  # Optional session-wide model override via hotkey
 # Hotkey runtime state
 PROMPTED_CUSTOM_THIS_STEP = False  # Guards custom prompt per step
@@ -40,6 +44,39 @@ EMPTY_TRACK_RETRY_COUNT: Dict[str, int] = {}  # Track name -> retry count for em
 
 # Lyrics per-part meta (optional side-channel from words generation)
 LYRICS_PART_META: Dict[str, Dict] = {}
+
+
+# --- AI Client Helper ---
+def get_unified_model(model_name, generation_config=None, system_instruction=None):
+    """Factory to create a unified model instance based on current global settings."""
+    global PROVIDER, DEEPSEEK_API_KEY, API_KEYS, CURRENT_KEY_INDEX
+    
+    # DeepSeek always uses deepseek-chat (not reasoner)
+    use_thinking = False
+    
+    provider = PROVIDER
+    api_key = None
+    
+    if provider == "deepseek":
+        api_key = DEEPSEEK_API_KEY
+        # Always use deepseek-chat (reasoner has issues with meaningful output)
+        if "gemini" in model_name:
+            model_name = "deepseek-chat"
+            
+    elif provider == "gemini":
+        if API_KEYS:
+             # We rely on genai.configure() having been called, but passing key here doesn't hurt
+             # UnifiedModel for Gemini creates genai.GenerativeModel.
+             api_key = API_KEYS[CURRENT_KEY_INDEX]
+             
+    return ai_client.UnifiedModel(
+        provider=provider, 
+        model_name=model_name, 
+        api_key=api_key, 
+        generation_config=generation_config,
+        system_instruction=system_instruction,
+        use_thinking=use_thinking
+    )
 
 # --- JSON Schemas for structured LLM outputs ---
 LYRICS_JSON_SCHEMA = {
@@ -387,23 +424,23 @@ def get_user_input(prompt, default=None):
 
 def test_api_key(key: str, model_name: str = "gemini-2.5-pro") -> Tuple[bool, str]:
     """Test if an API key is valid by making a simple test request."""
+    # Note: This is primarily for Gemini key validation.
     try:
         genai.configure(api_key=key)
-        model = genai.GenerativeModel(model_name=model_name)
+        model = get_unified_model(model_name=model_name)
         # Make a minimal test request
-        response = model.generate_content("Say 'OK'", safety_settings=[
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ])
+        response = model.generate_content("Say 'OK'")
         return True, "OK"
     except Exception as e:
         return False, str(e)
 
 def initialize_api_keys(config, test_keys: bool = False):
     """Loads API keys from config and prepares them for rotation."""
-    global API_KEYS, CURRENT_KEY_INDEX
+    global API_KEYS, CURRENT_KEY_INDEX, PROVIDER, DEEPSEEK_API_KEY, USE_THINKING_MODEL
+    
+    # Normalize provider to lowercase for consistent comparison
+    PROVIDER = config.get("provider", "gemini").lower()
+    DEEPSEEK_API_KEY = config.get("deepseek_api_key")
     
     api_key_config = config.get("api_key")
     if isinstance(api_key_config, list):
@@ -414,6 +451,14 @@ def initialize_api_keys(config, test_keys: bool = False):
         API_KEYS = []
 
     CURRENT_KEY_INDEX = 0
+    
+    if PROVIDER == "deepseek":
+        if not DEEPSEEK_API_KEY:
+            print(Fore.RED + "DeepSeek provider selected but no 'deepseek_api_key' found in config." + Style.RESET_ALL)
+            return False
+        # For DeepSeek, we skip complex rotation/testing for now as it uses a single key usually
+        return True
+
     if not API_KEYS:
         # This is not a fatal error here, as the user might just be using the menu
         return False
@@ -473,6 +518,8 @@ CONFIG_FILE = os.path.join(script_dir, "config.yaml")
 # --- END ROBUST PATH ---
 
 MAX_CONTEXT_CHARS = 1000000  # A safe buffer below the 1M token limit for Gemini
+MAX_CONTEXT_CHARS_DEEPSEEK = 200000  # Safe buffer for DeepSeek's 128k token limit (~2.5 chars/token, leave room for output)
+DEEPSEEK_CHUNK_SIZE_BARS = 2  # Generate 2 bars at a time for DeepSeek to fit in 8k output tokens
 # Free tier input token limit (125,000 tokens PER MINUTE, not per day!)
 FREE_TIER_INPUT_TOKEN_LIMIT = 125000
 # Paid tier input token limit (1,000,000 tokens - Gemini's standard limit)
@@ -757,7 +804,7 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
         except Exception:
             _mx = 4096
         generation_config["max_output_tokens"] = _mx
-        model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        model = get_unified_model(model_name=model_name, generation_config=generation_config)
         safety_settings = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -821,7 +868,7 @@ def _generate_lyrics_syllables(config: Dict, genre: str, inspiration: str, track
                                 globals()['CURRENT_KEY_INDEX'] = idx
                                 genai.configure(api_key=API_KEYS[idx])
                                 print(Fore.CYAN + f"[Lyrics] Switching to API key #{idx+1}..." + Style.RESET_ALL)
-                                model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                                model = get_unified_model(model_name=model_name, generation_config=generation_config)
                                 rotated = True
                                 break
                             except Exception:
@@ -1229,7 +1276,7 @@ Return only the JSON array, no other text."""
         
         for attempt in range(max_attempts):
             try:
-                model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                model = get_unified_model(model_name=model_name, generation_config=generation_config)
                 response = model.generate_content(role_prompt, generation_config=generation_config, safety_settings=safety_settings)
                 response_text = response.text if response and response.text else ""
                 
@@ -1535,7 +1582,7 @@ OUTPUT JSON (strict):
         
         for attempt in range(max_attempts):
             try:
-                model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                model = get_unified_model(model_name=model_name, generation_config=generation_config)
                 response = model.generate_content(hint_prompt, generation_config=generation_config, safety_settings=safety_settings)
                 response_text = response.text if response and response.text else ""
                 
@@ -1750,7 +1797,7 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
             _mx = int(config.get("max_output_tokens")); _mx = max(256, min(_mx, 8192)); generation_config["max_output_tokens"] = _mx
     except Exception:
         pass
-    model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+    model = get_unified_model(model_name=model_name, generation_config=generation_config)
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -1941,7 +1988,7 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
                             try:
                                 globals()['CURRENT_KEY_INDEX'] = idx
                                 genai.configure(api_key=API_KEYS[idx])
-                                nonlocal_model[0] = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                                nonlocal_model[0] = get_unified_model(model_name=model_name, generation_config=generation_config)
                                 rotated = True
                                 break
                             except Exception:
@@ -1975,7 +2022,7 @@ def _plan_lyric_sections(config: Dict, genre: str, inspiration: str, bpm: float 
                         try:
                             globals()['CURRENT_KEY_INDEX'] = idx
                             genai.configure(api_key=API_KEYS[idx])
-                            nonlocal_model[0] = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                            nonlocal_model[0] = get_unified_model(model_name=model_name, generation_config=generation_config)
                             rotated = True; break
                         except Exception:
                             continue
@@ -2777,7 +2824,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
             generation_config["max_output_tokens"] = int(config.get("max_output_tokens"))
     except Exception:
         pass
-    model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+    model = get_unified_model(model_name=model_name, generation_config=generation_config)
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -3334,7 +3381,7 @@ def _generate_lyrics_words_with_spans(config: Dict, genre: str, inspiration: str
                                 print(Fore.CYAN + f"[Lyrics] Switching to API key #{idx+1}..." + Style.RESET_ALL)
                             except Exception:
                                 pass
-                            nonlocal_model[0] = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                            nonlocal_model[0] = get_unified_model(model_name=model_name, generation_config=generation_config)
                             rotated = True
                             break
                         except Exception:
@@ -3671,7 +3718,7 @@ OUTPUT (JSON):
         while attempts < max_attempts:
             try:
                 # Configure model with current API key
-                model = genai_local.GenerativeModel(model_name=model_name)
+                model = get_unified_model(model_name=model_name)
                 
                 resp = model.generate_content(concept_prompt)
                 raw = _extract_text_from_response(resp) or ""
@@ -3820,7 +3867,7 @@ OUTPUT (JSON):
         while attempts < max_attempts:
             try:
                 # Configure model with current API key
-                model = genai_local.GenerativeModel(model_name=model_name)
+                model = get_unified_model(model_name=model_name)
                 
                 resp = model.generate_content(phrase_prompt)
                 raw = _extract_text_from_response(resp) or ""
@@ -3916,7 +3963,7 @@ def _generate_lyrics_free_with_syllables(config: Dict, genre: str, inspiration: 
         # Use config temperature settings (not from artifact)
         temperature = float(config.get("lyrics_temperature", config.get("temperature", 0.6)))
         generation_config = {"response_mime_type": "application/json", "temperature": temperature}
-        model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        model = get_unified_model(model_name=model_name, generation_config=generation_config)
         # Extract musical parameters from JSON (not config.yaml)
         language = str(cfg.get("lyrics_language", "English")) if cfg else "English"
         # Use the passed key_scale parameter first, then fallback to cfg
@@ -4605,7 +4652,7 @@ Let genre, emotion, lyrics, and your artistic vision guide you - not prescriptiv
                             try:
                                 globals()['CURRENT_KEY_INDEX'] = idx
                                 genai.configure(api_key=API_KEYS[idx])
-                                model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                                model = get_unified_model(model_name=model_name, generation_config=generation_config)
                                 rotated = True
                                 break
                             except Exception:
@@ -4761,7 +4808,7 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
             _base_t = 0.5
         _temp = max(0.3, min(1.0, _base_t))
         generation_config = {"response_mime_type": "application/json", "temperature": _temp}
-        model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        model = get_unified_model(model_name=model_name, generation_config=generation_config)
         # Detect creative mode (reuse user_prompt context if available from section_description)
         user_prompt_from_desc = None
         try:
@@ -5711,7 +5758,7 @@ def _compose_notes_for_syllables(config: Dict, genre: str, inspiration: str, tra
                             try:
                                 globals()['CURRENT_KEY_INDEX'] = idx
                                 genai.configure(api_key=API_KEYS[idx])
-                                model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                                model = get_unified_model(model_name=model_name, generation_config=generation_config)
                                 rotated = True
                                 break
                             except Exception:
@@ -5905,7 +5952,7 @@ def _propose_lyric_note_adjustments(config: Dict, genre: str, inspiration: str, 
         if not model_name:
             model_name = config.get("model_name", "gemini-2.5-pro")
         generation_config = {"response_mime_type": "application/json", "temperature": float(config.get("lyrics_temperature", config.get("temperature", 0.6)))}
-        model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        model = get_unified_model(model_name=model_name, generation_config=generation_config)
         # Compute simple stress flags (strong on bar starts and mid-beat in even meters)
         try:
             bpb = max(1, int(ts.get('beats_per_bar', 4)))
@@ -6153,7 +6200,7 @@ def _analyze_user_prompt(config: Dict, genre: str, inspiration: str, user_prompt
                 _mx = int(config.get("max_output_tokens")); _mx = max(256, min(_mx, 8192)); generation_config["max_output_tokens"] = _mx
         except Exception:
             pass
-        model = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        model = get_unified_model(model_name=model_name, generation_config=generation_config)
         safety_settings = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -6231,7 +6278,7 @@ def _analyze_user_prompt(config: Dict, genre: str, inspiration: str, user_prompt
                         if idx is not None and idx != CURRENT_KEY_INDEX:
                             globals()['CURRENT_KEY_INDEX'] = idx
                             genai.configure(api_key=API_KEYS[idx])
-                            nonlocal_model[0] = genai_local.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                            nonlocal_model[0] = get_unified_model(model_name=model_name, generation_config=generation_config)
                             continue
                     except Exception:
                         pass
@@ -7832,6 +7879,7 @@ def _extract_text_from_response(response) -> str:
 def _extract_json_object(raw: str) -> str:
     """Extracts the largest plausible JSON object substring from raw text.
     Removes code fences and tries to match braces. Returns '' if not found.
+    For truncated JSON (common with DeepSeek's 8192 token limit), attempts repair.
     """
     if not raw:
         return ""
@@ -7847,6 +7895,7 @@ def _extract_json_object(raw: str) -> str:
     depth = 0
     in_string = False
     escape = False
+    bracket_depth = 0  # Track [] depth too
     for i in range(start, len(cleaned)):
         ch = cleaned[i]
         if in_string:
@@ -7869,6 +7918,53 @@ def _extract_json_object(raw: str) -> str:
                 depth -= 1
                 if depth == 0:
                     return cleaned[start:i+1]
+            elif ch == '[':
+                bracket_depth += 1
+            elif ch == ']':
+                bracket_depth -= 1
+    
+    # If we get here, JSON is incomplete (likely truncated by DeepSeek's output limit)
+    # Attempt to repair by closing open brackets and braces
+    if depth > 0 or bracket_depth > 0:
+        partial = cleaned[start:]
+        # Remove any incomplete last element (trailing comma or partial object)
+        # Find last complete element
+        last_complete = max(partial.rfind('},'), partial.rfind('}]'), partial.rfind(']'))
+        if last_complete > 0:
+            partial = partial[:last_complete + 1]
+        # Close any remaining open brackets/braces
+        # Re-count depths in partial
+        depth = 0
+        bracket_depth = 0
+        in_string = False
+        escape = False
+        for ch in partial:
+            if in_string:
+                if escape:
+                    escape = False
+                    continue
+                if ch == '\\':
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            elif ch == '[':
+                bracket_depth += 1
+            elif ch == ']':
+                bracket_depth -= 1
+        # Add closing brackets/braces
+        repair = ']' * bracket_depth + '}' * depth
+        if repair:
+            print(Fore.YELLOW + f"  Attempting to repair truncated JSON (adding {len(repair)} closing chars)..." + Style.RESET_ALL)
+            return partial + repair
+    
     return ""
 
 def _sanitize_json_text_for_load(s: str) -> str:
@@ -8630,11 +8726,21 @@ def load_config(config_file):
     except Exception as e:
         raise ValueError(f"An unexpected error occurred while loading the configuration: {e}")
 
-def get_dynamic_context(all_past_themes: List[Dict], character_budget: int = MAX_CONTEXT_CHARS) -> Tuple[List[Dict], int]:
+def get_dynamic_context(all_past_themes: List[Dict], character_budget: int = None) -> Tuple[List[Dict], int]:
     """
     Selects the most recent themes that fit within a character limit for the context.
     Returns the selected themes and the starting index from the original list.
+    
+    If character_budget is None, it will use the appropriate limit based on the current provider.
     """
+    global PROVIDER
+    if character_budget is None:
+        # Choose limit based on provider
+        if PROVIDER == "deepseek":
+            character_budget = MAX_CONTEXT_CHARS_DEEPSEEK
+        else:
+            character_budget = MAX_CONTEXT_CHARS
+    
     if not all_past_themes:
         return [], 0
 
@@ -9080,7 +9186,11 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     
     # Main Task description based on theme
     theme_task_instruction = ""
-    timing_rule = f"5.  **Timing is Absolute:** 'start_beat' is the absolute position from the beginning of the {length}-bar clip.\n"
+    timing_rule = (
+        f"5.  **Timing is Absolute (within this clip):** 'start_beat' is the absolute position from the beginning of the {length}-bar clip.\n"
+        f"    - Valid range: 0.0 ≤ start_beat < {total_beats_per_theme}\n"
+        f"    - Do NOT offset start_beat by previous themes. This theme is a standalone clip.\n"
+    )
 
     if current_theme_index == 0:
         theme_task_instruction = (
@@ -9091,16 +9201,16 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
             f"**CRITICAL AUTOMATION TASK:** Your primary goal is to translate any automation cues from the creative direction above (like 'pitch bend up', 'filter sweep') into the precise JSON format specified in the 'Advanced MIDI Automation' section. This is not optional; it is the most important part of your task. Faithfully convert the described musical effects into the corresponding JSON structures.\n"
         )
     else:
-        total_previous_beats = current_theme_index * total_beats_per_theme
         theme_task_instruction = (
-            f"**Your Task: Compose a New, Contrasting Theme starting from beat {total_previous_beats}**\n"
+            f"**Your Task: Compose a New, Contrasting Theme (next section)**\n"
             f"You must create a new musical section that logically follows the previous themes, but has a distinct character.\n"
             f"**Theme Name/Label for this NEW Theme:** {theme_label}\n"
             f"**Creative Direction for this NEW Theme:** {theme_description}\n"
             "Analyze the previous themes and create something that complements them while bringing a fresh energy or emotion.\n"
             f"**CRITICAL AUTOMATION TASK:** Your primary goal is to translate any automation cues from the creative direction above (like 'pitch bend up', 'filter sweep') into the precise JSON format specified in the 'Advanced MIDI Automation' section. This is not optional; it is the most important part of your task. Faithfully convert the described musical effects into the corresponding JSON structures.\n"
         )
-        timing_rule = f"5.  **Timing is Absolute:** 'start_beat' is the absolute position from the beginning of the *entire song composition so far*.\n"
+        # Keep timing rule clip-relative for *every* theme, otherwise per-part MIDI export becomes empty/corrupt.
+        # Song-level continuity is achieved via the provided previous-themes context, not via global beat indices.
 
     # Dialogue instructions (Call & Response)
     call_and_response_instructions = ""
@@ -9308,66 +9418,43 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     # ... (The rest of the function for smart context calculation and final prompt assembly remains largely the same)
     
     # --- Part 2: Smart Context Calculation ---
-    # Use all available themes initially - token limit reduction will be applied reactively
-    # if we get a token limit error from the API
-    safe_previous_themes = previous_themes_full_history
-    context_start_index = 0
+    # Apply provider-aware context limits to avoid exceeding token limits
+    # For DeepSeek: 128k token limit (~200k chars safe)
+    # For Gemini: 1M token limit (~1M chars)
+    safe_previous_themes, context_start_index = get_dynamic_context(previous_themes_full_history)
 
     # --- Part 3: Assemble the FINAL prompt ---
     previous_themes_prompt_part = ""
-    if previous_themes_full_history: # Check if there was any history to begin with
-        total_previous_themes = len(previous_themes_full_history)
-        used_themes_count = len(safe_previous_themes)
-        
-        # Determine the source of limitation (window size vs character budget)
-        cws_cfg = config.get("context_window_size", -1)
-        limit_source = ""
-        if cws_cfg > 0:
-            # historical_source already reflects the window slice of up to cws_cfg items
-            # Case A: fewer available than requested window size
-            if total_previous_themes < cws_cfg:
-                limit_source = f"limited by availability (only {total_previous_themes} previous themes exist, window={cws_cfg})"
-            # Case B: window provided enough, but we still used fewer => char limit
-            elif used_themes_count < total_previous_themes:
-                token_limit = get_input_token_limit(config)
-                limit_source = f"due to token limit ({token_limit:,} tokens)"
-            # Case C: exactly the window size used
-            else:
-                limit_source = f"due to 'context_window_size={cws_cfg}'"
-        elif cws_cfg == -1:
-            if used_themes_count < total_previous_themes:
-                token_limit = get_input_token_limit(config)
-                limit_source = f"due to token limit ({token_limit:,} tokens)"
-            else:
-                limit_source = "using full available history"
-
-        # Compute indices relative to the original full history length
-        original_total_hist = len(previous_themes_full_history) if 'previous_themes_full_history' in locals() else total_previous_themes
-        offset_into_original = original_total_hist - total_previous_themes
-        # Correct original indices based on the current theme index and the size of the provided history slice
-        # We have only a slice of the full history here; its original start index is:
-        # (current_theme_index - len(previous_themes_full_history))
-        original_slice_start = current_theme_index - total_previous_themes
-        start_theme_num = original_slice_start + context_start_index + 1
-        end_theme_num = start_theme_num + used_themes_count - 1
-        if used_themes_count > 0:
-            print(Fore.CYAN + f"Context Info: Using {used_themes_count}/{total_previous_themes} previous themes (original indices {start_theme_num}-{end_theme_num}) for context ({limit_source})." + Style.RESET_ALL)
-            try:
-                globals()['LAST_CONTEXT_COUNT'] = int(used_themes_count)
-                globals()['PLANNED_CONTEXT_COUNT'] = int(used_themes_count)
-            except Exception:
-                pass
-
     if safe_previous_themes:
         previous_themes_prompt_part = "**You have already composed the following themes. Use them as the primary context for what comes next:**\n"
         previous_themes_prompt_part += "**Note:** Notes use compact format: s=start_beat, d=duration_beats, p=pitch, v=velocity\n\n"
+        
+        # DeepSeek Context Optimization:
+        # DeepSeek struggles with large JSON contexts. Strategy:
+        # - Include notes ONLY from the most recent theme (for direct musical continuity)
+        # - For older themes, only include descriptions (for thematic awareness)
+        is_deepseek = (PROVIDER == "deepseek")
+        most_recent_theme_idx = len(safe_previous_themes) - 1
+            
         for i, theme in enumerate(safe_previous_themes):
-            theme_name = theme.get("description", f"Theme {chr(65 + i)}")
-            previous_themes_prompt_part += f"- **{theme_name}**:\n"
-            # Include all notes in compact format to save tokens
-            for track in theme['tracks']:
-                notes_as_str = _compact_notes_json(track.get('notes', []))
-                previous_themes_prompt_part += f"  - **{track['instrument_name']}** (Role: {track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
+            theme_name = theme.get("theme_label", f"Theme {chr(65 + i)}")
+            theme_desc = theme.get("theme_description", "")
+            previous_themes_prompt_part += f"- **{theme_name}** ({theme_desc}):\n"
+            
+            # For DeepSeek: Only include notes from the MOST RECENT theme
+            if is_deepseek and i < most_recent_theme_idx:
+                # Older themes: Just list instruments, no notes
+                instruments = [t.get('instrument_name', 'Unknown') for t in theme.get('tracks', [])]
+                previous_themes_prompt_part += f"  (Instruments: {', '.join(instruments[:5])})\n"
+            else:
+                # Most recent theme OR Gemini: Include full notes
+                for track in theme['tracks']:
+                    notes_as_str = _compact_notes_json(track.get('notes', []))
+                    # Limit length of string to avoid massive tokens
+                    if len(notes_as_str) > 3000:
+                        notes_as_str = notes_as_str[:3000] + "... (truncated)"
+                    previous_themes_prompt_part += f"  - **{track['instrument_name']}** ({track['role']}):\n  ```json\n  {notes_as_str}\n  ```\n"
+            
         previous_themes_prompt_part += "\n"
 
 
@@ -9413,12 +9500,588 @@ def create_theme_prompt(config: Dict, length: int, instrument_name: str, program
     )
     
     return prompt
+
+def _analyze_chunk_pattern(notes: List[Dict], beats_per_bar: int) -> Dict:
+    """Analyze a chunk of notes to extract musical patterns for continuation."""
+    if not notes:
+        return {"density": "sparse", "velocity_range": (60, 80), "common_durations": [0.5], "pitch_range": (60, 72), "notes_per_bar": 0}
+    
+    # Calculate notes per bar
+    if notes:
+        max_beat = max(n.get("start_beat", 0) for n in notes)
+        min_beat = min(n.get("start_beat", 0) for n in notes)
+        beat_span = max_beat - min_beat if max_beat > min_beat else beats_per_bar
+        bars = max(1, beat_span / beats_per_bar)
+        notes_per_bar = len(notes) / bars
+    else:
+        notes_per_bar = 0
+    
+    # Density classification
+    if notes_per_bar < 4:
+        density = "sparse"
+    elif notes_per_bar < 12:
+        density = "moderate"
+    elif notes_per_bar < 24:
+        density = "dense"
+    else:
+        density = "very dense"
+    
+    # Velocity range
+    velocities = [n.get("velocity", n.get("v", 80)) for n in notes]
+    vel_min, vel_max = min(velocities), max(velocities)
+    
+    # Common durations
+    durations = [n.get("duration_beats", n.get("d", 0.5)) for n in notes]
+    duration_counts = {}
+    for d in durations:
+        d_rounded = round(d, 3)
+        duration_counts[d_rounded] = duration_counts.get(d_rounded, 0) + 1
+    common_durations = sorted(duration_counts.keys(), key=lambda x: duration_counts[x], reverse=True)[:3]
+    
+    # Pitch range
+    pitches = [n.get("pitch", n.get("p", 60)) for n in notes]
+    pitch_min, pitch_max = min(pitches), max(pitches)
+    
+    return {
+        "density": density,
+        "notes_per_bar": round(notes_per_bar, 1),
+        "velocity_range": (vel_min, vel_max),
+        "common_durations": common_durations,
+        "pitch_range": (pitch_min, pitch_max)
+    }
+
+def _try_full_generation_deepseek(config: Dict, length: int, instrument_name: str, 
+                                   program_num: int, context_tracks: List[Dict], 
+                                   role: str, theme_description: str) -> Optional[Tuple[Dict, bool, List[Dict]]]:
+    """
+    Try to generate the full track in one API call using simplified prompt.
+    Returns (track_data, was_truncated, notes) or None if failed.
+    NOTE: This function is deprecated - use _try_full_generation_deepseek_with_prompt instead.
+    """
+    time_sig = config.get("time_signature", {})
+    beats_per_bar = time_sig.get("beats_per_bar", 4)
+    total_beats = length * beats_per_bar
+    
+    print(Fore.CYAN + f"  DeepSeek: Trying full generation ({length} bars)..." + Style.RESET_ALL, end=" ")
+    
+    # Use the standard prompt generation
+    chunk_prompt = _generate_chunk_prompt(
+        config, length, instrument_name, program_num,
+        context_tracks, role, theme_description,
+        0, total_beats, [], beats_per_bar
+    )
+    
+    generation_config = {
+        "temperature": config.get("temperature", 1.0),
+        "max_output_tokens": 8192,
+        "response_mime_type": "application/json"
+    }
+    
+    model = get_unified_model(
+        model_name=config.get("model_name", "deepseek-chat"),
+        generation_config=generation_config
+    )
+    
+    try:
+        response = model.generate_content(chunk_prompt)
+        response_text = ""
+        if hasattr(response, 'text') and response.text:
+            response_text = response.text
+        elif hasattr(response, 'candidates') and response.candidates:
+            response_text = response.candidates[0].content.parts[0].text
+        
+        if not response_text:
+            print(Fore.YELLOW + "→ empty response" + Style.RESET_ALL)
+            return None
+        
+        # Check for truncation: response doesn't end with closing brace
+        was_truncated = not response_text.rstrip().endswith('}')
+        
+        json_str = _extract_json_object(response_text)
+        if not json_str:
+            print(Fore.YELLOW + "→ no valid JSON" + Style.RESET_ALL)
+            return None
+        
+        data = json.loads(json_str)
+        raw_notes = data.get("notes", [])
+        
+        # Empty notes = intentional silence
+        if isinstance(raw_notes, list) and len(raw_notes) == 0:
+            print(Fore.GREEN + "→ silent (intentional)" + Style.RESET_ALL)
+            track_data = {
+                "instrument_name": instrument_name,
+                "program_num": program_num,
+                "role": role,
+                "notes": [],
+                "track_automations": []
+            }
+            return (track_data, False, [])
+        
+        # Normalize notes
+        notes = []
+        highest_beat = 0
+        for note in raw_notes:
+            start = note.get("start_beat", note.get("s", 0))
+            if 0 <= start < total_beats:
+                notes.append({
+                    "pitch": note.get("pitch", note.get("p", 60)),
+                    "start_beat": start,
+                    "duration_beats": note.get("duration_beats", note.get("d", 0.5)),
+                    "velocity": note.get("velocity", note.get("v", 80))
+                })
+                highest_beat = max(highest_beat, start)
+        
+        # Truncation detection: ONLY based on JSON completeness, NOT on beat coverage
+        # A track might intentionally only play at the start (dialogue/call-response)
+        if not was_truncated:
+            # JSON was complete - trust it even if notes only cover part of the range
+            bars_covered = highest_beat / beats_per_bar if beats_per_bar > 0 else 0
+            print(Fore.GREEN + f"→ {len(notes)} notes (complete, spans {bars_covered:.1f} bars)" + Style.RESET_ALL)
+            track_data = {
+                "instrument_name": instrument_name,
+                "program_num": program_num,
+                "role": role,
+                "notes": sorted(notes, key=lambda n: n["start_beat"]),
+                "track_automations": []
+            }
+            return (track_data, False, notes)
+        else:
+            # JSON was truncated mid-stream - need to continue
+            bars_covered = highest_beat / beats_per_bar
+            print(Fore.YELLOW + f"→ {len(notes)} notes, JSON truncated at ~{bars_covered:.1f} bars" + Style.RESET_ALL)
+            return (None, True, notes)  # Signal need for continuation
+            
+    except Exception as e:
+        print(Fore.YELLOW + f"→ error: {str(e)[:60]}" + Style.RESET_ALL)
+        return None
+
+def _try_full_generation_deepseek_with_prompt(config: Dict, length: int, instrument_name: str,
+                                               program_num: int, role: str, 
+                                               full_prompt: str) -> Optional[Tuple[Dict, bool, List[Dict]]]:
+    """
+    Try to generate the full track using the complete prompt (same as Gemini uses).
+    Returns (track_data, was_truncated, notes) or None if failed.
+    """
+    time_sig = config.get("time_signature", {})
+    beats_per_bar = time_sig.get("beats_per_bar", 4)
+    total_beats = length * beats_per_bar
+    
+    # Extract description for silence check
+    theme_description = ""
+    if "Theme Description:" in full_prompt:
+        try:
+            theme_description = full_prompt.split("Theme Description:")[1].split("\n")[0].strip()
+        except:
+            pass
+    
+    print(Fore.CYAN + f"  DeepSeek: Trying full generation ({length} bars)..." + Style.RESET_ALL, end=" ")
+    
+    generation_config = {
+        "temperature": config.get("temperature", 1.0),
+        "max_output_tokens": 8192,
+        "response_mime_type": "application/json"
+    }
+    
+    model = get_unified_model(
+        model_name=config.get("model_name", "deepseek-chat"),
+        generation_config=generation_config
+    )
+    
+    try:
+        response = model.generate_content(full_prompt)
+        response_text = ""
+        if hasattr(response, 'text') and response.text:
+            response_text = response.text
+        elif hasattr(response, 'candidates') and response.candidates:
+            response_text = response.candidates[0].content.parts[0].text
+        
+        if not response_text:
+            print(Fore.YELLOW + "→ empty response" + Style.RESET_ALL)
+            return None
+        
+        # DEBUG: Show raw response preview for troubleshooting
+        if len(response_text) < 100:
+            print(Fore.YELLOW + f"[Short response: {response_text[:80]}]" + Style.RESET_ALL, end=" ")
+        
+        # Check for truncation
+        was_truncated = not response_text.rstrip().endswith('}')
+        
+        json_str = _extract_json_object(response_text)
+        
+        # If no valid JSON found, check if it's due to truncation and try to repair/salvage
+        if not json_str and was_truncated:
+            print(Fore.YELLOW + "→ parsing truncated JSON..." + Style.RESET_ALL, end=" ")
+            try:
+                # Try to salvage valid notes array items using regex
+                import re
+                # Pattern to find complete note objects inside the notes array
+                # Matches { ... } containing "pitch" or "p"
+                note_pattern = r'\{[^{}]*"(?:pitch|p)"[^{}]*\}'
+                matches = re.findall(note_pattern, response_text)
+                
+                if matches:
+                    # Construct a valid JSON from salvaged parts
+                    repaired_json = '{"notes": [' + ",".join(matches) + ']}'
+                    json_str = repaired_json
+                    print(Fore.CYAN + f"(salvaged {len(matches)} notes)" + Style.RESET_ALL)
+            except Exception:
+                pass
+
+        if not json_str:
+            print(Fore.YELLOW + f"→ no valid JSON (got: {response_text[:100]}...)" + Style.RESET_ALL)
+            return None
+        
+        data = json.loads(json_str)
+        raw_notes = data.get("notes", [])
+        
+        # DEBUG: Check if DeepSeek returned notes outside valid range
+        if raw_notes and len(raw_notes) > 0:
+            first_note = raw_notes[0]
+            last_note = raw_notes[-1] if len(raw_notes) > 1 else first_note
+            first_start = first_note.get("start_beat", first_note.get("s", -1))
+            last_start = last_note.get("start_beat", last_note.get("s", -1))
+            if first_start >= total_beats or last_start >= total_beats:
+                print(Fore.YELLOW + f"[WARN: Notes out of range! first={first_start}, last={last_start}, max={total_beats}]" + Style.RESET_ALL, end=" ")
+        
+        # Empty notes = intentional silence?
+        if isinstance(raw_notes, list) and len(raw_notes) == 0:
+            # IMPROVED VALIDATION: Check if blueprint/description explicitly asks for silence
+            role_lower = role.lower() if role else ""
+            desc_lower = theme_description.lower() if theme_description else ""
+            
+            is_silent_requested = "silent" in desc_lower or "silence" in desc_lower or "muted" in desc_lower
+            
+            # If silence is requested, accept it
+            if is_silent_requested:
+                print(Fore.GREEN + "→ silent (intentional)" + Style.RESET_ALL)
+                track_data = {
+                    "instrument_name": instrument_name,
+                    "program_num": program_num,
+                    "role": role,
+                    "notes": [],
+                    "track_automations": []
+                }
+                return (track_data, False, [])
+            
+            # If silence is NOT requested but model returned empty, it might be an error/laziness
+            # Especially for roles like 'bass' or 'kick' that should usually play
+            important_roles = ["bass", "kick", "drum", "lead", "arp", "melody"]
+            is_important = any(r in role_lower for r in important_roles)
+            
+            if is_important and not is_silent_requested:
+                 print(Fore.YELLOW + "→ returned 0 notes but role suggests activity (retrying)..." + Style.RESET_ALL)
+                 return None # Force retry in caller loop
+            
+            # Otherwise accept as silence
+            print(Fore.GREEN + "→ silent (accepted)" + Style.RESET_ALL)
+            track_data = {
+                "instrument_name": instrument_name,
+                "program_num": program_num,
+                "role": role,
+                "notes": [],
+                "track_automations": []
+            }
+            return (track_data, False, [])
+        
+        # Normalize notes
+        notes = []
+        highest_beat = 0
+        for note in raw_notes:
+            start = note.get("start_beat", note.get("s", 0))
+            if 0 <= start < total_beats:
+                notes.append({
+                    "pitch": note.get("pitch", note.get("p", 60)),
+                    "start_beat": start,
+                    "duration_beats": note.get("duration_beats", note.get("d", 0.5)),
+                    "velocity": note.get("velocity", note.get("v", 80))
+                })
+                highest_beat = max(highest_beat, start)
+        
+        # Truncation detection: ONLY based on JSON completeness
+        
+        # Check for lazy truncation (DeepSeek stopping early)
+            bars_covered = highest_beat / beats_per_bar if beats_per_bar > 0 else 0
+        expected_bars = length
+        
+        is_lazy_truncation = False
+        # Only check for lazy truncation if we have some notes (not empty) and JSON was valid
+        if not was_truncated and len(notes) > 0:
+            # Heuristic: Only enforce full length for roles that are typically continuous.
+            # Avoid enforcing for FX, Leads, Vocals, or Roles that might play sparse patterns (fills, stabs).
+            continuous_roles = ["bass", "sub", "kick", "snare", "drum", "pad", "arp", "chord", "harmony"]
+            role_lower = role.lower() if role else ""
+            is_continuous = any(r in role_lower for r in continuous_roles)
+            
+            # Also check description for hints of sparsity/structure that implies gaps
+            desc_lower = theme_description.lower() if theme_description else ""
+            sparse_keywords = ["call", "response", "silence", "sparse", "fill", "stab", "hit", "intro", "outro", "break", "build"]
+            is_sparse_desc = any(k in desc_lower for k in sparse_keywords)
+            
+            # Trigger lazy detection only if:
+            # 1. It's a continuous role
+            # 2. Description doesn't imply sparsity
+            # 3. Coverage is significantly low (< 75%)
+            if is_continuous and not is_sparse_desc:
+                if bars_covered < expected_bars * 0.75:
+                    is_lazy_truncation = True
+                    was_truncated = True
+                    print(Fore.YELLOW + f"→ content too short ({bars_covered:.1f}/{expected_bars} bars) for continuous role, treating as lazy truncation" + Style.RESET_ALL)
+
+        if not was_truncated:
+            print(Fore.GREEN + f"→ {len(notes)} notes (complete, spans {bars_covered:.1f} bars)" + Style.RESET_ALL)
+            track_data = {
+                "instrument_name": instrument_name,
+                "program_num": program_num,
+                "role": role,
+                "notes": sorted(notes, key=lambda n: n["start_beat"]),
+                "track_automations": []
+            }
+            return (track_data, False, notes)
+        else:
+            bars_covered = highest_beat / beats_per_bar
+            print(Fore.YELLOW + f"→ {len(notes)} notes, JSON truncated at ~{bars_covered:.1f} bars" + Style.RESET_ALL)
+            return (None, True, notes)
+            
+    except Exception as e:
+        print(Fore.YELLOW + f"→ error: {str(e)[:60]}" + Style.RESET_ALL)
+        return None
+
+def _continue_generation_from_notes(config: Dict, length: int, instrument_name: str,
+                                     program_num: int, context_tracks: List[Dict],
+                                     role: str, theme_description: str,
+                                     existing_notes: List[Dict]) -> Tuple[Dict, int]:
+    """
+    Continue generating notes from where the previous generation was truncated.
+    """
+    time_sig = config.get("time_signature", {})
+    beats_per_bar = time_sig.get("beats_per_bar", 4)
+    total_beats = length * beats_per_bar
+    
+    all_notes = list(existing_notes)
+    
+    # Find where we left off
+    if all_notes:
+        highest_beat = max(n.get("start_beat", 0) for n in all_notes)
+        current_start_beat = int(highest_beat / beats_per_bar) * beats_per_bar  # Round to bar
+    else:
+        current_start_beat = 0
+    
+    chunk_count = 1  # Already did one attempt
+    max_chunks = 8
+    
+    while current_start_beat < total_beats - beats_per_bar and chunk_count < max_chunks:
+        chunk_count += 1
+        
+        print(Fore.CYAN + f"    Continuing from beat {current_start_beat}..." + Style.RESET_ALL, end=" ")
+        
+        chunk_prompt = _generate_chunk_prompt(
+            config, length, instrument_name, program_num,
+            context_tracks, role, theme_description,
+            current_start_beat, total_beats, all_notes, beats_per_bar
+        )
+        
+        generation_config = {
+            "temperature": config.get("temperature", 1.0),
+            "max_output_tokens": 8192,
+            "response_mime_type": "application/json"
+        }
+        
+        model = get_unified_model(
+            model_name=config.get("model_name", "deepseek-chat"),
+            generation_config=generation_config
+        )
+        
+        try:
+            response = model.generate_content(chunk_prompt)
+            response_text = ""
+            if hasattr(response, 'text') and response.text:
+                response_text = response.text
+            elif hasattr(response, 'candidates') and response.candidates:
+                response_text = response.candidates[0].content.parts[0].text
+            
+            if not response_text:
+                print(Fore.YELLOW + "→ empty" + Style.RESET_ALL)
+                break
+            
+            was_truncated = not response_text.rstrip().endswith('}')
+            
+            json_str = _extract_json_object(response_text)
+            if not json_str:
+                print(Fore.YELLOW + "→ no JSON" + Style.RESET_ALL)
+                break
+            
+            data = json.loads(json_str)
+            raw_notes = data.get("notes", [])
+            
+            highest_beat = current_start_beat
+            new_notes = []
+            for note in raw_notes:
+                start = note.get("start_beat", note.get("s", 0))
+                if current_start_beat <= start < total_beats:
+                    new_notes.append({
+                        "pitch": note.get("pitch", note.get("p", 60)),
+                        "start_beat": start,
+                        "duration_beats": note.get("duration_beats", note.get("d", 0.5)),
+                        "velocity": note.get("velocity", note.get("v", 80))
+                    })
+                    highest_beat = max(highest_beat, start)
+            
+            all_notes.extend(new_notes)
+            
+            # Truncation check: ONLY based on JSON completeness
+            if not was_truncated:
+                # JSON was complete - we're done
+                print(Fore.GREEN + f"→ +{len(new_notes)} notes (complete!)" + Style.RESET_ALL)
+                break
+            else:
+                # JSON was truncated - need to continue
+                bars_now = highest_beat / beats_per_bar
+                print(Fore.YELLOW + f"→ +{len(new_notes)} notes, truncated (~{bars_now:.1f} bars)" + Style.RESET_ALL)
+                next_start = int(highest_beat / beats_per_bar) * beats_per_bar
+                if next_start <= current_start_beat:
+                    next_start = current_start_beat + beats_per_bar
+                current_start_beat = next_start
+                
+        except Exception as e:
+            print(Fore.YELLOW + f"→ error: {str(e)[:50]}" + Style.RESET_ALL)
+            break
+        
+        time.sleep(0.3)
+    
+    # Deduplicate and sort
+    all_notes.sort(key=lambda n: n.get("start_beat", 0))
+    seen = set()
+    unique_notes = []
+    for note in all_notes:
+        key = (note["pitch"], round(note["start_beat"], 3))
+        if key not in seen:
+            seen.add(key)
+            unique_notes.append(note)
+    
+    notes_per_bar = len(unique_notes) / length if length > 0 else 0
+    print(Fore.GREEN + f"  ✓ Total: {len(unique_notes)} notes in {chunk_count} passes ({notes_per_bar:.1f}/bar)" + Style.RESET_ALL)
+    
+    track_data = {
+        "instrument_name": instrument_name,
+        "program_num": program_num,
+        "role": role,
+        "notes": unique_notes,
+        "track_automations": []
+    }
+    
+    return track_data, 0
+
+def _generate_chunk_prompt(config: Dict, length: int, instrument_name: str, program_num: int, 
+                           context_tracks: List[Dict], role: str, theme_description: str,
+                           chunk_start_beat: float, chunk_end_beat: float, 
+                           previous_chunks_notes: List[Dict], beats_per_bar: int) -> str:
+    """Generate a prompt for a specific beat range (chunk) of a track.
+    Used for DeepSeek's chunked generation to work around 8k output limit.
+    Includes analysis of previous chunks for seamless continuation.
+    """
+    key_scale = config.get("key_scale", "C major")
+    bpm = config.get("bpm", 120)
+    genre = config.get("genre", "")
+    
+    chunk_bars = int((chunk_end_beat - chunk_start_beat) / beats_per_bar)
+    is_first_chunk = len(previous_chunks_notes) == 0
+    
+    # Analyze previous chunks for pattern continuation
+    pattern_info = ""
+    continuation_hint = ""
+    if previous_chunks_notes:
+        # Get last 2 bars worth of notes for context
+        last_bar_notes = [n for n in previous_chunks_notes if n.get("start_beat", 0) >= chunk_start_beat - (2 * beats_per_bar)]
+        pattern = _analyze_chunk_pattern(last_bar_notes, beats_per_bar)
+        
+        pattern_info = f"""
+**Pattern from previous bars (CONTINUE THIS STYLE):**
+- Density: {pattern['density']} (~{pattern['notes_per_bar']} notes per bar)
+- Velocity range: {pattern['velocity_range'][0]} - {pattern['velocity_range'][1]}
+- Common note durations: {', '.join(str(d) for d in pattern['common_durations'])} beats
+- Pitch range: MIDI {pattern['pitch_range'][0]} - {pattern['pitch_range'][1]}
+"""
+        
+        # Show last few notes as direct continuation point
+        last_notes = previous_chunks_notes[-8:]
+        last_notes_json = json.dumps(last_notes, separators=(',', ':'))
+        continuation_hint = f"""
+**LAST 8 NOTES (continue directly from these):**
+```json
+{last_notes_json}
+```
+Your first note should follow naturally after beat {max(n.get('start_beat', 0) for n in last_notes):.2f}.
+"""
+    else:
+        continuation_hint = f"\nThis is the FIRST chunk - establish the rhythmic pattern for beats {chunk_start_beat}-{chunk_end_beat}.\n"
+    
+    # Context from other tracks in this theme (limited)
+    context_str = ""
+    if context_tracks:
+        context_str = "**Other tracks in this theme (for harmonic/rhythmic alignment):**\n"
+        for t in context_tracks[-2:]:  # Limit to 2 tracks
+            # Get notes in the current chunk's beat range
+            relevant_notes = [n for n in t.get('notes', []) 
+                            if chunk_start_beat <= n.get("start_beat", n.get("s", 0)) < chunk_end_beat][:15]
+            if relevant_notes:
+                notes_preview = json.dumps(relevant_notes, separators=(',', ':'))[:300]
+                context_str += f"- {t['instrument_name']}: {notes_preview}...\n"
+        context_str += "\n"
+    
+    prompt = f"""You are generating PART of a {instrument_name} track for a {genre} song.
+
+**CHUNK TASK:** Generate notes for beats {chunk_start_beat} to {chunk_end_beat} ({chunk_bars} bars).
+
+**Musical Context:**
+- Key: {key_scale}
+- BPM: {bpm}
+- Role: {role}
+- Theme: {theme_description}
+{pattern_info}
+{context_str}{continuation_hint}
+
+**OUTPUT RULES:**
+1. Generate notes ONLY for beats {chunk_start_beat} to {chunk_end_beat}
+2. First note's start_beat must be >= {chunk_start_beat}
+3. Last note's start_beat must be < {chunk_end_beat}
+4. Match the density and style of previous chunks
+5. Return JSON: {{"notes": [{{"pitch": int, "start_beat": float, "duration_beats": float, "velocity": int}}, ...]}}
+6. If silent for this section: {{"notes": []}}
+
+Return ONLY the JSON object."""
+    return prompt
+
+
 def generate_instrument_track_data(config: Dict, length: int, instrument_name: str, program_num: int, context_tracks: List[Dict], role: str, current_track_index: int, total_tracks: int, dialogue_role: str, theme_label: str, theme_description: str, previous_themes_full_history: List[Dict], current_theme_index: int) -> Tuple[Dict, int]:
     """
     Generates musical data for a single instrument track using the generative AI model, adapted for themes.
     Returns a tuple of (track_data, token_count).
     """
-    global CURRENT_KEY_INDEX, SESSION_MODEL_OVERRIDE, EMPTY_TRACK_RETRY_COUNT
+    global CURRENT_KEY_INDEX, SESSION_MODEL_OVERRIDE, EMPTY_TRACK_RETRY_COUNT, PROVIDER
+    
+    # For DeepSeek: First try normal generation with FULL prompt, only use chunking if truncated
+    # DeepSeek always uses adaptive chunked generation (required for 8k output limit)
+    if PROVIDER == "deepseek" and length >= 4:
+        # Use the FULL prompt (same as Gemini) for best quality
+        full_prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, 
+                                          current_track_index, total_tracks, dialogue_role, theme_label, 
+                                          theme_description, previous_themes_full_history, current_theme_index)
+        
+        result = _try_full_generation_deepseek_with_prompt(
+            config, length, instrument_name, program_num, role, full_prompt
+        )
+        if result is not None:
+            track_data, was_truncated, notes = result
+            if not was_truncated:
+                # Success! Return without chunking
+                return track_data, 0
+            else:
+                # Was truncated, continue with adaptive chunking from where we left off
+                return _continue_generation_from_notes(
+                    config, length, instrument_name, program_num, context_tracks, role,
+                    theme_description, notes
+                )
+    
     prompt = create_theme_prompt(config, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history, current_theme_index)
     # Local model override for this step (interactive switch on repeated failures)
     local_model_name = SESSION_MODEL_OVERRIDE or config["model_name"]
@@ -9532,7 +10195,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
 
                 # Poll persistent hotkey (Windows) to change model instantly
                 local_model_name = _poll_model_switch(local_model_name, config)
-                model = genai.GenerativeModel(
+                model = get_unified_model(
                     model_name=local_model_name,
                     generation_config=generation_config
                 )
@@ -9559,7 +10222,7 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     # Apply requested switch immediately before issuing the call
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
-                        model = genai.GenerativeModel(
+                        model = get_unified_model(
                             model_name=local_model_name,
                             generation_config=generation_config
                         )
@@ -9591,76 +10254,103 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                         pass
                     REDUCE_CONTEXT_THIS_STEP = False
                     REDUCE_CONTEXT_HALVES = 0
-                response = model.generate_content(effective_prompt, safety_settings=safety_settings)
+                
+                # Use the correct prompt (could be 'prompt' or 'effective_prompt')
+                # 'effective_prompt' is not defined in this scope yet, assuming 'prompt' is intended
+                # If 'effective_prompt' was meant to be the full prompt, use 'prompt'
+                current_prompt = prompt 
+                
+                response = model.generate_content(current_prompt, safety_settings=safety_settings)
                 
                 # --- Robust Response Validation ---
-                # 1. Check if the response was blocked or is otherwise invalid before accessing .text
-                if not response.candidates or response.candidates[0].finish_reason not in [1, "STOP"]: # 1 is the enum for STOP
-                    finish_reason_name = "UNKNOWN"
-                    # Safely get the finish reason name
+                # Handle UnifiedResponse (DeepSeek) vs Gemini response
+                # DeepSeek/UnifiedResponse currently only exposes .text and wraps successful responses.
+                # If generation failed, it would have raised an exception already.
+                
+                # Check for Gemini-specific structure
+                is_gemini_response = hasattr(response, 'candidates')
+                
+                if is_gemini_response:
+                    # Check finish_reason - it can be an int (1), string ("STOP"), or enum (FinishReason.STOP)
+                    finish_reason = None
                     if response.candidates:
-                        try:
-                            finish_reason_name = response.candidates[0].finish_reason.name
-                        except AttributeError:
-                            finish_reason_name = str(response.candidates[0].finish_reason)
-
-                    print(Fore.RED + f"Error on attempt {attempt_count + 1}: Generation failed or was incomplete." + Style.RESET_ALL)
-                    print(Fore.YELLOW + f"Reason: {finish_reason_name}" + Style.RESET_ALL)
+                        finish_reason = response.candidates[0].finish_reason
                     
-                    # Also check for safety blocking information
-                    if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                         print(Fore.YELLOW + f"Block Reason: {response.prompt_feedback.block_reason.name}" + Style.RESET_ALL)
-                    # Non-counting errors: MAX_TOKENS (but tracked for phase/deferral)
-                    if str(finish_reason_name).upper().find("MAX_TOKENS") != -1:
-                        if 'flash' in (local_model_name or ''):
-                            max_tokens_fail_flash += 1
-                            if max_tokens_fail_flash >= 6:
-                                # AUTO_ESCALATE_TO_PRO disabled - keep using flash
-                                # if AUTO_ESCALATE_TO_PRO:
-                                #     local_model_name = 'gemini-2.5-pro'
-                                #     max_tokens_fail_pro = 0
-                                #     print(Fore.CYAN + "Auto-escalate after 6 MAX_TOKENS on flash → switching to pro for this track." + Style.RESET_ALL)
-                                # else:
-                                    print(Fore.YELLOW + "Deferring this track due to repeated MAX_TOKENS on flash (6 attempts)." + Style.RESET_ALL)
+                    # Normalize finish_reason check - handle enum, int, and string
+                    is_successful_finish = False
+                    if finish_reason is not None:
+                        finish_str = str(finish_reason).upper()
+                        is_successful_finish = "STOP" in finish_str or finish_reason == 1
+                    
+                    if not response.candidates or not is_successful_finish:
+                        finish_reason_name = "UNKNOWN"
+                        # Safely get the finish reason name
+                        if response.candidates:
+                            try:
+                                finish_reason_name = response.candidates[0].finish_reason.name
+                            except AttributeError:
+                                finish_reason_name = str(response.candidates[0].finish_reason)
+
+                        print(Fore.RED + f"Error on attempt {attempt_count + 1}: Generation failed or was incomplete." + Style.RESET_ALL)
+                        print(Fore.YELLOW + f"Reason: {finish_reason_name}" + Style.RESET_ALL)
+                        
+                        # Also check for safety blocking information
+                        if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                             print(Fore.YELLOW + f"Block Reason: {response.prompt_feedback.block_reason.name}" + Style.RESET_ALL)
+                        # Non-counting errors: MAX_TOKENS (but tracked for phase/deferral)
+                        if str(finish_reason_name).upper().find("MAX_TOKENS") != -1:
+                            if 'flash' in (local_model_name or ''):
+                                max_tokens_fail_flash += 1
+                                if max_tokens_fail_flash >= 6:
+                                    # AUTO_ESCALATE_TO_PRO disabled - keep using flash
+                                    # if AUTO_ESCALATE_TO_PRO:
+                                    #     local_model_name = 'gemini-2.5-pro'
+                                    #     max_tokens_fail_pro = 0
+                                    #     print(Fore.CYAN + "Auto-escalate after 6 MAX_TOKENS on flash → switching to pro for this track." + Style.RESET_ALL)
+                                    # else:
+                                        print(Fore.YELLOW + "Deferring this track due to repeated MAX_TOKENS on flash (6 attempts)." + Style.RESET_ALL)
+                                        return None, 0
+                            elif 'pro' in (local_model_name or ''):
+                                max_tokens_fail_pro += 1
+                                if max_tokens_fail_pro >= 6:
+                                    print(Fore.YELLOW + "Deferring this track due to repeated MAX_TOKENS on pro (6 attempts)." + Style.RESET_ALL)
                                     return None, 0
-                        elif 'pro' in (local_model_name or ''):
-                            max_tokens_fail_pro += 1
-                            if max_tokens_fail_pro >= 6:
-                                print(Fore.YELLOW + "Deferring this track due to repeated MAX_TOKENS on pro (6 attempts)." + Style.RESET_ALL)
-                                return None, 0
-                        print(Fore.YELLOW + "Not counting this attempt due to MAX_TOKENS. Retrying..." + Style.RESET_ALL)
-                        failure_for_escalation_count += 1
-                        _escalate_if_needed()
-                        # Safety guard: If MAX_TOKENS happens repeatedly without progress, increment attempt_count to prevent infinite loop
-                        if (('flash' in (local_model_name or '')) and max_tokens_fail_flash >= 3) or (('pro' in (local_model_name or '')) and max_tokens_fail_pro >= 3):
-                            print(Fore.YELLOW + f"MAX_TOKENS occurred {max_tokens_fail_flash if 'flash' in (local_model_name or '') else max_tokens_fail_pro} times. Incrementing attempt count to prevent infinite loop." + Style.RESET_ALL)
-                            attempt_count += 1
-                        # After two MAX_TOKENS, reduce historical context by half and retry
-                        try:
-                            if (('flash' in (local_model_name or '')) and max_tokens_fail_flash >= 2) or (('pro' in (local_model_name or '')) and max_tokens_fail_pro >= 2):
-                                reduced_cfg = json.loads(json.dumps(config))
-                                prev_ctx = previous_themes_full_history
-                                if isinstance(prev_ctx, list) and prev_ctx:
-                                    half = max(1, len(prev_ctx)//2)
-                                    reduced_cfg["context_window_size"] = half
-                                    print(Fore.CYAN + f"Reducing historical context window to {half} due to repeated MAX_TOKENS." + Style.RESET_ALL)
-                                    # Replace prompt with smaller context on next loop
-                                    prompt = create_theme_prompt(reduced_cfg, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history[-half:], current_theme_index)
-                        except Exception:
-                            pass
-                        # Offer a quick, non-blocking model switch for this track
-                        _wait_with_optional_switch(3)
+                            print(Fore.YELLOW + "Not counting this attempt due to MAX_TOKENS. Retrying..." + Style.RESET_ALL)
+                            failure_for_escalation_count += 1
+                            _escalate_if_needed()
+                            # Safety guard: If MAX_TOKENS happens repeatedly without progress, increment attempt_count to prevent infinite loop
+                            if (('flash' in (local_model_name or '')) and max_tokens_fail_flash >= 3) or (('pro' in (local_model_name or '')) and max_tokens_fail_pro >= 3):
+                                print(Fore.YELLOW + f"MAX_TOKENS occurred {max_tokens_fail_flash if 'flash' in (local_model_name or '') else max_tokens_fail_pro} times. Incrementing attempt count to prevent infinite loop." + Style.RESET_ALL)
+                                attempt_count += 1
+                            # After two MAX_TOKENS, reduce historical context by half and retry
+                            try:
+                                if (('flash' in (local_model_name or '')) and max_tokens_fail_flash >= 2) or (('pro' in (local_model_name or '')) and max_tokens_fail_pro >= 2):
+                                    reduced_cfg = json.loads(json.dumps(config))
+                                    prev_ctx = previous_themes_full_history
+                                    if isinstance(prev_ctx, list) and prev_ctx:
+                                        half = max(1, len(prev_ctx)//2)
+                                        reduced_cfg["context_window_size"] = half
+                                        print(Fore.CYAN + f"Reducing historical context window to {half} due to repeated MAX_TOKENS." + Style.RESET_ALL)
+                                        # Replace prompt with smaller context on next loop
+                                        prompt = create_theme_prompt(reduced_cfg, length, instrument_name, program_num, context_tracks, role, current_track_index, total_tracks, dialogue_role, theme_label, theme_description, previous_themes_full_history[-half:], current_theme_index)
+                            except Exception:
+                                pass
+                            # Offer a quick, non-blocking model switch for this track
+                            _wait_with_optional_switch(3)
+                            continue
+                        # Safety blocks and other content-related reasons count as attempts
+                        attempt_count += 1
+                        # Apply backoff for countable errors below
+                        base = 3
+                        wait_time = base * (2 ** max(0, attempt_count - 1))
+                        jitter = random.uniform(0, 1.5)
+                        wait_time = min(30, wait_time + jitter)
+                        
+                        _wait_with_optional_switch(wait_time)
                         continue
-                    # Safety blocks and other content-related reasons count as attempts
-                    attempt_count += 1
-                    # Apply backoff for countable errors below
-                    base = 3
-                    wait_time = base * (2 ** max(0, attempt_count - 1))
-                    jitter = random.uniform(0, 1.5)
-                    wait_time = min(30, wait_time + jitter)
-                    print(Fore.YELLOW + f"Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
-                    _interruptible_backoff(wait_time, config, context_label=f"{instrument_name}")
-                    continue
+                
+                # Else: UnifiedResponse (DeepSeek) or successful Gemini response
+                # UnifiedResponse is assumed successful if no exception raised.
 
                 # 2. Now that we know the response is valid, safely access the text and parse JSON
                 # Check if user requested a switch during generation window
@@ -9679,18 +10369,36 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     ABORT_CURRENT_STEP = False
                     continue
 
-                response_text = _extract_text_from_response(response)
-                if not response_text:
-                    print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: Empty or invalid response payload for {instrument_name}." + Style.RESET_ALL)
-                    # Counts as content-related error
-                    attempt_count += 1
-                    base = 3
-                    wait_time = base * (2 ** max(0, attempt_count - 1))
-                    jitter = random.uniform(0, 1.5)
-                    wait_time = min(30, wait_time + jitter)
-                    print(Fore.YELLOW + f"Waiting for {wait_time:.1f} seconds before retrying..." + Style.RESET_ALL)
-                    _interruptible_backoff(wait_time, config, context_label=f"{instrument_name}")
-                    continue
+                # 2. Extract text safely
+                response_text = ""
+                
+                # DEBUG: Show what we got
+                print(Fore.CYAN + f"[DEBUG] Response type: {type(response).__name__}" + Style.RESET_ALL, end=" ")
+                
+                # For Gemini, response.text can raise exceptions if there's no valid content
+                try:
+                    if hasattr(response, 'text'):
+                        response_text = response.text or ""
+                        if response_text:
+                            print(Fore.GREEN + f"[Got {len(response_text)} chars via .text]" + Style.RESET_ALL)
+                except Exception as e:
+                    print(Fore.YELLOW + f"[.text raised: {e}]" + Style.RESET_ALL, end=" ")
+                
+                # Fallback to candidates if text extraction failed
+                if not response_text and hasattr(response, 'candidates') and response.candidates:
+                    try:
+                        if response.candidates[0].content and response.candidates[0].content.parts:
+                            response_text = response.candidates[0].content.parts[0].text
+                            if response_text:
+                                print(Fore.GREEN + f"[Got {len(response_text)} chars via .candidates]" + Style.RESET_ALL)
+                    except Exception as e:
+                        print(Fore.YELLOW + f"[.candidates raised: {e}]" + Style.RESET_ALL)
+                
+                # Strip markdown code blocks
+                if "```json" in response_text:
+                    response_text = response_text.replace("```json", "").replace("```", "")
+                elif "```" in response_text:
+                    response_text = response_text.replace("```", "")
 
                 # --- NEW: Token Usage Reporting ---
                 total_token_count = 0
@@ -9701,6 +10409,8 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                     char_per_token = len(prompt) / prompt_tokens if prompt_tokens > 0 else 0
                     print(Fore.CYAN + f"Token Usage: Prompt: {prompt_tokens:,} | Output: {output_tokens:,} | Total: {total_token_count:,} "
                                       f"(Prompt: {len(prompt):,} chars, ~{char_per_token:.2f} chars/token)" + Style.RESET_ALL)
+                elif hasattr(response, '_text'): # UnifiedResponse doesn't have metadata yet
+                    pass
                 
                 if not response_text.strip():
                     print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: Model returned an empty response for {instrument_name}." + Style.RESET_ALL)
@@ -9727,6 +10437,10 @@ def generate_instrument_track_data(config: Dict, length: int, instrument_name: s
                 if not json_payload:
                     json_failure_count += 1
                     print(Fore.YELLOW + f"Warning on attempt {attempt_count + 1}: Could not extract JSON object for {instrument_name}." + Style.RESET_ALL)
+                    # Debug: Show first 500 chars of response if DeepSeek
+                    if PROVIDER == "deepseek" and response_text:
+                        preview = response_text[:500].replace('\n', ' ')
+                        print(Style.DIM + f"  Response preview: {preview}..." + Style.RESET_ALL)
                     failure_for_escalation_count += 1
                     _escalate_if_needed()
                     # Note: Model switch prompt disabled in automatic mode to prevent blocking
@@ -10787,7 +11501,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
 
                 # Poll persistent hotkey (Windows) to change model instantly
                 local_model_name = _poll_model_switch(local_model_name, config)
-                model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+                model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
                 safety_settings=[
                     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -10804,7 +11518,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                 if ABORT_CURRENT_STEP or DEFER_CURRENT_TRACK:
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
-                        model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+                        model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
                     if REQUEST_SET_SESSION_DEFAULT:
                         SESSION_MODEL_OVERRIDE = local_model_name
                         REQUEST_SET_SESSION_DEFAULT = False
@@ -10837,7 +11551,7 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                     # AUTO_ESCALATE_TO_PRO disabled - keep using flash
                     # if AUTO_ESCALATE_TO_PRO and local_model_name == 'gemini-2.5-flash' and json_failure_count >= AUTO_ESCALATE_THRESHOLD:
                     #     local_model_name = 'gemini-2.5-pro'
-                    #     model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+                    #     model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
                     #     print(Fore.CYAN + f"Auto-escalate: switching to {local_model_name} for this track after {json_failure_count} failures." + Style.RESET_ALL)
                     continue
 
@@ -10850,6 +11564,8 @@ def generate_optimization_data(config: Dict, length: int, track_to_optimize: Dic
                     char_per_token = len(prompt) / prompt_tokens if prompt_tokens > 0 else 0
                     print(Fore.CYAN + f"Token Usage: Prompt: {prompt_tokens:,} | Output: {output_tokens:,} | Total: {total_token_count:,} "
                                       f"(Prompt: {len(prompt):,} chars, ~{char_per_token:.2f} chars/token)" + Style.RESET_ALL)
+                elif hasattr(response, '_text'): # UnifiedResponse doesn't have metadata yet
+                    pass
 
                 # --- Data Validation ---
                 json_payload = _extract_json_object(response_text)
@@ -11315,7 +12031,7 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                     "response_mime_type": "application/json",
                     "max_output_tokens": config.get("max_output_tokens", DEFAULT_MAX_TOKENS)
                 }
-                model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+                model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
                 safety_settings=[
                     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -11326,7 +12042,7 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                 if ABORT_CURRENT_STEP or DEFER_CURRENT_TRACK:
                     if REQUESTED_SWITCH_MODEL:
                         local_model_name = REQUESTED_SWITCH_MODEL
-                        model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+                        model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
                     if REQUEST_SET_SESSION_DEFAULT:
                         SESSION_MODEL_OVERRIDE = local_model_name
                         REQUEST_SET_SESSION_DEFAULT = False
@@ -11383,7 +12099,7 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                     # AUTO_ESCALATE_TO_PRO disabled - keep using flash
                     # if AUTO_ESCALATE_TO_PRO and local_model_name == 'gemini-2.5-flash' and json_failure_count >= AUTO_ESCALATE_THRESHOLD:
                     #     local_model_name = 'gemini-2.5-pro'
-                    #     model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+                    #     model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
                     #     print(Fore.CYAN + f"Auto-escalate: switching to {local_model_name} for this track after {json_failure_count} failures." + Style.RESET_ALL)
                 json_payload = _extract_json_object(resp_text)
                 if not json_payload:
@@ -11393,7 +12109,7 @@ def generate_automation_data(config: Dict, length: int, base_track: Dict, role: 
                     # AUTO_ESCALATE_TO_PRO disabled - keep using flash
                     # if AUTO_ESCALATE_TO_PRO and local_model_name == 'gemini-2.5-flash' and json_failure_count >= AUTO_ESCALATE_THRESHOLD:
                     #     local_model_name = 'gemini-2.5-pro'
-                    #     model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+                    #     model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
                     #     print(Fore.CYAN + f"Auto-escalate: switching to {local_model_name} for this track after {json_failure_count} failures." + Style.RESET_ALL)
                     continue
                 data = json.loads(json_payload)
@@ -11626,7 +12342,7 @@ def generate_single_track_data(config: Dict, length_bars: int, instrument_name: 
                 "response_mime_type": "application/json",
                 "max_output_tokens": config.get("max_output_tokens", DEFAULT_MAX_TOKENS)
             }
-            model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+            model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
             safety_settings=[
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -11845,7 +12561,7 @@ def generate_mpe_single_track_optimization_data(config: Dict, length_bars: int, 
                 "response_mime_type": "application/json",
                 "max_output_tokens": config.get("max_output_tokens", DEFAULT_MAX_TOKENS)
             }
-            model = genai.GenerativeModel(model_name=local_model_name, generation_config=generation_config)
+            model = get_unified_model(model_name=local_model_name, generation_config=generation_config)
             safety_settings=[
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -12460,12 +13176,31 @@ def create_part_midi_from_theme(theme_data: Dict, config: Dict, output_file: str
         # Create a deep copy to avoid modifying the original data structure
         normalized_theme_data = json.loads(json.dumps(theme_data))
 
+        # AUTO-DETECT: Some runs store notes in absolute song time (e.g., Theme 2 starts at beat 32).
+        # For per-part export we must subtract the theme's start offset, otherwise everything gets clamped away.
+        effective_offset = float(time_offset_beats or 0.0)
+        try:
+            if effective_offset > 0 and isinstance(section_length_beats, (int, float)) and section_length_beats is not None:
+                max_sb = None
+                for tr in normalized_theme_data.get("tracks", []):
+                    for n in tr.get("notes", []) or []:
+                        try:
+                            sb = float(n.get("start_beat", 0.0))
+                            max_sb = sb if max_sb is None else max(max_sb, sb)
+                        except Exception:
+                            continue
+                # If all notes are already within [0, section_length], treat as clip-relative and do NOT subtract.
+                if max_sb is not None and max_sb <= float(section_length_beats) + 1e-6:
+                    effective_offset = 0.0
+        except Exception:
+            pass
+
         # Normalize all note and automation times by subtracting the offset
         for track in normalized_theme_data["tracks"]:
             # Normalize Notes and their attached automations
             if "notes" in track:
                 for note in track["notes"]:
-                    note["start_beat"] = max(0, float(note.get("start_beat", 0)) - time_offset_beats)
+                    note["start_beat"] = max(0, float(note.get("start_beat", 0)) - effective_offset)
                     # IMPORTANT: Do NOT shift note-level automation times by time_offset_beats here,
                     # because they are defined relative to the note's own start time.
                     # They will be converted to absolute times at emission.
@@ -12473,20 +13208,20 @@ def create_part_midi_from_theme(theme_data: Dict, config: Dict, output_file: str
             # Normalize Sustain Pedal Events
             if "sustain_pedal" in track:
                 for event in track["sustain_pedal"]:
-                    event["beat"] = max(0, float(event.get("beat", 0)) - time_offset_beats)
+                    event["beat"] = max(0, float(event.get("beat", 0)) - effective_offset)
             
             # Normalize TRACK-LEVEL Automations
             if "track_automations" in track:
                 if "pitch_bend" in track["track_automations"]:
                     for pb in track["track_automations"]["pitch_bend"]:
                         if pb.get("type") == "curve":
-                            pb["start_beat"] = max(0, pb.get("start_beat", 0) - time_offset_beats)
-                            pb["end_beat"] = max(0, pb.get("end_beat", 0) - time_offset_beats)
+                            pb["start_beat"] = max(0, pb.get("start_beat", 0) - effective_offset)
+                            pb["end_beat"] = max(0, pb.get("end_beat", 0) - effective_offset)
                 if "cc" in track["track_automations"]:
                     for cc in track["track_automations"]["cc"]:
                         if cc.get("type") == "curve":
-                            cc["start_beat"] = max(0, cc.get("start_beat", 0) - time_offset_beats)
-                            cc["end_beat"] = max(0, cc.get("end_beat", 0) - time_offset_beats)
+                            cc["start_beat"] = max(0, cc.get("start_beat", 0) - effective_offset)
+                            cc["end_beat"] = max(0, cc.get("end_beat", 0) - effective_offset)
 
         # Clamp to section length if provided
         if isinstance(section_length_beats, (int, float)) and section_length_beats is not None:
@@ -12845,7 +13580,9 @@ def handle_resume(resume_file_path, script_dir):
         keys_to_update = [
             "api_key", "model_name", "temperature",
             "context_window_size", "max_output_tokens",
-            "automation_settings", "use_call_and_response"
+            "automation_settings", "use_call_and_response",
+            # DeepSeek-specific settings
+            "provider", "deepseek_api_key"
         ]
 
         print(Fore.CYAN + "\nUpdating runtime settings from current 'config.yaml'..." + Style.RESET_ALL)
@@ -12869,7 +13606,8 @@ def handle_resume(resume_file_path, script_dir):
             # CRITICAL: Reset all cooldowns when resuming with potentially new keys
             _reset_all_cooldowns()
             globals()['NEXT_HOURLY_PROBE_TS'] = 0.0
-            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+            if PROVIDER == "gemini" and API_KEYS:
+                genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
             print(Fore.CYAN + f"Resume mode re-initialized with API key #{CURRENT_KEY_INDEX + 1}." + Style.RESET_ALL)
             print(Fore.GREEN + "All API key cooldowns reset for fresh start." + Style.RESET_ALL)
         else:
@@ -12883,7 +13621,8 @@ def handle_resume(resume_file_path, script_dir):
             # CRITICAL: Reset all cooldowns when resuming with potentially new keys
             _reset_all_cooldowns()
             globals()['NEXT_HOURLY_PROBE_TS'] = 0.0
-            genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+            if PROVIDER == "gemini" and API_KEYS:
+                genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
             print(Fore.GREEN + "All API key cooldowns reset for fresh start." + Style.RESET_ALL)
         else:
             print(Fore.RED + "CRITICAL: Could not initialize API keys from progress file either. Aborting.")
@@ -16093,8 +16832,11 @@ def generate_all_themes_and_save_parts(config, length, theme_definitions, script
             output_filename = generate_filename(config, script_dir, length, theme_def['label'], i, timestamp)
             current_theme_data['original_filename'] = os.path.basename(output_filename)
             
-            # Create the MIDI part file for the completed theme, passing the correct time offset
-            time_offset_for_this_theme = i * length * config["time_signature"]["beats_per_bar"]
+            # Create the MIDI part file for the completed theme
+            # Some runs store notes in absolute song time (Theme 2 starts at beat 32, etc.).
+            # We pass the theme start offset; create_part_midi_from_theme will auto-detect and only subtract
+            # when needed (so clip-relative themes remain correct).
+            time_offset_for_this_theme = i * (length * config["time_signature"]["beats_per_bar"])
             # Clamp to exact part length
             part_len_beats = length * config["time_signature"]["beats_per_bar"]
             if not create_part_midi_from_theme(current_theme_data, config, output_filename, time_offset_for_this_theme, section_length_beats=part_len_beats):
