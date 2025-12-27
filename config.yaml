@@ -47,7 +47,7 @@ deepseek_api_key: "sk-YOUR_DEEPSEEK_API_KEY"
 # For Gemini: "gemini-2.5-pro" (highest quality), "gemini-2.5-flash" (faster/cheaper), "gemini-3-flash-preview", etc.
 # For DeepSeek: Always uses "deepseek-chat" (automatically set if provider is "deepseek")
 # Note: If provider is "deepseek" and model_name contains "gemini", it will automatically switch to "deepseek-chat"
-model_name: gemini-2.5-pro
+model_name: gemini-3-flash-preview
 
 # Sampling temperature (0.0 = deterministic, 2.0 = very creative)
 # Note: Values closer to 0 tend to be more reliable/consistent but less creative/playful;
@@ -346,3 +346,4 @@ instruments:
 # 126. Helicopter
 # 127. Applause
 # 128. Gunshot
+
