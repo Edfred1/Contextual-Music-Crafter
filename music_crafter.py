@@ -1035,7 +1035,7 @@ def get_musical_parameters_with_ai(genre, inspiration, config, config_details):
 def main():
     print(Fore.MAGENTA + "="*60)
     try:
-    print(Style.BRIGHT + "        🎵 Welcome to the Contextual Music Crafter 🎵")
+        print(Style.BRIGHT + "        🎵 Welcome to the Contextual Music Crafter 🎵")
     except UnicodeEncodeError:
         print(Style.BRIGHT + "        Welcome to the Contextual Music Crafter")
     print(Fore.MAGENTA + "="*60 + Style.RESET_ALL)
