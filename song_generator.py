@@ -8827,8 +8827,61 @@ def get_scale_notes(root_note, scale_type="minor"):
     This function supports a wide variety of musical scales and modes.
     """
     try:
-        # Ensure root_note is a number, converting if necessary.
-        root_note = int(root_note) if isinstance(root_note, (str, tuple)) else root_note
+        # Ensure root_note is a MIDI note number.
+        # Accepts:
+        # - ints (e.g. 60)
+        # - numeric strings (e.g. "60")
+        # - note names (e.g. "C", "F#", "Bb", optionally with octave like "C4")
+        # - "C major" style strings (we use the first token)
+        def _root_note_to_midi(value):
+            try:
+                if isinstance(value, (int, float)):
+                    return int(value)
+                if isinstance(value, tuple) and value:
+                    value = value[0]
+                if isinstance(value, str):
+                    s = value.strip()
+                    if not s:
+                        return 60
+                    s = s.split()[0]  # e.g. "C" from "C major"
+                    # Numeric string?
+                    if s.lstrip("-").isdigit():
+                        return int(s)
+                    # Note name with optional octave, e.g. C, C#, Db, C4, F#3
+                    import re
+                    m = re.match(r"^([A-Ga-g])([#b]?)(-?\d+)?$", s)
+                    if not m:
+                        return 60
+                    name = (m.group(1).upper() + (m.group(2) or "")).replace("b", "b")
+                    octave_str = m.group(3)
+                    pc_map = {
+                        "C": 0, "B#": 0,
+                        "C#": 1, "Db": 1,
+                        "D": 2,
+                        "D#": 3, "Eb": 3,
+                        "E": 4, "Fb": 4,
+                        "E#": 5, "F": 5,
+                        "F#": 6, "Gb": 6,
+                        "G": 7,
+                        "G#": 8, "Ab": 8,
+                        "A": 9,
+                        "A#": 10, "Bb": 10,
+                        "B": 11, "Cb": 11,
+                    }
+                    pc = pc_map.get(name)
+                    if pc is None:
+                        return 60
+                    # If octave is provided, use MIDI formula: (octave + 1) * 12 + pc
+                    if octave_str is not None:
+                        midi = (int(octave_str) + 1) * 12 + pc
+                        return max(0, min(127, midi))
+                    # No octave: choose a sensible mid register around C4.
+                    return 60 + pc
+                return 60
+            except Exception:
+                return 60
+
+        root_note = _root_note_to_midi(root_note)
         
         # A dictionary mapping scale names to their interval patterns (in semitones).
         scale_intervals = {
