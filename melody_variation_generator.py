@@ -9,6 +9,7 @@ import sys
 import json
 import time
 import math
+import random
 import glob
 from typing import List, Tuple, Dict, Optional
 from colorama import Fore, Style, init
@@ -138,10 +139,8 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
     ]
     
     attempts = 0
-    quota_rotation_count = 0
     
     while attempts < max_attempts:
-        attempts += 1
         try:
             # Use song_generator's globals directly
             provider = getattr(sg, "PROVIDER", "gemini")
@@ -149,9 +148,14 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
                 print(Fore.RED + "No API keys available." + Style.RESET_ALL)
                 return "", 0
             
+            # Force Gemini to use the current key before creating the model (avoids cached client still using key #1)
+            current_idx = sg.CURRENT_KEY_INDEX
+            try:
+                genai.configure(api_key=sg.API_KEYS[current_idx])
+            except Exception:
+                pass
+            print(Style.DIM + f"  [Request with API key #{current_idx+1}]" + Style.RESET_ALL)
             model = get_unified_model(model_name=model_name, generation_config=generation_config, system_instruction=None)
-            # get_unified_model in song_generator always uses deepseek-chat (not reasoner)
-            
             response = model.generate_content(prompt_text, safety_settings=safety_settings)
             out_text = _extract_text_from_response(response)
             tokens = int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
@@ -159,6 +163,8 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
         except Exception as e:
             err = str(e).lower()
             full_error = str(e)
+            # Count only real failed requests (so key rotation doesn't burn attempts)
+            attempts += 1
             
             # Check for token limit errors specifically (input token count exceeded)
             is_token_limit_error = (
@@ -167,21 +173,15 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
                 ("quota" in err and "token" in err and "limit" in err)
             )
             
-            # Token limit errors should be handled by the caller (they need to reduce context)
-            # NOTE: Token limits are PER MINUTE (125,000 tokens/minute for free tier)
             if is_token_limit_error:
                 token_limit = _extract_token_limit_from_error(full_error)
                 if token_limit is not None:
                     print(Fore.YELLOW + f"Token limit exceeded: {token_limit:,} tokens/minute. This should be handled by the caller to reduce context." + Style.RESET_ALL)
-                    # Return a special error that the caller can catch
                     raise ValueError(f"TOKEN_LIMIT_EXCEEDED:{token_limit}")
             
             if '429' in err or 'quota' in err or 'rate limit' in err or 'resource exhausted' in err or 'exceeded' in err:
-                # Use song_generator's globals directly (same logic as song_generator)
                 qtype = _classify_quota_error(err)
                 sg.KEY_QUOTA_TYPE[sg.CURRENT_KEY_INDEX] = qtype
-                
-                # Set cooldown (this modifies song_generator's KEY_COOLDOWN_UNTIL)
                 if qtype == 'per-day':
                     _set_key_cooldown(sg.CURRENT_KEY_INDEX, PER_HOUR_COOLDOWN_SECONDS)
                 elif qtype in ('per-hour', 'rate-limit'):
@@ -189,7 +189,6 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
                 else:
                     _set_key_cooldown(sg.CURRENT_KEY_INDEX, PER_MINUTE_COOLDOWN_SECONDS)
                 
-                # Try rotation (uses song_generator's globals)
                 nxt = _next_available_key()
                 if nxt is not None:
                     sg.CURRENT_KEY_INDEX = nxt
@@ -198,9 +197,10 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
                     except Exception:
                         pass
                     print(Fore.CYAN + f"Switching to API key #{nxt+1}..." + Style.RESET_ALL)
+                    # Retry with new key without consuming another attempt
+                    attempts -= 1
                     continue
                 
-                # All keys cooling down
                 if _all_keys_cooling_down():
                     if _all_keys_daily_exhausted():
                         _schedule_hourly_probe_if_needed()
@@ -209,9 +209,18 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
                         wait_time = max(5.0, min(_seconds_until_first_available(), PER_HOUR_COOLDOWN_SECONDS))
                     print(Fore.CYAN + f"All keys cooling down. Waiting {wait_time:.1f}s..." + Style.RESET_ALL)
                     time.sleep(wait_time)
+                    # After waiting, switch to first key that is off cooldown (so we actually use keys 5/6 etc.)
+                    nxt = _next_available_key()
+                    if nxt is not None:
+                        sg.CURRENT_KEY_INDEX = nxt
+                        try:
+                            genai.configure(api_key=sg.API_KEYS[nxt])
+                        except Exception:
+                            pass
+                        print(Fore.CYAN + f"Resuming with API key #{nxt+1}..." + Style.RESET_ALL)
+                        attempts -= 1  # don't count the wait as a failed attempt
                     continue
             else:
-                # Transient error (network, 5xx, timeout, etc.)
                 wait_time = min(30, 3 * (2 ** max(0, attempts - 1)))
                 err_preview = (full_error[:120] + "…") if len(full_error) > 120 else full_error
                 print(Fore.YELLOW + f"Transient error ({err_preview}), retrying in {wait_time:.1f}s..." + Style.RESET_ALL)
@@ -220,6 +229,18 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
     
     print(Fore.RED + f"Failed after {max_attempts} attempts." + Style.RESET_ALL)
     return "", 0
+
+
+def _random_variation_hint() -> str:
+    """Return a short random creative hint so repeated runs don't produce identical note counts."""
+    hints = [
+        "**Hint:** Vary density and phrasing slightly from a strict copy.",
+        "**Hint:** Emphasize rhythmic variety within the technique.",
+        "**Hint:** Add subtle dynamic contrast where it fits.",
+        "**Hint:** Keep a clear pulse but avoid mechanical repetition.",
+        "**Hint:** Let the variation breathe; not every beat needs a note.",
+    ]
+    return random.choice(hints)
 
 
 def _summarize_artifact(path: str) -> str:
@@ -1000,6 +1021,7 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
         f"7. Use relative timing within each part (start_beat 0..{bars_per_section * beats_per_bar})\n"
         f"8. {polyphony_rule}\n"
         f"9. **Motif Coherence:** Preserve the main musical motifs while transforming them through the variation technique (inversion, octave shift, rhythm augmentation, etc.)\n\n"
+        f"{_random_variation_hint()}\n\n"
         f"**--- OUTPUT FORMAT: JSON ---**\n"
         f"Return a JSON object with this structure:\n"
         f"```json\n"
@@ -1026,12 +1048,19 @@ def generate_variation(config: Dict, original_track: Dict, variation_type: str, 
     original_context_summary = context_summary[:]
     original_original_parts_data = original_parts_data[:]
     
-    for attempt in range(MAX_RETRIES):
+    # Use at least as many attempts as we have API keys, so we can try key 1..N and still retry after cooldown
+    num_keys = len(sg.API_KEYS) if getattr(sg, "API_KEYS", None) else 6
+    variation_max_attempts = max(MAX_RETRIES, 6, num_keys)
+    base_temp = float(config.get("temperature", 1.0))
+    for attempt in range(variation_max_attempts):
         try:
-            text, tokens = _call_llm_with_retry(prompt, config, expects_json=True)
+            # Slight temperature jitter so repeated runs don't yield identical note counts (e.g. always 140 / 53)
+            config_jittered = {**config, "temperature": round(base_temp + random.uniform(-0.06, 0.08), 2)}
+            config_jittered["temperature"] = max(0.3, min(1.5, config_jittered["temperature"]))
+            text, tokens = _call_llm_with_retry(prompt, config_jittered, expects_json=True, max_attempts=variation_max_attempts)
             if not text:
-                if attempt < MAX_RETRIES - 1:
-                    print(Fore.YELLOW + f"Retry {attempt + 1}/{MAX_RETRIES}..." + Style.RESET_ALL)
+                if attempt < variation_max_attempts - 1:
+                    print(Fore.YELLOW + f"Retry {attempt + 1}/{variation_max_attempts}..." + Style.RESET_ALL)
                     time.sleep(2)
                     continue
                 return None
