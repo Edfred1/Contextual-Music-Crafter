@@ -176,8 +176,8 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
                     # Return a special error that the caller can catch
                     raise ValueError(f"TOKEN_LIMIT_EXCEEDED:{token_limit}")
             
-            if '429' in err or 'quota' in err or 'rate limit' in err:
-                # Use song_generator's globals directly
+            if '429' in err or 'quota' in err or 'rate limit' in err or 'resource exhausted' in err or 'exceeded' in err:
+                # Use song_generator's globals directly (same logic as song_generator)
                 qtype = _classify_quota_error(err)
                 sg.KEY_QUOTA_TYPE[sg.CURRENT_KEY_INDEX] = qtype
                 
@@ -193,6 +193,10 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
                 nxt = _next_available_key()
                 if nxt is not None:
                     sg.CURRENT_KEY_INDEX = nxt
+                    try:
+                        genai.configure(api_key=sg.API_KEYS[nxt])
+                    except Exception:
+                        pass
                     print(Fore.CYAN + f"Switching to API key #{nxt+1}..." + Style.RESET_ALL)
                     continue
                 
@@ -207,9 +211,10 @@ def _call_llm_with_retry(prompt_text: str, config: Dict, expects_json: bool = Fa
                     time.sleep(wait_time)
                     continue
             else:
-                # Transient error
+                # Transient error (network, 5xx, timeout, etc.)
                 wait_time = min(30, 3 * (2 ** max(0, attempts - 1)))
-                print(Fore.YELLOW + f"Transient error, retrying in {wait_time:.1f}s..." + Style.RESET_ALL)
+                err_preview = (full_error[:120] + "…") if len(full_error) > 120 else full_error
+                print(Fore.YELLOW + f"Transient error ({err_preview}), retrying in {wait_time:.1f}s..." + Style.RESET_ALL)
                 time.sleep(wait_time)
                 continue
     
