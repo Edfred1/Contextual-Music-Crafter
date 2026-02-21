@@ -244,20 +244,50 @@ def _summarize_artifact(path: str) -> str:
         return os.path.basename(path)
 
 
-def select_input_file() -> Tuple[Optional[str], bool]:
-    """Select MIDI file or Final JSON. Returns (path, is_midi)"""
+def find_analysis_artifacts(script_dir: str) -> List[str]:
+    """Find analysis_run_*.json files, newest first."""
+    pattern = os.path.join(script_dir, "analysis_run_*.json")
+    files = glob.glob(pattern)
+    return sorted(files, key=os.path.getmtime, reverse=True)
+
+
+def _summarize_analysis(path: str) -> str:
+    """Create a summary string for an Analysis JSON artifact."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("type") != "analysis":
+            return os.path.basename(path)
+        genre = data.get("genre", "Unknown")
+        bpm = data.get("bpm", "?")
+        key = data.get("key_scale", "")
+        bars = data.get("bars_per_section", "?")
+        source = data.get("source_midi", "")
+        ts = data.get("timestamp", "")
+        structure = data.get("structure", [])
+        num_parts = len(structure) if isinstance(structure, list) else 0
+        first_label = structure[0].get("label", "?") if structure and isinstance(structure[0], dict) else "?"
+        last_label = structure[-1].get("label", "?") if structure and isinstance(structure[-1], dict) else "?"
+        return f"{os.path.basename(path)} | {genre} | {bpm}bpm | {key} | {num_parts} parts ({bars} bars each) | {first_label}→{last_label} | {source} | {ts}"
+    except Exception:
+        return os.path.basename(path)
+
+
+def select_input_file() -> Tuple[Optional[str], str]:
+    """Select MIDI, Final JSON, or Analysis JSON. Returns (path, input_kind) with input_kind in ('midi', 'final_json', 'analysis_json')."""
     print(Fore.CYAN + "\n=== Input Selection ===" + Style.RESET_ALL)
     print("1. MIDI file (.mid, .midi)")
     print("2. Final JSON (final_run_*.json)")
+    print("3. Analysis JSON (analysis_run_*.json)")
     
-    choice = input(f"{Fore.GREEN}Select input type (1/2): {Style.RESET_ALL}").strip()
+    choice = input(f"{Fore.GREEN}Select input type (1/2/3): {Style.RESET_ALL}").strip()
     
     if choice == "1":
         # MIDI files
         midi_files = glob.glob("**/*.mid", recursive=True) + glob.glob("**/*.midi", recursive=True)
         if not midi_files:
             print(Fore.RED + "No MIDI files found." + Style.RESET_ALL)
-            return None, False
+            return None, ""
         print(Fore.CYAN + "\nFound MIDI files:" + Style.RESET_ALL)
         for i, f in enumerate(midi_files, 1):
             print(f"  {i}. {f}")
@@ -265,18 +295,18 @@ def select_input_file() -> Tuple[Optional[str], bool]:
         try:
             idx = int(sel) - 1
             if 0 <= idx < len(midi_files):
-                return midi_files[idx], True
+                return midi_files[idx], "midi"
         except:
             pass
         print(Fore.RED + "Invalid selection." + Style.RESET_ALL)
-        return None, False
+        return None, ""
     
     elif choice == "2":
         # Final JSON files
         json_files = find_final_artifacts(script_dir)
         if not json_files:
             print(Fore.RED + "No Final JSON files found." + Style.RESET_ALL)
-            return None, False
+            return None, ""
         print(Fore.CYAN + "\nFound Final JSON files:" + Style.RESET_ALL)
         for i, f in enumerate(json_files[:20], 1):  # Show max 20
             summary = _summarize_artifact(f)
@@ -285,13 +315,33 @@ def select_input_file() -> Tuple[Optional[str], bool]:
         try:
             idx = int(sel) - 1
             if 0 <= idx < len(json_files):
-                return json_files[idx], False
+                return json_files[idx], "final_json"
         except:
             pass
         print(Fore.RED + "Invalid selection." + Style.RESET_ALL)
-        return None, False
+        return None, ""
     
-    return None, False
+    elif choice == "3":
+        # Analysis JSON files
+        analysis_files = find_analysis_artifacts(script_dir)
+        if not analysis_files:
+            print(Fore.RED + "No Analysis JSON files found." + Style.RESET_ALL)
+            return None, ""
+        print(Fore.CYAN + "\nFound Analysis JSON files:" + Style.RESET_ALL)
+        for i, f in enumerate(analysis_files[:20], 1):
+            summary = _summarize_analysis(f)
+            print(f"  {i}. {summary}")
+        sel = input(f"{Fore.GREEN}Select file number: {Style.RESET_ALL}").strip()
+        try:
+            idx = int(sel) - 1
+            if 0 <= idx < len(analysis_files):
+                return analysis_files[idx], "analysis_json"
+        except:
+            pass
+        print(Fore.RED + "Invalid selection." + Style.RESET_ALL)
+        return None, ""
+    
+    return None, ""
 
 
 def load_midi_data(file_path: str, config: Dict) -> Tuple[Optional[Dict], Optional[List[Dict]], Optional[int]]:
@@ -353,6 +403,83 @@ def load_json_data(file_path: str) -> Tuple[Optional[Dict], Optional[List[Dict]]
     
     print(Fore.GREEN + f"Loaded: {len(themes)} parts, {length} bars per part" + Style.RESET_ALL)
     return config, themes, length
+
+
+def load_analysis_data(file_path: str, base_config: Dict) -> Tuple[Optional[Dict], Optional[List[Dict]], Optional[int]]:
+    """Load Analysis JSON and its source MIDI to get themes. Returns (config_dict, themes, bars_per_section)."""
+    print(Fore.CYAN + f"\nLoading Analysis JSON: {file_path}" + Style.RESET_ALL)
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(Fore.RED + f"Could not read Analysis JSON: {e}" + Style.RESET_ALL)
+        return None, None, None
+    
+    if data.get("type") != "analysis":
+        print(Fore.RED + "File is not an analysis artifact (type != 'analysis')." + Style.RESET_ALL)
+        return None, None, None
+    
+    source_midi = data.get("source_midi")
+    if not source_midi:
+        print(Fore.RED + "Analysis JSON has no 'source_midi'; cannot build themes." + Style.RESET_ALL)
+        return None, None, None
+    
+    midi_path = os.path.join(script_dir, source_midi)
+    if not os.path.isfile(midi_path):
+        print(Fore.RED + f"Source MIDI not found: {midi_path}" + Style.RESET_ALL)
+        return None, None, None
+    
+    if not analyze_midi_file or not split_tracks_into_sections:
+        print(Fore.RED + "MIDI analysis not available; cannot load analysis + MIDI." + Style.RESET_ALL)
+        return None, None, None
+    
+    bars_per_section = data.get("bars_per_section", 16)
+    ts = data.get("time_signature", {"beats_per_bar": 4, "beat_value": 4})
+    beats_per_bar = ts.get("beats_per_bar", 4) if isinstance(ts, dict) else 4
+    
+    tracks, bpm, total_bars, ts_out, root_note, scale_type = analyze_midi_file(midi_path)
+    if not tracks:
+        print(Fore.RED + "No tracks found in source MIDI." + Style.RESET_ALL)
+        return None, None, None
+    
+    themes = split_tracks_into_sections(tracks, bars_per_section, beats_per_bar)
+    structure = data.get("structure", [])
+    if isinstance(structure, list):
+        for i, th in enumerate(themes):
+            if i < len(structure) and isinstance(structure[i], dict):
+                if structure[i].get("label"):
+                    th["label"] = structure[i]["label"]
+                if structure[i].get("description"):
+                    th["description"] = structure[i]["description"]
+    
+    # Overlay roles (and name/program_num) from analysis "tracks" onto theme tracks
+    # Analysis JSON uses "name"; theme tracks use "instrument_name"
+    analysis_tracks = data.get("tracks") or []
+    if isinstance(analysis_tracks, list):
+        name_to_meta = {str(t.get("name", "")).strip(): t for t in analysis_tracks if t.get("name")}
+        for theme in themes:
+            for tr in theme.get("tracks", []):
+                iname = tr.get("instrument_name") or tr.get("name") or ""
+                meta = name_to_meta.get(iname) or name_to_meta.get(str(iname).strip())
+                if meta:
+                    if meta.get("role"):
+                        tr["role"] = meta["role"]
+                    if "program_num" in meta:
+                        tr["program_num"] = meta["program_num"]
+    
+    config = {
+        "genre": data.get("genre", base_config.get("genre", "Electronic")),
+        "bpm": data.get("bpm", base_config.get("bpm", 120)),
+        "time_signature": ts_out,
+        "key_scale": data.get("key_scale", f"{root_note} {scale_type}"),
+        "root_note": data.get("root_note", root_note),
+        "scale_type": data.get("scale_type", scale_type),
+        "inspiration": data.get("inspiration", base_config.get("inspiration", "")),
+    }
+    
+    print(Fore.GREEN + f"Loaded: {len(themes)} parts, {bars_per_section} bars per part (from {os.path.basename(midi_path)})" + Style.RESET_ALL)
+    return config, themes, bars_per_section
 
 
 def analyze_part_content(themes: List[Dict], track_name: str, bars_per_section: int, beats_per_bar: int) -> List[Dict]:
@@ -1215,13 +1342,15 @@ def main():
     print(Fore.CYAN + f"API keys synchronized: {len(API_KEYS)} key(s) available." + Style.RESET_ALL)
     
     # Select input
-    input_path, is_midi = select_input_file()
-    if not input_path:
+    input_path, input_kind = select_input_file()
+    if not input_path or not input_kind:
         return
     
     # Load data
-    if is_midi:
+    if input_kind == "midi":
         config_data, themes, bars_per_section = load_midi_data(input_path, config)
+    elif input_kind == "analysis_json":
+        config_data, themes, bars_per_section = load_analysis_data(input_path, config)
     else:
         config_data, themes, bars_per_section = load_json_data(input_path)
     
